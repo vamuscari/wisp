@@ -1,0 +1,35 @@
+# General
+.DS_Store
+*.log
+*.tmp
+*.swp
+*.swo
+*.bak
+*.old
+.env
+.env.*
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# Build artifacts
+dist/
+build/
+coverage/
+
+# Editors/IDEs
+.idea/
+.vscode/
+
