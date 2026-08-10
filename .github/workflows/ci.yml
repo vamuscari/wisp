@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lua (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: step-security/msvc-dev-cmd@v1
+      - uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: "5.4.8"
+      - run: lua tests/run.lua
+
+  format:
+    name: StyLua
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: JohnnyMorganz/stylua-action@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version: "2.5.2"
+          args: --check .
+
+  wezterm:
+    name: Minimum WezTerm
+    runs-on: ubuntu-latest
+    env:
+      WEZTERM_ASSET: WezTerm-20240127-113634-bbcac864-Ubuntu20.04.AppImage
+      WEZTERM_VERSION: 20240127-113634-bbcac864
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download WezTerm
+        run: |
+          curl --fail --location --retry 3 --remote-name \
+            "https://github.com/wezterm/wezterm/releases/download/${WEZTERM_VERSION}/${WEZTERM_ASSET}"
+          curl --fail --location --retry 3 --remote-name \
+            "https://github.com/wezterm/wezterm/releases/download/${WEZTERM_VERSION}/${WEZTERM_ASSET}.sha256"
+          sha256sum --check "${WEZTERM_ASSET}.sha256"
+          chmod +x "${WEZTERM_ASSET}"
+      - name: Parse plugin configuration
+        run: |
+          APPIMAGE_EXTRACT_AND_RUN=1 \
+            "./${WEZTERM_ASSET}" --config-file "$PWD/tests/wezterm_config.lua" ls-fonts --text test >/dev/null
