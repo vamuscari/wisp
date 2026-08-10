@@ -15,6 +15,7 @@ function helper.fake_wezterm(overrides)
   overrides = overrides or {}
   local logs = {}
   local wezterm = {
+    executable_dir = overrides.executable_dir or "/Applications/WezTerm.app/Contents/MacOS",
     home_dir = overrides.home_dir or "/Users/test",
     logs = logs,
     action = {},
@@ -29,6 +30,8 @@ function helper.fake_wezterm(overrides)
     read_dir = overrides.read_dir or function()
       return {}
     end,
+    time = {},
+    target_triple = overrides.target_triple or "aarch64-apple-darwin",
   }
 
   local function action(name)
@@ -41,6 +44,7 @@ function helper.fake_wezterm(overrides)
   wezterm.action.SwitchToWorkspace = action "SwitchToWorkspace"
   wezterm.action.SpawnCommandInNewTab = action "SpawnCommandInNewTab"
   wezterm.action.SplitPane = action "SplitPane"
+  wezterm.action.CloseCurrentTab = action "CloseCurrentTab"
 
   function wezterm.action_callback(callback)
     return { kind = "Callback", callback = callback }
@@ -58,6 +62,23 @@ function helper.fake_wezterm(overrides)
     table.insert(logs, { level = "info", message = message })
   end
 
+  wezterm.run_child_process = overrides.run_child_process
+    or function()
+      return false, "", "run_child_process is not configured in this test"
+    end
+
+  wezterm.json_encode = overrides.json_encode or function()
+    return "{}"
+  end
+
+  wezterm.json_parse = overrides.json_parse or function()
+    error "json_parse is not configured in this test"
+  end
+
+  wezterm.time.call_after = overrides.call_after or function(_, callback)
+    callback()
+  end
+
   return wezterm
 end
 
@@ -72,7 +93,7 @@ function helper.load_plugin(wezterm)
   return require "plugin"
 end
 
-function helper.fake_window(workspace)
+function helper.fake_window(workspace, mux_window)
   local performed = {}
   local window = { performed = performed }
 
@@ -82,6 +103,10 @@ function helper.fake_window(workspace)
 
   function window:active_workspace()
     return workspace or "default"
+  end
+
+  function window:mux_window()
+    return mux_window
   end
 
   return window
@@ -102,7 +127,7 @@ function helper.fake_pane(options)
   return pane
 end
 
-function helper.fake_mux_window(workspace)
+function helper.fake_mux_window(workspace, on_spawn)
   local spawned = {}
   local window = { spawned = spawned }
 
@@ -110,8 +135,27 @@ function helper.fake_mux_window(workspace)
     return workspace
   end
 
+  function window:tabs_with_info()
+    return {}
+  end
+
   function window:spawn_tab(command)
     table.insert(spawned, command)
+    local tab = { activated = false }
+    local pane = { picker = true }
+    function tab:activate()
+      self.activated = true
+    end
+    function tab:tab_id()
+      return #spawned
+    end
+    function pane:pane_id()
+      return #spawned
+    end
+    if on_spawn then
+      on_spawn(command, tab, pane)
+    end
+    return tab, pane, window
   end
 
   return window

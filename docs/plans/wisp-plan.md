@@ -1,5 +1,8 @@
 # Wisp Implementation Plan
 
+> Historical plan for the original embedded WezTerm implementation. The
+> standalone architecture in `standalone-architecture.md` supersedes it.
+
 ## Goal
 
 Extract the reusable project sessionizer from Artifacts into a public WezTerm

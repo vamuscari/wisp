@@ -2,44 +2,42 @@ package.path = "./?.lua;./?/init.lua;" .. package.path
 
 local helper = require "tests.test_helper"
 
-helper.test("refresh silently replaces and prewarms the discovery cache", function()
-  helper.with_fake_time(100, function()
-    local calls = {}
-    local entries = {
-      ["/Users/test/Repos"] = { "/Users/test/Repos/api" },
-      ["/Users/test/Repos/api"] = { "/Users/test/Repos/api/src" },
-      ["/Users/test/Artifacts"] = {},
-    }
-    local wezterm = helper.fake_wezterm {
-      read_dir = function(path)
-        calls[path] = (calls[path] or 0) + 1
-        if not entries[path] then
-          error("not a directory: " .. path)
-        end
-        return entries[path]
-      end,
-    }
-    local wisp = helper.load_plugin(wezterm)
-    wisp.apply_to_config({}, {
-      roots = { "~/Repos" },
-      projects = { { group = "Home", name = "Artifacts", path = "~/Artifacts" } },
-      cache_ttl_seconds = 60,
-    })
+helper.test("refresh delegates cache invalidation to the wisp executable", function()
+  local calls = {}
+  local wezterm = helper.fake_wezterm {
+    run_child_process = function(args)
+      table.insert(calls, args)
+      return true, "refreshed 2 projects\n", ""
+    end,
+  }
+  local wisp = helper.load_plugin(wezterm)
+  wisp.apply_to_config({}, {
+    config_file = "/Users/test/.config/wisp/config.toml",
+    wisp_path = "/opt/bin/wisp",
+  })
+  local window = helper.fake_window()
 
-    local window = helper.fake_window()
-    local pane = helper.fake_pane()
-    helper.run_callback(wisp.project_picker_action(), window, pane)
-    helper.assert_equal(calls["/Users/test/Repos"], 1, "initial root read")
+  helper.run_callback(wisp.refresh_cache_action(), window, helper.fake_pane())
 
-    local action_count = #window.performed
-    helper.run_callback(wisp.refresh_cache_action(), window, pane)
-    helper.assert_equal(#window.performed, action_count, "refresh UI action count")
-    helper.assert_equal(calls["/Users/test/Repos"], 2, "refreshed root read")
-    helper.assert_equal(calls["/Users/test/Repos/api"], 2, "refreshed project read")
-    helper.assert_equal(calls["/Users/test/Artifacts"], 2, "refreshed fixed project read")
-    helper.assert_equal(calls["/Users/test/Repos/api/src"], nil, "deep directory remains lazy")
+  helper.assert_table_equal(
+    calls[1],
+    { "/opt/bin/wisp", "--config", "/Users/test/.config/wisp/config.toml", "refresh" },
+    "refresh command"
+  )
+  helper.assert_equal(#window.performed, 0, "refresh action count")
+end)
 
-    helper.run_callback(wisp.project_picker_action(), window, pane)
-    helper.assert_equal(calls["/Users/test/Repos"], 2, "picker reuses refreshed cache")
-  end)
+helper.test("refresh logs child process failures", function()
+  local wezterm = helper.fake_wezterm {
+    run_child_process = function()
+      return false, "", "wisp failed"
+    end,
+  }
+  local wisp = helper.load_plugin(wezterm)
+  wisp.apply_to_config({}, {})
+
+  helper.run_callback(wisp.refresh_cache_action(), helper.fake_window(), helper.fake_pane())
+
+  helper.assert_equal(wezterm.logs[#wezterm.logs].level, "error", "refresh failure level")
+  assert(wezterm.logs[#wezterm.logs].message:match "wisp failed", "refresh failure message")
 end)

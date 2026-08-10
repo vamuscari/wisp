@@ -28,8 +28,13 @@ venv/
 dist/
 build/
 coverage/
+/target/
 
 # Editors/IDEs
 .idea/
 .vscode/
 
+# Local tooling configuration
+/opencode.json
+/opencode.jsonc
+/.opencode/

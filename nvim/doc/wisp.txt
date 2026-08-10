@@ -1,0 +1,51 @@
+*wisp.txt*                           Project and file picker
+
+=============================================================================
+CONTENTS                                                        *wisp-contents*
+
+1. Setup ........................................................ *wisp-setup*
+2. Commands ................................................... *wisp-commands*
+3. Options ..................................................... *wisp-options*
+
+=============================================================================
+1. Setup                                                         *wisp-setup*
+
+Add only the repository's `nvim` directory to 'runtimepath', then call:
+>
+  require("wisp").setup()
+<
+The `wisp` executable must be available on $PATH. Wisp opens in a floating
+terminal. A project selection sets the originating tab's local working
+directory. A file selection also edits that file in the originating tab.
+
+The tab-local variables `wisp_project_dir` and `wisp_project_name` contain the
+selected project metadata. They are initially seeded from $WISP_PROJECT_DIR
+and $WISP_PROJECT_NAME when those variables are present.
+
+=============================================================================
+2. Commands                                                    *wisp-commands*
+
+:Wisp                   Open the picker. The command name is configurable.
+
+=============================================================================
+3. Options                                                      *wisp-options*
+
+Pass options to setup():
+>
+  require("wisp").setup({
+    keymap = "<leader>p",
+    config_file = "/path/to/wisp/config.toml",
+    width = 0.8,
+    height = 0.7,
+    border = "rounded",
+  })
+<
+`wisp_path`         Executable name or absolute path. Default: "wisp".
+`config_file`       Optional shared TOML path.
+`command`           User command name. Default: "Wisp".
+`keymap`            Optional normal-mode mapping.
+`keymap_options`    Options passed to vim.keymap.set().
+`width`, `height`   Fractions up to 1, or absolute cell counts.
+`border`            Border accepted by nvim_open_win().
+
+vim:tw=78:ts=8:noet:ft=help:norl:

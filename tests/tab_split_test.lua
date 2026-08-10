@@ -2,19 +2,30 @@ package.path = "./?.lua;./?/init.lua;" .. package.path
 
 local helper = require "tests.test_helper"
 
-helper.test("project-aware tabs and splits preserve cwd and metadata", function()
+local project = {
+  id = "api",
+  path = "/Users/test/Repos/api",
+  group = "Repos",
+  name = "api",
+  display_name = "api",
+}
+
+local function configured(projects)
   local wezterm = helper.fake_wezterm {
-    read_dir = function(path)
-      if path == "/Users/test/Repos/api" then
-        return {}
-      end
-      error "not a directory"
+    run_child_process = function()
+      return true, "PROJECTS", ""
+    end,
+    json_parse = function()
+      return projects
     end,
   }
   local wisp = helper.load_plugin(wezterm)
-  wisp.apply_to_config({}, {
-    projects = { { group = "Repos", name = "api", path = "/Users/test/Repos/api" } },
-  })
+  wisp.apply_to_config({}, {})
+  return wisp
+end
+
+helper.test("project-aware tabs and splits preserve cwd and metadata", function()
+  local wisp = configured { project }
   local window = helper.fake_window "wisp:Repos/api"
   local pane = helper.fake_pane {
     cwd = { scheme = "file", file_path = "/Users/test/Repos/api/src" },
@@ -34,27 +45,10 @@ helper.test("project-aware tabs and splits preserve cwd and metadata", function(
   helper.assert_equal(split.value.direction, "Right", "split direction")
   helper.assert_equal(split.value.top_level, true, "split top-level flag")
   helper.assert_equal(split.value.command.cwd, "/Users/test/Repos/api/src", "split cwd")
-  helper.assert_equal(split.value.command.domain.DomainName, "local", "split domain")
-  helper.assert_equal(
-    split.value.command.set_environment_variables.WISP_PROJECT_DIR,
-    "/Users/test/Repos/api",
-    "split project directory"
-  )
 end)
 
 helper.test("project-aware spawns ignore cwd from a different pane domain", function()
-  local wezterm = helper.fake_wezterm {
-    read_dir = function(path)
-      if path == "/Users/test/Repos/api" then
-        return {}
-      end
-      error "not a directory"
-    end,
-  }
-  local wisp = helper.load_plugin(wezterm)
-  wisp.apply_to_config({}, {
-    projects = { { group = "Repos", name = "api", path = "/Users/test/Repos/api" } },
-  })
+  local wisp = configured { project }
   local window = helper.fake_window "wisp:Repos/api"
   local pane = helper.fake_pane {
     cwd = { scheme = "file", file_path = "/remote/api/src", host = "remote.example" },
@@ -69,9 +63,7 @@ helper.test("project-aware spawns ignore cwd from a different pane domain", func
 end)
 
 helper.test("unknown workspaces retain the current pane domain without non-file cwd", function()
-  local wezterm = helper.fake_wezterm()
-  local wisp = helper.load_plugin(wezterm)
-  wisp.apply_to_config({}, { projects = {} })
+  local wisp = configured {}
   local window = helper.fake_window "scratch"
   local pane = helper.fake_pane {
     cwd = { scheme = "ssh", file_path = "/remote/path" },

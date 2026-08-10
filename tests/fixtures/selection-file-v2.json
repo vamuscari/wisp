@@ -1,0 +1,16 @@
+{
+  "protocol_version": 2,
+  "status": "selected",
+  "selection": {
+    "kind": "file",
+    "project": {
+      "id": "api",
+      "path": "/home/user/Repos/api",
+      "group": "Repos",
+      "name": "api",
+      "display_name": "API"
+    },
+    "path": "/home/user/Repos/api/src/main.rs",
+    "opener": ["nvim", "/home/user/Repos/api/src/main.rs"]
+  }
+}

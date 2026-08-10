@@ -8,7 +8,46 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  rust-test:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  rust-quality:
+    name: Rustfmt and Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  rust-msrv:
+    name: Rust 1.85 MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --workspace --locked
+
+  lua-test:
     name: Lua (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -21,6 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: step-security/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
       - uses: leafo/gh-actions-lua@v13
         with:
           luaVersion: "5.4.8"
@@ -57,3 +97,19 @@ jobs:
         run: |
           APPIMAGE_EXTRACT_AND_RUN=1 \
             "./${WEZTERM_ASSET}" --config-file "$PWD/tests/wezterm_config.lua" ls-fonts --text test >/dev/null
+
+  neovim:
+    name: Minimum Neovim
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          version: v0.10.4
+          neovim: true
+      - name: Load adapter
+        run: >-
+          nvim --headless -u NONE
+          --cmd "set runtimepath+=$PWD/nvim"
+          -c "lua require('wisp').setup()"
+          -c "qa"

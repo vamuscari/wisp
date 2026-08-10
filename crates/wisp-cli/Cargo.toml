@@ -1,0 +1,24 @@
+[package]
+name = "wisp-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Standalone project and file picker"
+
+[[bin]]
+name = "wisp"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+directories.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+wisp-core = { path = "../wisp-core" }
+wisp-tui = { path = "../wisp-tui" }
+
+[dev-dependencies]
+serde_json.workspace = true

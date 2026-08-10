@@ -7,19 +7,12 @@ local wisp = dofile(root .. "/plugin/init.lua")
 
 wisp.apply_to_config(config, {
   picker_binding = { key = "f", mods = "CTRL|SHIFT" },
-  projects = {
-    {
-      group = "Home",
-      id = "home",
-      name = "Home",
-      path = wezterm.home_dir,
-    },
-  },
-  open_file = { "nvim" },
+  spawn_domain = { DomainName = "local" },
 })
 
 table.insert(config.keys, { key = "r", mods = "CTRL|SHIFT", action = wisp.refresh_cache_action() })
 table.insert(config.keys, { key = "h", mods = "CTRL|SHIFT", action = wisp.switch_to_project_action "home" })
+table.insert(config.keys, { key = "w", mods = "CTRL|SHIFT", action = wisp.window_picker_action() })
 table.insert(config.keys, { key = "t", mods = "CTRL|SHIFT", action = wisp.new_tab_action() })
 table.insert(config.keys, { key = "s", mods = "CTRL|SHIFT", action = wisp.split_pane_action("Right", false) })
 

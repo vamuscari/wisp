@@ -1,0 +1,17 @@
+[package]
+name = "wisp-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ratatui project and file picker for Wisp"
+
+[dependencies]
+crossterm = "0.28"
+ratatui = "0.29"
+thiserror.workspace = true
+wisp-core = { path = "../wisp-core" }
+
+[dev-dependencies]
+serde_json.workspace = true
