@@ -136,10 +136,22 @@ end
 
 local function load_adapter(vim)
   _G.vim = vim
+  return assert(loadfile "nvim/lua/wisp/init.lua")("/opt/bin/wisp", "wisp-deployment-v1")
+end
+
+helper.test("Neovim adapter rejects ordinary runtimepath loading", function()
+  local vim = fake_vim { protocol_version = 2, status = "cancelled" }
+  _G.vim = vim
   package.loaded.wisp = nil
   package.loaded["wisp.init"] = nil
-  return require "wisp"
-end
+  local original_path = package.path
+  package.path = "./nvim/lua/?.lua;./nvim/lua/?/init.lua;" .. package.path
+  local ok, err = pcall(require, "wisp")
+  package.path = original_path
+
+  assert(not ok, "checkout runtimepath loading should fail")
+  assert(tostring(err):match "deployed runtime", "deployment error should be actionable")
+end)
 
 helper.test("Neovim setup registers a command, optional mapping, and inherited metadata", function()
   local vim, state = fake_vim { protocol_version = 2, status = "cancelled" }
@@ -172,7 +184,6 @@ helper.test("Neovim picker applies a file result to the originating tab", functi
     config_file = "/Users/test/.config/wisp/config.toml",
     height = 0.5,
     width = 0.8,
-    wisp_path = "/opt/bin/wisp",
   }
 
   wisp.open()
@@ -205,6 +216,7 @@ helper.test("Neovim cancellation closes the float without changing the tab", fun
 
   wisp.open()
 
+  helper.assert_equal(#state.keymaps, 0, "default keymaps")
   helper.assert_equal(#state.commands, 0, "cancel commands")
   helper.assert_equal(#state.tab_calls, 0, "cancel tab calls")
   helper.assert_equal(state.closed_window.window, 13, "cancel float closed")
@@ -219,4 +231,102 @@ helper.test("Neovim rejects unsupported result protocols", function()
 
   helper.assert_equal(state.notifications[#state.notifications].level, vim.log.levels.ERROR, "protocol notification")
   assert(state.notifications[#state.notifications].message:match "protocol", "protocol notification message")
+end)
+
+helper.test("Neovim requires every project protocol field", function()
+  local vim, state = fake_vim {
+    protocol_version = 2,
+    status = "selected",
+    selection = {
+      kind = "file",
+      project = { path = project.path, name = project.name },
+      path = "/Users/test/Repos/api with spaces/README.md",
+    },
+  }
+  local wisp = load_adapter(vim)
+  wisp.setup()
+
+  wisp.open()
+
+  helper.assert_equal(#state.tab_calls, 0, "incomplete project tab calls")
+  assert(state.notifications[#state.notifications].message:match "valid selection", "incomplete project message")
+end)
+
+helper.test("Neovim rejects unknown project protocol fields", function()
+  local project_with_extra = {
+    id = project.id,
+    path = project.path,
+    group = project.group,
+    name = project.name,
+    display_name = project.display_name,
+    future_field = true,
+  }
+  local vim, state = fake_vim {
+    protocol_version = 2,
+    status = "selected",
+    selection = { kind = "project", project = project_with_extra },
+  }
+  local wisp = load_adapter(vim)
+  wisp.setup()
+
+  wisp.open()
+
+  helper.assert_equal(#state.tab_calls, 0, "unknown project field tab calls")
+  assert(state.notifications[#state.notifications].message:match "valid selection", "unknown project field message")
+end)
+
+helper.test("Neovim rejects unknown result envelope fields", function()
+  local vim, state = fake_vim { protocol_version = 2, status = "cancelled", future_field = true }
+  local wisp = load_adapter(vim)
+  wisp.setup()
+
+  wisp.open()
+
+  helper.assert_equal(#state.notifications, 1, "unknown envelope notification count")
+  assert(state.notifications[1].message:match "valid result", "unknown envelope message")
+end)
+
+helper.test("Neovim rejects fields inconsistent with result status", function()
+  local vim, state = fake_vim {
+    protocol_version = 2,
+    status = "cancelled",
+    selection = { kind = "project", project = project },
+  }
+  local wisp = load_adapter(vim)
+  wisp.setup()
+
+  wisp.open()
+
+  helper.assert_equal(#state.notifications, 1, "inconsistent result notification count")
+  assert(state.notifications[1].message:match "valid result", "inconsistent result message")
+end)
+
+helper.test("Neovim rejects unknown selection fields", function()
+  local vim, state = fake_vim {
+    protocol_version = 2,
+    status = "selected",
+    selection = { kind = "project", project = project, future_field = true },
+  }
+  local wisp = load_adapter(vim)
+  wisp.setup()
+
+  wisp.open()
+
+  helper.assert_equal(#state.tab_calls, 0, "unknown selection field tab calls")
+  assert(state.notifications[#state.notifications].message:match "valid selection", "unknown selection field message")
+end)
+
+helper.test("Neovim rejects malformed opener fields", function()
+  local vim, state = fake_vim {
+    protocol_version = 2,
+    status = "selected",
+    selection = { kind = "project", project = project, opener = "nvim" },
+  }
+  local wisp = load_adapter(vim)
+  wisp.setup()
+
+  wisp.open()
+
+  helper.assert_equal(#state.tab_calls, 0, "malformed opener tab calls")
+  assert(state.notifications[#state.notifications].message:match "valid selection", "malformed opener message")
 end)

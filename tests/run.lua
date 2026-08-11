@@ -1,5 +1,5 @@
 local tests = {
-  "tests/plugin_api_test.lua",
+  "tests/wezterm_api_test.lua",
   "tests/options_test.lua",
   "tests/refresh_test.lua",
   "tests/process_adapter_test.lua",

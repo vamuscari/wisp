@@ -4,7 +4,7 @@ local helper = require "tests.test_helper"
 
 helper.test("apply_to_config installs no default binding", function()
   local wezterm = helper.fake_wezterm()
-  local wisp = helper.load_plugin(wezterm)
+  local wisp = helper.load_wezterm_adapter(wezterm)
   local existing = { key = "x", mods = "CTRL", action = "existing" }
   local config = { keys = { existing } }
 
@@ -16,7 +16,7 @@ end)
 
 helper.test("apply_to_config appends a configured picker binding", function()
   local wezterm = helper.fake_wezterm()
-  local wisp = helper.load_plugin(wezterm)
+  local wisp = helper.load_wezterm_adapter(wezterm)
   local existing = { key = "x", mods = "CTRL", action = "existing" }
   local config = { keys = { existing } }
 

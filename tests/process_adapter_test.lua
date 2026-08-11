@@ -30,20 +30,24 @@ end
 local function fixture(result, mux_overrides)
   mux_overrides = mux_overrides or {}
   local encoded_annotations
+  local encoded_result
   local child_calls = {}
   local picker_tab
   local picker_pane
-  local picker_mux = helper.fake_mux_window("scratch", function(command, tab, pane)
-    picker_tab = tab
-    picker_pane = pane
-    if mux_overrides.skip_result then
-      return
+  local picker_mux = helper.fake_mux_window(
+    mux_overrides.window_workspace or "wisp:Repos/api",
+    function(command, tab, pane)
+      picker_tab = tab
+      picker_pane = pane
+      if mux_overrides.skip_result then
+        return
+      end
+      local result_path = assert(argument_after(command.args, "--result-file"))
+      local file = assert(io.open(result_path, "wb"))
+      file:write "RESULT"
+      file:close()
     end
-    local result_path = assert(argument_after(command.args, "--result-file"))
-    local file = assert(io.open(result_path, "wb"))
-    file:write "RESULT"
-    file:close()
-  end)
+  )
   local wezterm = helper.fake_wezterm {
     mux = {
       get_workspace_names = mux_overrides.get_workspace_names or function()
@@ -67,12 +71,16 @@ local function fixture(result, mux_overrides)
       return true, "PROJECTS", ""
     end,
     json_encode = function(value)
+      if value.status then
+        encoded_result = value
+        return "RESULT_JSON"
+      end
       encoded_annotations = value
       return "ANNOTATIONS"
     end,
     json_parse = function(value)
       if value == "PROJECTS" then
-        return projects
+        return mux_overrides.projects_result or { protocol_version = 2, projects = projects }
       end
       if value == "RESULT" then
         return result
@@ -80,13 +88,12 @@ local function fixture(result, mux_overrides)
       error("unexpected JSON fixture " .. value)
     end,
   }
-  local wisp = helper.load_plugin(wezterm)
+  local wisp = helper.load_wezterm_adapter(wezterm)
   wisp.apply_to_config({}, {
     config_file = "/Users/test/.config/wisp/config.toml",
     picker_domain = { DomainName = "unix" },
-    wisp_path = "/opt/bin/wisp",
   })
-  local window = helper.fake_window("wisp:Repos/api", picker_mux)
+  local window = helper.fake_window(mux_overrides.active_workspace or "wisp:Repos/api", picker_mux)
   local pane = helper.fake_pane()
   return {
     annotations = function()
@@ -101,11 +108,50 @@ local function fixture(result, mux_overrides)
     picker_tab = function()
       return picker_tab
     end,
+    encoded_result = function()
+      return encoded_result
+    end,
     wezterm = wezterm,
     window = window,
     wisp = wisp,
   }
 end
+
+helper.test("project query rejects unsupported versions before reading the payload", function()
+  local test = fixture({ protocol_version = 2, status = "cancelled" }, {
+    projects_result = { protocol_version = 1, projects = "future schema" },
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(#test.picker_mux.spawned, 0, "picker spawn count")
+  helper.assert_equal(test.wezterm.logs[#test.wezterm.logs].level, "error", "project protocol log")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "protocol", "project protocol message")
+  helper.assert_equal(test.window.toasts[1].title, "Wisp", "project protocol toast title")
+  assert(test.window.toasts[1].message:match "protocol", "project protocol toast message")
+end)
+
+helper.test("project query rejects unknown envelope fields", function()
+  local test = fixture({ protocol_version = 2, status = "cancelled" }, {
+    projects_result = { protocol_version = 2, projects = projects, future_field = true },
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(#test.picker_mux.spawned, 0, "unknown project envelope spawn count")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "invalid", "unknown project envelope message")
+end)
+
+helper.test("project query requires a JSON array", function()
+  local test = fixture({ protocol_version = 2, status = "cancelled" }, {
+    projects_result = { protocol_version = 2, projects = { api = projects[1] } },
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(#test.picker_mux.spawned, 0, "object project list spawn count")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "project list", "object project list message")
+end)
 
 helper.test("project picker launches wisp with a v2 host context", function()
   local test = fixture {
@@ -139,6 +185,17 @@ helper.test("project picker launches wisp with a v2 host context", function()
   helper.assert_equal(test.window.performed[2].action.kind, "SwitchToWorkspace", "project action")
   helper.assert_equal(test.window.performed[2].pane, test.pane, "project original pane")
   helper.assert_equal(test.window.performed[2].action.value.name, "wisp:Repos/api", "project workspace")
+end)
+
+helper.test("host context uses the displayed mux window workspace when client state is stale", function()
+  local test = fixture({ protocol_version = 2, status = "cancelled" }, {
+    active_workspace = "default",
+    window_workspace = "wisp:Repos/api",
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_table_equal(test.annotations().projects.api.labels, { "current", "open" }, "current labels")
 end)
 
 helper.test("host context describes the selected project's WezTerm tabs", function()
@@ -223,7 +280,75 @@ helper.test("cancelled picker closes its temporary tab without a host action", f
   helper.assert_equal(test.window.performed[1].action.kind, "CloseCurrentTab", "cancel closes picker")
 end)
 
-helper.test("selected file uses its resolved opener in an existing workspace", function()
+helper.test("result projects require every protocol v2 field", function()
+  local test = fixture {
+    protocol_version = 2,
+    status = "selected",
+    selection = {
+      kind = "project",
+      project = {
+        id = "api",
+        path = "/Users/test/Repos/api",
+        group = "Repos",
+        name = "api",
+      },
+    },
+  }
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(#test.window.performed, 1, "invalid project action count")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "invalid project", "invalid project message")
+end)
+
+helper.test("result projects reject unknown protocol fields", function()
+  local project = {
+    id = "api",
+    path = "/Users/test/Repos/api",
+    group = "Repos",
+    name = "api",
+    display_name = "API",
+    future_field = true,
+  }
+  local test = fixture {
+    protocol_version = 2,
+    status = "selected",
+    selection = { kind = "project", project = project },
+  }
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(#test.window.performed, 1, "unknown project field action count")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "invalid project", "unknown project field message")
+end)
+
+helper.test("selections reject unknown protocol fields", function()
+  local test = fixture {
+    protocol_version = 2,
+    status = "selected",
+    selection = { kind = "project", project = projects[1], future_field = true },
+  }
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(#test.window.performed, 1, "unknown selection field action count")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "valid selection", "unknown selection field message")
+end)
+
+helper.test("selections reject malformed opener fields", function()
+  local test = fixture {
+    protocol_version = 2,
+    status = "selected",
+    selection = { kind = "project", project = projects[1], opener = "nvim" },
+  }
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(#test.window.performed, 1, "malformed opener action count")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "valid selection", "malformed opener message")
+end)
+
+helper.test("selected file delegates its resolved opener to wisp open in an existing workspace", function()
   local project_window = helper.fake_mux_window "wisp:Repos/api"
   local test = fixture({
     protocol_version = 2,
@@ -245,14 +370,15 @@ helper.test("selected file uses its resolved opener in an existing workspace", f
   helper.assert_equal(#project_window.spawned, 1, "file tab count")
   helper.assert_table_equal(
     project_window.spawned[1].args,
-    { "nvim", "/Users/test/Repos/api/README.md" },
-    "resolved file opener"
+    { "/opt/bin/wisp", "--config", "/Users/test/.config/wisp/config.toml", "open", "RESULT_JSON" },
+    "wisp open command"
   )
+  helper.assert_equal(test.encoded_result().selection.opener[1], "nvim", "encoded resolved opener")
   helper.assert_equal(project_window.spawned[1].cwd, "/Users/test/Repos/api", "file cwd")
   helper.assert_equal(test.window.performed[2].action.value.name, "wisp:Repos/api", "file workspace switch")
 end)
 
-helper.test("selected file becomes the initial process in a new workspace", function()
+helper.test("wisp open becomes the initial process for a selected file in a new workspace", function()
   local test = fixture({
     protocol_version = 2,
     status = "selected",
@@ -273,7 +399,14 @@ helper.test("selected file becomes the initial process in a new workspace", func
   local switch = test.window.performed[2].action
   helper.assert_equal(switch.kind, "SwitchToWorkspace", "new file workspace action")
   helper.assert_equal(switch.value.name, "wisp:Home/Artifacts", "new file workspace")
-  helper.assert_table_equal(switch.value.spawn.args, { "nvim", "/Users/test/Artifacts/README.md" }, "new file opener")
+  helper.assert_table_equal(switch.value.spawn.args, {
+    "/opt/bin/wisp",
+    "--config",
+    "/Users/test/.config/wisp/config.toml",
+    "open",
+    "RESULT_JSON",
+  }, "new file wisp open command")
+  helper.assert_equal(test.encoded_result().selection.opener[1], "nvim", "new file encoded opener")
   helper.assert_equal(switch.value.spawn.cwd, "/Users/test/Artifacts", "new file cwd")
 end)
 
@@ -462,6 +595,28 @@ helper.test("invalid result protocol closes the picker and reports an error", fu
   helper.assert_equal(#test.window.performed, 1, "invalid result action count")
   helper.assert_equal(test.wezterm.logs[#test.wezterm.logs].level, "error", "invalid result log")
   assert(test.wezterm.logs[#test.wezterm.logs].message:match "protocol", "protocol error message")
+end)
+
+helper.test("result envelopes reject unknown protocol fields", function()
+  local test = fixture { protocol_version = 2, status = "cancelled", future_field = true }
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(#test.wezterm.logs, 1, "unknown result field log count")
+  assert(test.wezterm.logs[1].message:match "valid result", "unknown result field message")
+end)
+
+helper.test("result envelopes reject fields that do not match their status", function()
+  local test = fixture {
+    protocol_version = 2,
+    status = "cancelled",
+    selection = { kind = "project", project = projects[1] },
+  }
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(#test.wezterm.logs, 1, "inconsistent result log count")
+  assert(test.wezterm.logs[1].message:match "valid result", "inconsistent result message")
 end)
 
 helper.test("picker pane disappearance fails immediately without waiting for timeout", function()

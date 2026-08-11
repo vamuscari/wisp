@@ -3,7 +3,7 @@ local config = wezterm.config_builder()
 config.disable_default_key_bindings = true
 
 local root = assert(wezterm.config_dir:match "^(.*)[/\\]tests$", "could not resolve the Wisp test root")
-local wisp = dofile(root .. "/plugin/init.lua")
+local wisp = assert(loadfile(root .. "/wezterm/init.lua"))("wisp", "wisp-deployment-v1")
 
 wisp.apply_to_config(config, {
   picker_binding = { key = "f", mods = "CTRL|SHIFT" },

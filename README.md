@@ -19,25 +19,45 @@ Project discovery is local to the machine running `wisp`. A configured named
 WezTerm domain may point at a same-host mux server, but remote project paths are
 not supported.
 
-## Install The Binary
+## Install
 
 Download an archive for Linux, macOS, or Windows from
-[GitHub Releases](https://github.com/vamuscari/wisp/releases), then place
-`wisp` (or `wisp.exe`) on `PATH`.
+[GitHub Releases](https://github.com/vamuscari/wisp/releases), place `wisp`
+(or `wisp.exe`) on `PATH`, then deploy the executable and both host adapters as
+one versioned bundle:
+
+```sh
+wisp deploy
+```
 
 To install from source with Rust 1.85 or newer:
 
 ```sh
 cargo install --git https://github.com/vamuscari/wisp --locked wisp-cli
+wisp deploy
 ```
 
 From a local checkout:
 
 ```sh
-cargo install --path crates/wisp-cli --locked
+cargo run --release --locked -p wisp-cli -- deploy
 ```
 
-Installing the WezTerm or Neovim adapter does not install the executable.
+`wisp deploy` copies the running executable, `wezterm/`, and `nvim/` into one
+content-addressed deployment and atomically switches `active.json`. Host
+loaders always use the executable from that same bundle. Inspect or validate
+the active deployment with:
+
+```sh
+wisp deploy status
+wisp deploy status --json
+wisp deploy verify
+wisp deploy prune
+```
+
+Pruning retains the active and previous bundles. Set `WISP_DEPLOY_ROOT` to
+override the platform data directory and `WISP_WEZTERM_CONFIG_DIR` to override
+the WezTerm configuration directory.
 
 ## Configuration
 
@@ -105,6 +125,10 @@ wisp projects --json
 wisp refresh
 wisp cache clear
 wisp config validate
+wisp deploy
+wisp deploy verify
+wisp deploy status --json
+wisp deploy prune
 wisp open <selection-json>
 ```
 
@@ -112,6 +136,8 @@ wisp open <selection-json>
 terminal. Embedded integrations use `--result-file`; Wisp writes that file by
 atomic same-directory replacement. Cancellation is a successful `cancelled`
 result. Handled errors produce an `error` result and a nonzero process status.
+`projects --json` also returns a protocol-versioned envelope rather than a raw
+project array.
 
 `open` is the only command that executes a resolved opener. It launches argv
 directly without a shell. For example:
@@ -157,13 +183,13 @@ when entered rather than indexed recursively.
 
 ## WezTerm
 
-The WezTerm adapter can be installed as a normal plugin. The executable remains
-a separate requirement.
+`wisp deploy` installs the stable WezTerm bootstrap as
+`wisp/init.lua` under `wezterm.config_dir`.
 
 ```lua
 local wezterm = require "wezterm"
 local config = wezterm.config_builder()
-local wisp = wezterm.plugin.require "https://github.com/vamuscari/wisp"
+local wisp = dofile(wezterm.config_dir .. "/wisp/init.lua")
 
 wisp.apply_to_config(config, {
   spawn_domain = { DomainName = "local" },
@@ -192,7 +218,6 @@ the original window and pane.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `wisp_path` | `"wisp"` | Executable name or absolute path |
 | `config_file` | platform default | Shared TOML override |
 | `picker_binding` | none | Optional key assignment for the project picker |
 | `spawn_domain` | `{ DomainName = "local" }` | Named same-host domain for projects |
@@ -228,24 +253,20 @@ wisp.split_pane_action("Right", false)
 ```
 
 Project workspaces and project-aware tabs/splits set `WISP_PROJECT_DIR` and
-`WISP_PROJECT_NAME`. File selections become the initial process in a new
-workspace or a new tab in an existing workspace. Window selections activate
-the exact tab captured when the picker launched. Closing a project terminates
-all panes in the selected project workspace through `wezterm cli kill-pane`.
-
-For local adapter development, load only the WezTerm module:
-
-```lua
-local wisp = dofile(wezterm.home_dir .. "/Repos/wisp/plugin/init.lua")
-```
+`WISP_PROJECT_NAME`. File selections launch `wisp open` as the initial process
+in a new workspace or a new tab in an existing workspace; the adapter never
+executes opener argv itself. Window selections activate the exact tab captured
+when the picker launched. Closing a project terminates all panes in the
+selected project workspace through `wezterm cli kill-pane`.
 
 ## Neovim
 
-Add only the checkout's `nvim/` directory to `runtimepath`. The repository root
-also contains WezTerm's `plugin/init.lua` and must not be added.
+Add the stable runtime installed by `wisp deploy`, not a repository checkout:
 
 ```lua
-vim.opt.runtimepath:prepend(vim.fn.expand "~/Repos/wisp/nvim")
+local wisp_root = vim.env.WISP_DEPLOY_ROOT
+  or (vim.fs.dirname(vim.fn.stdpath "data") .. "/wisp")
+vim.opt.runtimepath:prepend(wisp_root .. "/nvim")
 
 require("wisp").setup {
   keymap = "<leader>wp",
@@ -260,11 +281,28 @@ to the tab that launched the picker, even if another tab becomes active:
 - `vim.t.wisp_project_dir` and `vim.t.wisp_project_name` store project metadata.
 - Initial metadata is seeded from `WISP_PROJECT_DIR` and `WISP_PROJECT_NAME`.
 
-Setup options are `wisp_path`, `config_file`, `command`, `keymap`,
-`keymap_options`, `width`, `height`, and `border`. See `:help wisp` for the
-compact reference.
+Setup options are `config_file`, `command`, `keymap`, `keymap_options`,
+`width`, `height`, and `border`. See `:help wisp` for the compact reference.
 
 ## Protocol
+
+Project listing uses a versioned envelope so separately installed adapters and
+executables reject mismatched schemas:
+
+```json
+{
+  "protocol_version": 2,
+  "projects": [
+    {
+      "id": "api",
+      "path": "/home/user/Repos/api",
+      "group": "Repos",
+      "name": "api",
+      "display_name": "API"
+    }
+  ]
+}
+```
 
 Selection protocol version 2 embeds the owning project and resolved opener:
 

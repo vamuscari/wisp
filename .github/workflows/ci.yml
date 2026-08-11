@@ -85,6 +85,14 @@ jobs:
       WEZTERM_VERSION: 20240127-113634-bbcac864
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and deploy Wisp
+        run: |
+          cargo build --workspace --locked
+          WISP_DEPLOY_ROOT="$RUNNER_TEMP/wisp" \
+            XDG_CONFIG_HOME="$RUNNER_TEMP/config" \
+            ./target/debug/wisp deploy
       - name: Download WezTerm
         run: |
           curl --fail --location --retry 3 --remote-name \
@@ -96,20 +104,30 @@ jobs:
       - name: Parse plugin configuration
         run: |
           APPIMAGE_EXTRACT_AND_RUN=1 \
-            "./${WEZTERM_ASSET}" --config-file "$PWD/tests/wezterm_config.lua" ls-fonts --text test >/dev/null
+            WISP_DEPLOY_ROOT="$RUNNER_TEMP/wisp" \
+            XDG_CONFIG_HOME="$RUNNER_TEMP/config" \
+            "./${WEZTERM_ASSET}" --config-file "$PWD/tests/deployed_wezterm_config.lua" ls-fonts --text test >/dev/null
 
   neovim:
     name: Minimum Neovim
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: rhysd/action-setup-vim@v1
         with:
           version: v0.10.4
           neovim: true
+      - name: Build and deploy Wisp
+        run: |
+          cargo build --workspace --locked
+          WISP_DEPLOY_ROOT="$RUNNER_TEMP/wisp" \
+            XDG_CONFIG_HOME="$RUNNER_TEMP/config" \
+            ./target/debug/wisp deploy
       - name: Load adapter
         run: >-
           nvim --headless -u NONE
-          --cmd "set runtimepath+=$PWD/nvim"
+          --cmd "set runtimepath+=$RUNNER_TEMP/wisp/nvim"
           -c "lua require('wisp').setup()"
           -c "qa"

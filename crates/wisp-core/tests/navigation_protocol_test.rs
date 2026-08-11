@@ -4,7 +4,10 @@ use wisp_core::{
     config::Openers,
     model::{DirectoryEntry, EntryKind, Project},
     navigation::{NavigationOutcome, Navigator, Screen},
-    protocol::{HostContext, PROTOCOL_VERSION, Selection, SelectionEnvelope, SelectionStatus},
+    protocol::{
+        HostContext, PROTOCOL_VERSION, ProjectsEnvelope, Selection, SelectionEnvelope,
+        SelectionStatus,
+    },
 };
 
 fn project() -> Project {
@@ -210,9 +213,16 @@ fn host_context_defaults_omitted_items_to_empty() {
 fn host_context_rejects_unsupported_versions_and_invalid_items() {
     let unsupported = serde_json::from_value::<HostContext>(serde_json::json!({
         "protocol_version": 1,
-        "projects": {}
-    }));
-    assert!(unsupported.is_err());
+        "projects": [],
+        "future_field": true
+    }))
+    .unwrap_err();
+    assert!(
+        unsupported
+            .to_string()
+            .contains("unsupported host context version 1"),
+        "unexpected error: {unsupported}"
+    );
 
     let empty = serde_json::from_value::<HostContext>(serde_json::json!({
         "protocol_version": 2,
@@ -238,6 +248,11 @@ fn host_context_rejects_unsupported_versions_and_invalid_items() {
         }
     }));
     assert!(duplicate.is_err());
+
+    let duplicate_project = serde_json::from_str::<HostContext>(
+        r#"{"protocol_version":2,"projects":{"api":{"labels":["new"]},"api":{"labels":["open"]}}}"#,
+    );
+    assert!(duplicate_project.is_err());
 }
 
 #[test]
@@ -253,6 +268,96 @@ fn public_protocol_fixtures_decode_with_the_current_models() {
         serde_json::from_str(include_str!("../../../tests/fixtures/host-context-v2.json")).unwrap();
     assert_eq!(context.labels("api"), &["current", "open"]);
     assert_eq!(context.items("api")[0].id, "17");
+
+    let projects: ProjectsEnvelope =
+        serde_json::from_str(include_str!("../../../tests/fixtures/projects-v2.json")).unwrap();
+    assert_eq!(projects.projects[0].id, "api");
+}
+
+#[test]
+fn projects_envelope_checks_version_before_the_project_schema() {
+    let unsupported = serde_json::from_value::<ProjectsEnvelope>(serde_json::json!({
+        "protocol_version": 1,
+        "projects": "future schema",
+        "future_field": true
+    }))
+    .unwrap_err();
+    assert!(
+        unsupported
+            .to_string()
+            .contains("unsupported projects protocol version 1"),
+        "unexpected error: {unsupported}"
+    );
+
+    let current = serde_json::from_value::<ProjectsEnvelope>(serde_json::json!({
+        "protocol_version": 2,
+        "projects": [project()]
+    }))
+    .unwrap();
+    assert_eq!(current.projects, vec![project()]);
+}
+
+#[test]
+fn selection_protocol_rejects_unknown_project_fields() {
+    let selection = serde_json::from_value::<SelectionEnvelope>(serde_json::json!({
+        "protocol_version": 2,
+        "status": "selected",
+        "selection": {
+            "kind": "project",
+            "project": {
+                "id": "api",
+                "path": "/repos/api",
+                "group": "Repos",
+                "name": "api",
+                "display_name": "API",
+                "future_field": true
+            }
+        }
+    }));
+
+    assert!(selection.is_err());
+}
+
+#[test]
+fn selection_protocol_rejects_unknown_selection_fields() {
+    let selection = serde_json::from_value::<SelectionEnvelope>(serde_json::json!({
+        "protocol_version": 2,
+        "status": "selected",
+        "selection": {
+            "kind": "project",
+            "project": project(),
+            "future_field": true
+        }
+    }));
+
+    assert!(selection.is_err());
+}
+
+#[test]
+fn selection_protocol_rejects_duplicate_envelope_fields() {
+    let duplicate = serde_json::from_str::<SelectionEnvelope>(
+        r#"{"protocol_version":2,"protocol_version":2,"status":"cancelled"}"#,
+    )
+    .unwrap_err();
+
+    assert!(
+        duplicate.to_string().contains("duplicate field"),
+        "unexpected error: {duplicate}"
+    );
+}
+
+#[test]
+fn selection_protocol_rejects_inconsistent_status_fields() {
+    for json in [
+        r#"{"protocol_version":2,"status":"selected"}"#,
+        r#"{"protocol_version":2,"status":"cancelled","selection":{"kind":"project","project":{"id":"api","path":"/repos/api","group":"Repos","name":"api","display_name":"API"}}}"#,
+        r#"{"protocol_version":2,"status":"error"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<SelectionEnvelope>(json).is_err(),
+            "inconsistent envelope should fail: {json}"
+        );
+    }
 }
 
 #[test]

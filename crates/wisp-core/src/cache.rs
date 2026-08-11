@@ -15,6 +15,7 @@ use crate::{model::DirectoryEntry, path::comparison_key};
 pub const CACHE_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CachedDirectory {
     pub path: PathBuf,
     pub scanned_at: u64,
@@ -22,12 +23,17 @@ pub struct CachedDirectory {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CacheDocument {
     version: u32,
     config_fingerprint: String,
-    #[serde(default)]
     generation: u64,
     directories: BTreeMap<String, CachedDirectory>,
+}
+
+#[derive(Deserialize)]
+struct VersionHeader {
+    version: u32,
 }
 
 impl CacheDocument {
@@ -46,6 +52,7 @@ pub struct CacheStore {
     path: PathBuf,
     document: CacheDocument,
     base_generation: u64,
+    base_unsupported_hash: Option<blake3::Hash>,
     dirty_directories: BTreeSet<String>,
     cleared: bool,
     replace_document: bool,
@@ -67,32 +74,44 @@ impl CacheStore {
     ) -> Result<Self, CacheError> {
         let path = path.into();
         let config_fingerprint = config_fingerprint.into();
-        let (document, base_generation, replace_document) = match fs::read(&path) {
-            Ok(contents) => match serde_json::from_slice::<CacheDocument>(&contents) {
-                Ok(document)
-                    if document.version == CACHE_VERSION
-                        && document.config_fingerprint == config_fingerprint =>
-                {
-                    let generation = document.generation;
-                    (document, generation, false)
+        let (document, base_generation, base_unsupported_hash, replace_document) =
+            match fs::read(&path) {
+                Ok(contents) => match decode_document(&contents) {
+                    DecodedDocument::Current(document)
+                        if document.config_fingerprint == config_fingerprint =>
+                    {
+                        let generation = document.generation;
+                        (document, generation, None, false)
+                    }
+                    DecodedDocument::Current(document) => {
+                        let generation = document.generation;
+                        let mut empty = CacheDocument::empty(config_fingerprint.clone());
+                        empty.generation = generation;
+                        (empty, generation, None, true)
+                    }
+                    DecodedDocument::UnsupportedVersion => (
+                        CacheDocument::empty(config_fingerprint.clone()),
+                        0,
+                        Some(blake3::hash(&contents)),
+                        true,
+                    ),
+                    DecodedDocument::Invalid => (
+                        CacheDocument::empty(config_fingerprint.clone()),
+                        0,
+                        None,
+                        true,
+                    ),
+                },
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    (CacheDocument::empty(config_fingerprint), 0, None, false)
                 }
-                Ok(document) => {
-                    let generation = document.generation;
-                    let mut empty = CacheDocument::empty(config_fingerprint.clone());
-                    empty.generation = generation;
-                    (empty, generation, true)
-                }
-                Err(_) => (CacheDocument::empty(config_fingerprint.clone()), 0, true),
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                (CacheDocument::empty(config_fingerprint), 0, false)
-            }
-            Err(error) => return Err(error.into()),
-        };
+                Err(error) => return Err(error.into()),
+            };
         Ok(Self {
             path,
             document,
             base_generation,
+            base_unsupported_hash,
             dirty_directories: BTreeSet::new(),
             cleared: false,
             replace_document,
@@ -151,9 +170,16 @@ impl CacheStore {
 
     fn save_locked(&mut self, parent: &Path) -> Result<(), CacheError> {
         let on_disk = self.read_current()?;
+        if let OnDisk::UnsupportedVersion(hash) = &on_disk
+            && self.base_unsupported_hash != Some(*hash)
+        {
+            self.dirty_directories.clear();
+            self.stale = true;
+            return Ok(());
+        }
         let current_generation = match &on_disk {
             OnDisk::Document(document) => document.generation,
-            OnDisk::Missing | OnDisk::Invalid => 0,
+            OnDisk::Missing | OnDisk::Invalid | OnDisk::UnsupportedVersion(_) => 0,
         };
 
         if self.cleared {
@@ -168,8 +194,7 @@ impl CacheStore {
 
         match on_disk {
             OnDisk::Document(mut current)
-                if current.version == CACHE_VERSION
-                    && current.config_fingerprint == self.document.config_fingerprint =>
+                if current.config_fingerprint == self.document.config_fingerprint =>
             {
                 if current.generation != self.base_generation && !self.replace_document {
                     self.document = current;
@@ -194,6 +219,9 @@ impl CacheStore {
             OnDisk::Invalid => {
                 self.document.generation = self.base_generation.saturating_add(1);
             }
+            OnDisk::UnsupportedVersion(_) => {
+                self.document.generation = self.base_generation.saturating_add(1);
+            }
             OnDisk::Missing => {}
         }
 
@@ -204,9 +232,12 @@ impl CacheStore {
 
     fn read_current(&self) -> Result<OnDisk, CacheError> {
         match fs::read(&self.path) {
-            Ok(contents) => Ok(match serde_json::from_slice(&contents) {
-                Ok(document) => OnDisk::Document(document),
-                Err(_) => OnDisk::Invalid,
+            Ok(contents) => Ok(match decode_document(&contents) {
+                DecodedDocument::Current(document) => OnDisk::Document(document),
+                DecodedDocument::UnsupportedVersion => {
+                    OnDisk::UnsupportedVersion(blake3::hash(&contents))
+                }
+                DecodedDocument::Invalid => OnDisk::Invalid,
             }),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(OnDisk::Missing),
             Err(error) => Err(error.into()),
@@ -215,6 +246,7 @@ impl CacheStore {
 
     fn finish_save(&mut self) {
         self.base_generation = self.document.generation;
+        self.base_unsupported_hash = None;
         self.dirty_directories.clear();
         self.cleared = false;
         self.replace_document = false;
@@ -239,7 +271,30 @@ impl CacheStore {
 enum OnDisk {
     Missing,
     Invalid,
+    UnsupportedVersion(blake3::Hash),
     Document(CacheDocument),
+}
+
+enum DecodedDocument {
+    Current(CacheDocument),
+    UnsupportedVersion,
+    Invalid,
+}
+
+fn decode_document(contents: &[u8]) -> DecodedDocument {
+    if crate::strict_json::reject_duplicate_fields(contents).is_err() {
+        return DecodedDocument::Invalid;
+    }
+    let Ok(header) = serde_json::from_slice::<VersionHeader>(contents) else {
+        return DecodedDocument::Invalid;
+    };
+    if header.version != CACHE_VERSION {
+        return DecodedDocument::UnsupportedVersion;
+    }
+    match serde_json::from_slice(contents) {
+        Ok(document) => DecodedDocument::Current(document),
+        Err(_) => DecodedDocument::Invalid,
+    }
 }
 
 fn lock_path(path: &Path) -> PathBuf {

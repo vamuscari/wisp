@@ -4,20 +4,20 @@ local helper = require "tests.test_helper"
 
 local function assert_config_error(configured_options, pattern)
   local wezterm = helper.fake_wezterm()
-  local wisp = helper.load_plugin(wezterm)
+  local wisp = helper.load_wezterm_adapter(wezterm)
   local ok, err = pcall(wisp.apply_to_config, {}, configured_options)
   assert(not ok, "invalid options should fail")
   assert(tostring(err):match(pattern), "configuration error should mention " .. pattern .. ": " .. tostring(err))
 end
 
-helper.test("filesystem options moved to shared TOML", function()
-  assert_config_error({ roots = {} }, "shared Wisp TOML")
-  assert_config_error({ projects = {} }, "shared Wisp TOML")
-  assert_config_error({ open_file = { "nvim" } }, "shared Wisp TOML")
+helper.test("former filesystem options have no legacy handling", function()
+  assert_config_error({ roots = {} }, "unknown option roots")
+  assert_config_error({ projects = {} }, "unknown option projects")
+  assert_config_error({ open_file = { "nvim" } }, "unknown option open_file")
 end)
 
 helper.test("executable and config paths must be non-empty strings", function()
-  assert_config_error({ wisp_path = "" }, "wisp_path")
+  assert_config_error({ wisp_path = "/tmp/wisp" }, "unknown option wisp_path")
   assert_config_error({ config_file = false }, "config_file")
 end)
 

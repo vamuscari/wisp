@@ -82,20 +82,23 @@ function helper.fake_wezterm(overrides)
   return wezterm
 end
 
-function helper.load_plugin(wezterm)
+function helper.load_wezterm_adapter(wezterm)
   package.loaded.wezterm = nil
-  package.loaded.plugin = nil
-  package.loaded["plugin.init"] = nil
   package.preload.wezterm = function()
     return wezterm
   end
 
-  return require "plugin"
+  return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v1")
 end
 
 function helper.fake_window(workspace, mux_window)
   local performed = {}
-  local window = { performed = performed }
+  local window = { performed = performed, toasts = {} }
+  mux_window = mux_window or {
+    get_workspace = function()
+      return workspace or "default"
+    end,
+  }
 
   function window:perform_action(action, pane)
     table.insert(performed, { action = action, pane = pane })
@@ -107,6 +110,10 @@ function helper.fake_window(workspace, mux_window)
 
   function window:mux_window()
     return mux_window
+  end
+
+  function window:toast_notification(title, message, icon, timeout)
+    table.insert(self.toasts, { title = title, message = message, icon = icon, timeout = timeout })
   end
 
   return window

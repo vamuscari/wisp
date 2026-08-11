@@ -1,7 +1,13 @@
 local wezterm = require "wezterm"
+local deployed_wisp_path, deployment_token = ...
+
+if type(deployed_wisp_path) ~= "string" or deployed_wisp_path == "" or deployment_token ~= "wisp-deployment-v1" then
+  error "Wisp's WezTerm adapter must be loaded by the deployed bootstrap"
+end
 
 local wisp = {}
 local options = {}
+local PROTOCOL_VERSION = 2
 
 local function validate_domain(domain, label)
   if type(domain) ~= "table" or type(domain.DomainName) ~= "string" or domain.DomainName == "" then
@@ -14,12 +20,6 @@ local function validate_options(configured)
     error "wisp options must be a table"
   end
 
-  for _, moved in ipairs { "roots", "projects", "cache_ttl_seconds", "open_file" } do
-    if configured[moved] ~= nil then
-      error("wisp " .. moved .. " moved to shared Wisp TOML configuration")
-    end
-  end
-
   local allowed = {
     config_file = true,
     domain_for_project = true,
@@ -28,7 +28,6 @@ local function validate_options(configured)
     picker_timeout_seconds = true,
     poll_interval_seconds = true,
     spawn_domain = true,
-    wisp_path = true,
     workspace_for_project = true,
     workspace_prefix = true,
   }
@@ -38,9 +37,6 @@ local function validate_options(configured)
     end
   end
 
-  if configured.wisp_path ~= nil and (type(configured.wisp_path) ~= "string" or configured.wisp_path == "") then
-    error "wisp wisp_path must be a non-empty string"
-  end
   if configured.config_file ~= nil and (type(configured.config_file) ~= "string" or configured.config_file == "") then
     error "wisp config_file must be a non-empty string"
   end
@@ -80,14 +76,14 @@ local function configure(configured)
     picker_timeout_seconds = configured.picker_timeout_seconds or 3600,
     poll_interval_seconds = configured.poll_interval_seconds or 0.05,
     spawn_domain = spawn_domain,
-    wisp_path = configured.wisp_path or "wisp",
+    executable_path = deployed_wisp_path,
     workspace_for_project = configured.workspace_for_project,
     workspace_prefix = configured.workspace_prefix or "wisp:",
   }
 end
 
 local function wisp_args(...)
-  local args = { options.wisp_path }
+  local args = { options.executable_path }
   if options.config_file then
     table.insert(args, "--config")
     table.insert(args, options.config_file)
@@ -109,14 +105,46 @@ local function run_child(...)
   return stdout
 end
 
+local function report_error(window, message)
+  wezterm.log_error(message)
+  pcall(function()
+    window:toast_notification("Wisp", message, nil, 5000)
+  end)
+end
+
+local function has_only_fields(value, allowed)
+  for field in pairs(value) do
+    if not allowed[field] then
+      return false
+    end
+  end
+  return true
+end
+
+local function is_array(value)
+  if type(value) ~= "table" then
+    return false
+  end
+  local count = 0
+  for key in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      return false
+    end
+    count = count + 1
+  end
+  return count == #value
+end
+
 local function valid_project(project)
   return type(project) == "table"
+    and has_only_fields(project, { id = true, path = true, group = true, name = true, display_name = true })
     and type(project.id) == "string"
     and project.id ~= ""
     and type(project.path) == "string"
     and project.path ~= ""
     and type(project.group) == "string"
     and type(project.name) == "string"
+    and type(project.display_name) == "string"
 end
 
 local function query_projects()
@@ -124,9 +152,19 @@ local function query_projects()
   if not stdout then
     return nil, command_error
   end
-  local parsed, projects = pcall(wezterm.json_parse, stdout)
-  if not parsed or type(projects) ~= "table" then
+  local parsed, envelope = pcall(wezterm.json_parse, stdout)
+  if not parsed or type(envelope) ~= "table" then
     return nil, "wisp projects returned invalid JSON"
+  end
+  if envelope.protocol_version ~= PROTOCOL_VERSION then
+    return nil, "wisp projects returned an unsupported protocol version"
+  end
+  if not has_only_fields(envelope, { protocol_version = true, projects = true }) then
+    return nil, "wisp projects returned an invalid envelope"
+  end
+  local projects = envelope.projects
+  if not is_array(projects) then
+    return nil, "wisp projects returned an invalid project list"
   end
   for index, project in ipairs(projects) do
     if not valid_project(project) then
@@ -201,18 +239,22 @@ local function valid_argv(argv)
   return true
 end
 
-local function open_file(window, pane, project, opener)
+local function open_file(window, pane, result)
+  local selection = result.selection
+  local project = selection.project
+  local opener = selection.opener
   if not valid_argv(opener) then
-    wezterm.log_error "wisp selected file has no valid opener; configure openers.file in Wisp TOML"
+    report_error(window, "wisp selected file has no valid opener; configure openers.file in Wisp TOML")
     return
   end
+  local command = wisp_args("open", wezterm.json_encode(result))
 
   local workspace = workspace_for(project)
   if not workspace_is_open(workspace) then
     window:perform_action(
       wezterm.action.SwitchToWorkspace {
         name = workspace,
-        spawn = spawn_command(project, opener),
+        spawn = spawn_command(project, command),
       },
       pane
     )
@@ -221,12 +263,12 @@ local function open_file(window, pane, project, opener)
 
   for _, mux_window in ipairs(wezterm.mux.all_windows()) do
     if mux_window:get_workspace() == workspace then
-      mux_window:spawn_tab(spawn_command(project, opener))
+      mux_window:spawn_tab(spawn_command(project, command))
       window:perform_action(wezterm.action.SwitchToWorkspace { name = workspace }, pane)
       return
     end
   end
-  wezterm.log_error("wisp could not find a mux window for workspace " .. workspace)
+  report_error(window, "wisp could not find a mux window for workspace " .. workspace)
 end
 
 local function wezterm_executable()
@@ -347,8 +389,8 @@ local function host_context(window, projects)
   for _, workspace in ipairs(wezterm.mux.get_workspace_names()) do
     open[workspace] = true
   end
-  local current = window:active_workspace()
-  local context = { protocol_version = 2, projects = {} }
+  local current = window:mux_window():get_workspace()
+  local context = { protocol_version = PROTOCOL_VERSION, projects = {} }
   local project_by_workspace = {}
   for _, project in ipairs(projects) do
     local workspace = workspace_for(project)
@@ -405,9 +447,38 @@ local function close_picker(window, tab, pane)
   end
 end
 
+local function selection_has_only_fields(selection)
+  local fields = {
+    project = { kind = true, project = true, opener = true },
+    file = { kind = true, project = true, path = true, opener = true },
+    close_project = { kind = true, project = true },
+    host_item = { kind = true, project = true, id = true },
+  }
+  return fields[selection.kind] and has_only_fields(selection, fields[selection.kind])
+end
+
+local function valid_result_state(result)
+  if result.status == "selected" then
+    return type(result.selection) == "table" and result.error == nil
+  end
+  if result.status == "cancelled" then
+    return result.selection == nil and result.error == nil
+  end
+  if result.status == "error" then
+    return result.selection == nil and type(result.error) == "string"
+  end
+  return false
+end
+
 local function apply_result(window, pane, result, picker_pane_id)
-  if type(result) ~= "table" or result.protocol_version ~= 2 then
+  if type(result) ~= "table" or result.protocol_version ~= PROTOCOL_VERSION then
     return nil, "wisp result has an unsupported protocol version"
+  end
+  if not has_only_fields(result, { protocol_version = true, status = true, selection = true, error = true }) then
+    return nil, "wisp result is not a valid result envelope"
+  end
+  if not valid_result_state(result) then
+    return nil, "wisp result is not a valid result envelope"
   end
   if result.status == "cancelled" then
     return true
@@ -420,6 +491,12 @@ local function apply_result(window, pane, result, picker_pane_id)
   end
 
   local selection = result.selection
+  if not selection_has_only_fields(selection) then
+    return nil, "wisp result is not a valid selection"
+  end
+  if selection.opener ~= nil and not valid_argv(selection.opener) then
+    return nil, "wisp result is not a valid selection"
+  end
   if not valid_project(selection.project) then
     return nil, "wisp result contains an invalid project"
   end
@@ -428,7 +505,7 @@ local function apply_result(window, pane, result, picker_pane_id)
     return true
   end
   if selection.kind == "file" and type(selection.path) == "string" and selection.path ~= "" then
-    open_file(window, pane, selection.project, selection.opener)
+    open_file(window, pane, result)
     return true
   end
   if selection.kind == "close_project" then
@@ -469,13 +546,13 @@ local function poll_result(window, original_pane, picker_tab, picker_pane, resul
       if not picker_is_alive() then
         os.remove(host_context_path)
         close_picker(window, picker_tab, picker_pane)
-        wezterm.log_error "wisp picker exited before producing a result"
+        report_error(window, "wisp picker exited before producing a result")
         return
       end
       if attempts >= maximum_attempts then
         os.remove(host_context_path)
         close_picker(window, picker_tab, picker_pane)
-        wezterm.log_error "wisp picker timed out before producing a result"
+        report_error(window, "wisp picker timed out before producing a result")
         return
       end
       wezterm.time.call_after(options.poll_interval_seconds, poll)
@@ -489,12 +566,12 @@ local function poll_result(window, original_pane, picker_tab, picker_pane, resul
     local parsed, result = pcall(wezterm.json_parse, encoded)
     close_picker(window, picker_tab, picker_pane)
     if not parsed then
-      wezterm.log_error("wisp picker returned invalid JSON: " .. tostring(result))
+      report_error(window, "wisp picker returned invalid JSON: " .. tostring(result))
       return
     end
     local applied, result_error = apply_result(window, original_pane, result, picker_pane_id)
     if not applied then
-      wezterm.log_error(result_error)
+      report_error(window, result_error)
     end
   end
   wezterm.time.call_after(options.poll_interval_seconds, poll)
@@ -503,7 +580,7 @@ end
 local function launch_picker(window, pane, initial_view)
   local projects, project_error = query_projects()
   if not projects then
-    wezterm.log_error(project_error)
+    report_error(window, project_error)
     return
   end
 
@@ -512,7 +589,7 @@ local function launch_picker(window, pane, initial_view)
   local encoded = wezterm.json_encode(host_context(window, projects))
   local written, write_error = write_file(host_context_path, encoded)
   if not written then
-    wezterm.log_error("wisp could not write host context: " .. tostring(write_error))
+    report_error(window, "wisp could not write host context: " .. tostring(write_error))
     return
   end
 
@@ -532,7 +609,7 @@ local function launch_picker(window, pane, initial_view)
   end)
   if not spawned then
     os.remove(host_context_path)
-    wezterm.log_error("wisp could not launch picker: " .. tostring(picker_tab))
+    report_error(window, "wisp could not launch picker: " .. tostring(picker_tab))
     return
   end
   poll_result(window, pane, picker_tab, picker_pane, result_path, host_context_path)
@@ -598,7 +675,7 @@ local function current_spawn_command(window, pane)
     projects = {}
   end
   local project
-  local workspace = window:active_workspace()
+  local workspace = window:mux_window():get_workspace()
   for _, candidate in ipairs(projects) do
     if workspace_for(candidate) == workspace then
       project = candidate

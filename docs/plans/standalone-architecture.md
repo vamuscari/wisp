@@ -1,5 +1,8 @@
 # Standalone Architecture Plan
 
+> Historical design notes. The bundle-only deployment implemented by current
+> code and documented in `README.md` supersedes checkout and plugin loading.
+
 ## Goal
 
 Separate Wisp's project and filesystem logic from its user interface and host

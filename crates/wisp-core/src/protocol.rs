@@ -4,11 +4,64 @@ use std::{
 };
 
 use serde::{Deserialize, Deserializer, Serialize, de};
+use serde_json::value::RawValue;
 use thiserror::Error;
 
 use crate::model::Project;
 
 pub const PROTOCOL_VERSION: u32 = 2;
+
+#[derive(Deserialize)]
+struct VersionHeader {
+    protocol_version: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProjectsEnvelope {
+    pub protocol_version: u32,
+    pub projects: Vec<Project>,
+}
+
+impl ProjectsEnvelope {
+    pub fn new(projects: Vec<Project>) -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            projects,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectsEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let json = Box::<RawValue>::deserialize(deserializer)?;
+        crate::strict_json::reject_duplicate_fields(json.get().as_bytes())
+            .map_err(de::Error::custom)?;
+        let header: VersionHeader = serde_json::from_str(json.get()).map_err(de::Error::custom)?;
+        if header.protocol_version != PROTOCOL_VERSION {
+            return Err(de::Error::custom(format!(
+                "unsupported projects protocol version {}",
+                header.protocol_version
+            )));
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawProjectsEnvelope {
+            protocol_version: u32,
+            projects: Vec<Project>,
+        }
+
+        let raw: RawProjectsEnvelope =
+            serde_json::from_str(json.get()).map_err(de::Error::custom)?;
+        Ok(Self {
+            protocol_version: raw.protocol_version,
+            projects: raw.projects,
+        })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HostContext {
@@ -108,24 +161,30 @@ impl<'de> Deserialize<'de> for HostContext {
     where
         D: Deserializer<'de>,
     {
+        let json = Box::<RawValue>::deserialize(deserializer)?;
+        crate::strict_json::reject_duplicate_fields(json.get().as_bytes())
+            .map_err(de::Error::custom)?;
+        let header: VersionHeader = serde_json::from_str(json.get()).map_err(de::Error::custom)?;
+        if header.protocol_version != PROTOCOL_VERSION {
+            return Err(de::Error::custom(HostContextError::UnsupportedVersion(
+                header.protocol_version,
+            )));
+        }
+
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawHostContext {
-            protocol_version: u32,
+            #[serde(rename = "protocol_version")]
+            _protocol_version: u32,
             projects: BTreeMap<String, HostProjectContext>,
         }
 
-        let raw = RawHostContext::deserialize(deserializer)?;
-        if raw.protocol_version != PROTOCOL_VERSION {
-            return Err(de::Error::custom(HostContextError::UnsupportedVersion(
-                raw.protocol_version,
-            )));
-        }
+        let raw: RawHostContext = serde_json::from_str(json.get()).map_err(de::Error::custom)?;
         Self::new(raw.projects).map_err(de::Error::custom)
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SelectionEnvelope {
     pub protocol_version: u32,
     pub status: SelectionStatus,
@@ -164,6 +223,52 @@ impl SelectionEnvelope {
     }
 }
 
+impl<'de> Deserialize<'de> for SelectionEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let json = Box::<RawValue>::deserialize(deserializer)?;
+        crate::strict_json::reject_duplicate_fields(json.get().as_bytes())
+            .map_err(de::Error::custom)?;
+        let header: VersionHeader = serde_json::from_str(json.get()).map_err(de::Error::custom)?;
+        if header.protocol_version != PROTOCOL_VERSION {
+            return Err(de::Error::custom(format!(
+                "unsupported selection protocol version {}",
+                header.protocol_version
+            )));
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSelectionEnvelope {
+            protocol_version: u32,
+            status: SelectionStatus,
+            selection: Option<Selection>,
+            error: Option<String>,
+        }
+
+        let raw: RawSelectionEnvelope =
+            serde_json::from_str(json.get()).map_err(de::Error::custom)?;
+        let valid = match raw.status {
+            SelectionStatus::Selected => raw.selection.is_some() && raw.error.is_none(),
+            SelectionStatus::Cancelled => raw.selection.is_none() && raw.error.is_none(),
+            SelectionStatus::Error => raw.selection.is_none() && raw.error.is_some(),
+        };
+        if !valid {
+            return Err(de::Error::custom(
+                "selection envelope fields do not match its status",
+            ));
+        }
+        Ok(Self {
+            protocol_version: raw.protocol_version,
+            status: raw.status,
+            selection: raw.selection,
+            error: raw.error,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionStatus {
@@ -173,7 +278,7 @@ pub enum SelectionStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Selection {
     Project {
         project: Project,

@@ -1,0 +1,12 @@
+{
+  "protocol_version": 2,
+  "projects": [
+    {
+      "id": "api",
+      "path": "/home/user/Repos/api",
+      "group": "Repos",
+      "name": "api",
+      "display_name": "API"
+    }
+  ]
+}

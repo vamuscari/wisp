@@ -6,3 +6,5 @@ pub mod model;
 pub mod navigation;
 pub mod path;
 pub mod protocol;
+
+mod strict_json;

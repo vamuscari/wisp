@@ -16,10 +16,10 @@ local function configured(projects)
       return true, "PROJECTS", ""
     end,
     json_parse = function()
-      return projects
+      return { protocol_version = 2, projects = projects }
     end,
   }
-  local wisp = helper.load_plugin(wezterm)
+  local wisp = helper.load_wezterm_adapter(wezterm)
   wisp.apply_to_config({}, {})
   return wisp
 end
@@ -45,6 +45,22 @@ helper.test("project-aware tabs and splits preserve cwd and metadata", function(
   helper.assert_equal(split.value.direction, "Right", "split direction")
   helper.assert_equal(split.value.top_level, true, "split top-level flag")
   helper.assert_equal(split.value.command.cwd, "/Users/test/Repos/api/src", "split cwd")
+end)
+
+helper.test("project-aware spawns use the mux window workspace when client state is stale", function()
+  local wisp = configured { project }
+  local mux_window = helper.fake_mux_window "wisp:Repos/api"
+  local window = helper.fake_window("default", mux_window)
+  local pane = helper.fake_pane {
+    cwd = { scheme = "file", file_path = "/Users/test/Repos/api/src" },
+    domain = "local",
+  }
+
+  helper.run_callback(wisp.new_tab_action(), window, pane)
+
+  local command = window.performed[1].action.value
+  helper.assert_equal(type(command.set_environment_variables), "table", "project environment")
+  helper.assert_equal(command.set_environment_variables.WISP_PROJECT_NAME, "api", "project name")
 end)
 
 helper.test("project-aware spawns ignore cwd from a different pane domain", function()

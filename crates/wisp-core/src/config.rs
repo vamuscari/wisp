@@ -47,6 +47,11 @@ pub enum ConfigError {
 }
 
 #[derive(Deserialize)]
+struct VersionHeader {
+    version: u32,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     version: u32,
@@ -92,10 +97,11 @@ const fn default_cache_ttl() -> u64 {
 
 impl Config {
     pub fn parse(input: &str, home: &Path) -> Result<Self, ConfigError> {
-        let raw: RawConfig = toml::from_str(input)?;
-        if raw.version != CONFIG_VERSION {
-            return Err(ConfigError::UnsupportedVersion(raw.version));
+        let header: VersionHeader = toml::from_str(input)?;
+        if header.version != CONFIG_VERSION {
+            return Err(ConfigError::UnsupportedVersion(header.version));
         }
+        let raw: RawConfig = toml::from_str(input)?;
 
         let roots = raw
             .roots

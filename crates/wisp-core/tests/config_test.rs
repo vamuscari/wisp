@@ -49,6 +49,10 @@ fn rejects_unsupported_versions_and_shell_string_openers() {
         .expect_err("unsupported versions should fail");
     assert!(matches!(version_error, ConfigError::UnsupportedVersion(2)));
 
+    let future_error = Config::parse("version = 2\nfuture_option = true", Path::new("/home/test"))
+        .expect_err("the version should be checked before future fields");
+    assert!(matches!(future_error, ConfigError::UnsupportedVersion(2)));
+
     let opener_error = Config::parse(
         r#"
 version = 1

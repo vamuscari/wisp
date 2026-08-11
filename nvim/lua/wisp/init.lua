@@ -1,6 +1,12 @@
 local M = {}
+local deployed_wisp_path, deployment_token = ...
+
+if type(deployed_wisp_path) ~= "string" or deployed_wisp_path == "" or deployment_token ~= "wisp-deployment-v1" then
+  error "Wisp's Neovim adapter must be loaded by the deployed runtime"
+end
 
 local options = {}
+local PROTOCOL_VERSION = 2
 
 local function configure(configured)
   configured = configured or {}
@@ -16,14 +22,13 @@ local function configure(configured)
     keymap = true,
     keymap_options = true,
     width = true,
-    wisp_path = true,
   }
   for key in pairs(configured) do
     if not allowed[key] then
       error("wisp.setup unknown option " .. tostring(key))
     end
   end
-  for _, field in ipairs { "command", "config_file", "keymap", "wisp_path" } do
+  for _, field in ipairs { "command", "config_file", "keymap" } do
     if configured[field] ~= nil and (type(configured[field]) ~= "string" or configured[field] == "") then
       error("wisp.setup " .. field .. " must be a non-empty string")
     end
@@ -45,7 +50,7 @@ local function configure(configured)
     keymap = configured.keymap,
     keymap_options = configured.keymap_options or {},
     width = configured.width or 0.8,
-    wisp_path = configured.wisp_path or "wisp",
+    executable_path = deployed_wisp_path,
   }
 end
 
@@ -59,7 +64,7 @@ local function dimension(value, available)
 end
 
 local function picker_args(result_path)
-  local args = { options.wisp_path }
+  local args = { options.executable_path }
   if options.config_file then
     table.insert(args, "--config")
     table.insert(args, options.config_file)
@@ -94,16 +99,85 @@ local function read_result(path)
   return result
 end
 
+local function has_only_fields(value, allowed)
+  for field in pairs(value) do
+    if not allowed[field] then
+      return false
+    end
+  end
+  return true
+end
+
+local function is_array(value)
+  if type(value) ~= "table" then
+    return false
+  end
+  local count = 0
+  for key in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      return false
+    end
+    count = count + 1
+  end
+  return count == #value
+end
+
+local function valid_argv(argv)
+  if not is_array(argv) or #argv == 0 then
+    return false
+  end
+  for _, argument in ipairs(argv) do
+    if type(argument) ~= "string" or argument == "" then
+      return false
+    end
+  end
+  return true
+end
+
 local function valid_project(project)
   return type(project) == "table"
+    and has_only_fields(project, { id = true, path = true, group = true, name = true, display_name = true })
+    and type(project.id) == "string"
+    and project.id ~= ""
     and type(project.path) == "string"
     and project.path ~= ""
+    and type(project.group) == "string"
     and type(project.name) == "string"
+    and type(project.display_name) == "string"
+end
+
+local function selection_has_only_fields(selection)
+  local fields = {
+    project = { kind = true, project = true, opener = true },
+    file = { kind = true, project = true, path = true, opener = true },
+  }
+  return fields[selection.kind] and has_only_fields(selection, fields[selection.kind])
+end
+
+local function valid_result_state(result)
+  if result.status == "selected" then
+    return type(result.selection) == "table" and result.error == nil
+  end
+  if result.status == "cancelled" then
+    return result.selection == nil and result.error == nil
+  end
+  if result.status == "error" then
+    return result.selection == nil and type(result.error) == "string"
+  end
+  return false
 end
 
 local function apply_result(originating_tab, result)
-  if type(result) ~= "table" or result.protocol_version ~= 2 then
+  if type(result) ~= "table" or result.protocol_version ~= PROTOCOL_VERSION then
     notify_error "result has an unsupported protocol version"
+    return
+  end
+  if not has_only_fields(result, { protocol_version = true, status = true, selection = true, error = true }) then
+    notify_error "result is not a valid result envelope"
+    return
+  end
+  if not valid_result_state(result) then
+    notify_error "result is not a valid result envelope"
     return
   end
   if result.status == "cancelled" then
@@ -114,7 +188,13 @@ local function apply_result(originating_tab, result)
     return
   end
   local selection = result.selection
-  if result.status ~= "selected" or type(selection) ~= "table" or not valid_project(selection.project) then
+  if
+    result.status ~= "selected"
+    or type(selection) ~= "table"
+    or not selection_has_only_fields(selection)
+    or (selection.opener ~= nil and not valid_argv(selection.opener))
+    or not valid_project(selection.project)
+  then
     notify_error "result is not a valid selection"
     return
   end

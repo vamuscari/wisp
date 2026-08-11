@@ -17,9 +17,11 @@ use wisp_core::{
     config::{Config, ConfigError},
     discovery::StdFileSystem,
     model::{DirectoryEntry, Project},
-    protocol::{HostContext, PROTOCOL_VERSION, Selection, SelectionEnvelope, SelectionStatus},
+    protocol::{HostContext, ProjectsEnvelope, Selection, SelectionEnvelope, SelectionStatus},
 };
 use wisp_tui::{App, DataSource, TuiError};
+
+mod deploy;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -49,6 +51,10 @@ enum WispCommand {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    Deploy {
+        #[command(subcommand)]
+        command: Option<DeployCommand>,
     },
     Open {
         #[arg(value_name = "SELECTION_JSON")]
@@ -83,6 +89,21 @@ enum ConfigCommand {
     Validate,
 }
 
+#[derive(Clone, Debug, Subcommand)]
+enum DeployCommand {
+    Verify,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    Prune,
+    #[command(hide = true)]
+    CheckBundle {
+        root: PathBuf,
+        bundle_id: String,
+    },
+}
+
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error("could not determine the home directory")]
@@ -102,8 +123,6 @@ pub enum CliError {
     },
     #[error("invalid selection JSON: {0}")]
     SelectionJson(serde_json::Error),
-    #[error("unsupported selection protocol version {0}")]
-    UnsupportedProtocol(u32),
     #[error("wisp open expected a selected result")]
     NotSelected,
     #[error("the selection has no opener")]
@@ -124,6 +143,8 @@ pub enum CliError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error(transparent)]
+    Deploy(#[from] deploy::DeployError),
 }
 
 pub fn run() -> i32 {
@@ -172,7 +193,7 @@ fn run_noninteractive(
             if json {
                 let stdout = io::stdout();
                 let mut writer = stdout.lock();
-                serde_json::to_writer_pretty(&mut writer, &projects)?;
+                serde_json::to_writer_pretty(&mut writer, &ProjectsEnvelope::new(projects))?;
                 writer.write_all(b"\n")?;
             } else {
                 for project in projects {
@@ -206,6 +227,19 @@ fn run_noninteractive(
             println!("configuration is valid: {}", path.display());
             Ok(())
         }
+        WispCommand::Deploy { command: None } => deploy::deploy().map(|_| ()).map_err(Into::into),
+        WispCommand::Deploy {
+            command: Some(DeployCommand::Verify),
+        } => deploy::verify().map_err(Into::into),
+        WispCommand::Deploy {
+            command: Some(DeployCommand::Status { json }),
+        } => deploy::status(json).map_err(Into::into),
+        WispCommand::Deploy {
+            command: Some(DeployCommand::Prune),
+        } => deploy::prune().map_err(Into::into),
+        WispCommand::Deploy {
+            command: Some(DeployCommand::CheckBundle { root, bundle_id }),
+        } => deploy::check_bundle(&root, &bundle_id).map_err(Into::into),
         WispCommand::Open { selection_json } => open_selection(&selection_json),
         WispCommand::Pick(_) => unreachable!("pick is handled before noninteractive commands"),
     }
@@ -328,9 +362,6 @@ pub fn read_host_context(path: &Path) -> Result<HostContext, CliError> {
 fn open_selection(json: &str) -> Result<(), CliError> {
     let envelope: SelectionEnvelope =
         serde_json::from_str(json).map_err(CliError::SelectionJson)?;
-    if envelope.protocol_version != PROTOCOL_VERSION {
-        return Err(CliError::UnsupportedProtocol(envelope.protocol_version));
-    }
     if envelope.status != SelectionStatus::Selected {
         return Err(CliError::NotSelected);
     }

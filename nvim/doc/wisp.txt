@@ -10,13 +10,14 @@ CONTENTS                                                        *wisp-contents*
 =============================================================================
 1. Setup                                                         *wisp-setup*
 
-Add only the repository's `nvim` directory to 'runtimepath', then call:
+Run `wisp deploy`, add its stable `nvim` directory to 'runtimepath', then call:
 >
   require("wisp").setup()
 <
-The `wisp` executable must be available on $PATH. Wisp opens in a floating
-terminal. A project selection sets the originating tab's local working
-directory. A file selection also edits that file in the originating tab.
+The deployed adapter always invokes the executable from its own bundle. Wisp
+opens in a floating terminal. A project selection sets the originating tab's
+local working directory. A file selection also edits that file in the
+originating tab.
 
 The tab-local variables `wisp_project_dir` and `wisp_project_name` contain the
 selected project metadata. They are initially seeded from $WISP_PROJECT_DIR
@@ -40,7 +41,6 @@ Pass options to setup():
     border = "rounded",
   })
 <
-`wisp_path`         Executable name or absolute path. Default: "wisp".
 `config_file`       Optional shared TOML path.
 `command`           User command name. Default: "Wisp".
 `keymap`            Optional normal-mode mapping.

@@ -10,10 +10,9 @@ helper.test("refresh delegates cache invalidation to the wisp executable", funct
       return true, "refreshed 2 projects\n", ""
     end,
   }
-  local wisp = helper.load_plugin(wezterm)
+  local wisp = helper.load_wezterm_adapter(wezterm)
   wisp.apply_to_config({}, {
     config_file = "/Users/test/.config/wisp/config.toml",
-    wisp_path = "/opt/bin/wisp",
   })
   local window = helper.fake_window()
 
@@ -33,7 +32,7 @@ helper.test("refresh logs child process failures", function()
       return false, "", "wisp failed"
     end,
   }
-  local wisp = helper.load_plugin(wezterm)
+  local wisp = helper.load_wezterm_adapter(wezterm)
   wisp.apply_to_config({}, {})
 
   helper.run_callback(wisp.refresh_cache_action(), helper.fake_window(), helper.fake_pane())
