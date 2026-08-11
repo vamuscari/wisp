@@ -2,6 +2,21 @@ package.path = "./?.lua;./?/init.lua;" .. package.path
 
 local helper = require "tests.test_helper"
 
+helper.test("adapter requires its deployed module directory", function()
+  local wezterm = helper.fake_wezterm()
+  package.loaded.wezterm = nil
+  package.preload.wezterm = function()
+    return wezterm
+  end
+
+  local loaded, load_error = pcall(function()
+    return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v3")
+  end)
+
+  assert(not loaded, "adapter should reject a missing module directory")
+  assert(tostring(load_error):match "module directory", "bootstrap error should mention the module directory")
+end)
+
 helper.test("apply_to_config installs no default binding", function()
   local wezterm = helper.fake_wezterm()
   local wisp = helper.load_wezterm_adapter(wezterm)

@@ -20,7 +20,7 @@ local function configured(overrides)
     end,
     json_parse = function(value)
       assert(value == "PROJECTS")
-      return { protocol_version = 2, projects = projects }
+      return { protocol_version = 3, projects = projects }
     end,
   }
   local wisp = helper.load_wezterm_adapter(wezterm)

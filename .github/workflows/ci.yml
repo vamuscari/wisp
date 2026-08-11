@@ -47,6 +47,17 @@ jobs:
           key: msrv
       - run: cargo check --workspace --locked
 
+  opencode-plugin:
+    name: OpenCode plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --check opencode/wisp.js
+      - run: node --test tests/opencode_plugin_test.mjs
+
   lua-test:
     name: Lua (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

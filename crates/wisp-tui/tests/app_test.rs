@@ -9,6 +9,7 @@ use ratatui::{Terminal, backend::TestBackend};
 use wisp_core::{
     config::Openers,
     model::{DirectoryEntry, EntryKind, Project},
+    opencode::{OpenCodeSession, OpenCodeSnapshot, SessionActivity, SessionWaiting},
     protocol::Selection,
 };
 use wisp_tui::{App, Command, DataSource, InitialView, Input, RightMode, run_with_terminal};
@@ -120,6 +121,8 @@ fn replacing_projects_resets_the_two_pane_view() {
 struct FixtureData {
     directory_calls: Vec<PathBuf>,
     directory_error: Option<String>,
+    session_calls: Vec<PathBuf>,
+    session_snapshot: OpenCodeSnapshot,
 }
 
 impl DataSource for FixtureData {
@@ -140,6 +143,11 @@ impl DataSource for FixtureData {
 
     fn refresh_directory(&mut self, path: &Path) -> Result<Vec<DirectoryEntry>, String> {
         self.directory(path)
+    }
+
+    fn sessions(&mut self, path: &Path) -> Result<OpenCodeSnapshot, String> {
+        self.session_calls.push(path.to_path_buf());
+        Ok(self.session_snapshot.clone())
     }
 }
 
@@ -209,4 +217,46 @@ fn terminal_loop_keeps_data_source_errors_visible_until_cancelled() {
 
     assert_eq!(selection, None);
     assert_eq!(app.status(), Some("directory unavailable"));
+}
+
+#[test]
+fn sessions_initial_view_loads_before_input_and_returns_the_selected_session() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        None,
+        InitialView::Sessions,
+        vec!["opencode".into()],
+    );
+    let mut data = FixtureData {
+        session_snapshot: OpenCodeSnapshot {
+            sessions: vec![OpenCodeSession {
+                id: "ses_123".into(),
+                title: "Implement integration".into(),
+                directory: PathBuf::from("/repos/api"),
+                server_url: "http://127.0.0.1:4096".into(),
+                agent: Some("build".into()),
+                parent_id: None,
+                updated_at: 20,
+                activity: SessionActivity::Idle,
+                waiting: SessionWaiting::default(),
+            }],
+            ..OpenCodeSnapshot::default()
+        },
+        ..FixtureData::default()
+    };
+    let mut input = ScriptedInput(VecDeque::from([key(KeyCode::Enter)]));
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let selection = run_with_terminal(&mut terminal, &mut app, &mut data, &mut input)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(data.session_calls, vec![PathBuf::from("/repos/api")]);
+    assert!(matches!(
+        selection,
+        Selection::OpenCodeSession { ref session_id, .. } if session_id == "ses_123"
+    ));
 }

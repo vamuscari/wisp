@@ -1,0 +1,10 @@
+{
+  "protocol_version": 3,
+  "sessions": {
+    "waiting": 1,
+    "running": 2,
+    "retrying": 3,
+    "idle": 4,
+    "error": 5
+  }
+}

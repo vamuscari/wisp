@@ -5,6 +5,7 @@ use ratatui::{Terminal, backend::TestBackend, style::Color};
 use wisp_core::{
     config::Openers,
     model::{DirectoryEntry, EntryKind, Project},
+    opencode::{OpenCodeSession, OpenCodeSnapshot, SessionActivity, SessionWaiting},
     protocol::{HostContext, Selection},
 };
 use wisp_tui::{App, Command, Focus, InitialView, InputMode, RightMode, render};
@@ -41,7 +42,7 @@ fn projects() -> Vec<Project> {
 
 fn context() -> HostContext {
     serde_json::from_value(serde_json::json!({
-        "protocol_version": 2,
+        "protocol_version": 3,
         "projects": {
             "api": {
                 "labels": ["new"],
@@ -63,6 +64,248 @@ fn context() -> HostContext {
     .unwrap()
 }
 
+fn session(
+    id: &str,
+    title: &str,
+    parent_id: Option<&str>,
+    activity: SessionActivity,
+    waiting: SessionWaiting,
+) -> OpenCodeSession {
+    OpenCodeSession {
+        id: id.into(),
+        title: title.into(),
+        directory: PathBuf::from("/repos/docs"),
+        server_url: "http://127.0.0.1:4096".into(),
+        agent: Some(if id == "ses_urgent" { "plan" } else { "build" }.into()),
+        parent_id: parent_id.map(str::to_owned),
+        updated_at: 10,
+        activity,
+        waiting,
+    }
+}
+
+#[test]
+fn sessions_command_loads_the_selected_project_and_groups_children() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+
+    assert_eq!(
+        app.handle_key(key(KeyCode::Char('s'))).unwrap(),
+        Command::LoadSessions(PathBuf::from("/repos/docs"))
+    );
+    assert_eq!(app.right_mode(), RightMode::Sessions);
+    assert_eq!(app.focus(), Focus::Detail);
+    app.load_sessions(OpenCodeSnapshot {
+        sessions: vec![
+            session(
+                "ses_root",
+                "Root task",
+                None,
+                SessionActivity::Idle,
+                SessionWaiting::default(),
+            ),
+            session(
+                "ses_child",
+                "Child task",
+                Some("ses_root"),
+                SessionActivity::Running,
+                SessionWaiting::default(),
+            ),
+            session(
+                "ses_urgent",
+                "Needs input",
+                None,
+                SessionActivity::Running,
+                SessionWaiting {
+                    permissions: 0,
+                    questions: 1,
+                },
+            ),
+        ],
+        ..OpenCodeSnapshot::default()
+    });
+
+    assert_eq!(
+        app.visible_detail_labels(),
+        vec!["Needs input", "Root task", "  Child task"]
+    );
+}
+
+#[test]
+fn selecting_a_session_uses_the_exact_host_mapping_and_attach_argv() {
+    let context: HostContext = serde_json::from_value(serde_json::json!({
+        "protocol_version": 3,
+        "projects": {
+            "api": { "labels": ["new"] },
+            "web": { "labels": ["open"] },
+            "docs": {
+                "labels": ["current", "open"],
+                "session_items": { "ses_urgent": "18" }
+            }
+        }
+    }))
+    .unwrap();
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+    app.handle_key(key(KeyCode::Char('s'))).unwrap();
+    app.load_sessions(OpenCodeSnapshot {
+        sessions: vec![session(
+            "ses_urgent",
+            "Needs input",
+            None,
+            SessionActivity::Running,
+            SessionWaiting {
+                permissions: 1,
+                questions: 0,
+            },
+        )],
+        ..OpenCodeSnapshot::default()
+    });
+
+    let Command::Finish(Selection::OpenCodeSession {
+        project,
+        session_id,
+        opener,
+        host_item_id,
+    }) = app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("session enter should finish with an OpenCode selection")
+    };
+    assert_eq!(project.id, "docs");
+    assert_eq!(session_id, "ses_urgent");
+    assert_eq!(host_item_id.as_deref(), Some("18"));
+    assert_eq!(
+        opener,
+        vec![
+            "opencode",
+            "attach",
+            "http://127.0.0.1:4096",
+            "--dir",
+            "/repos/docs",
+            "--session",
+            "ses_urgent",
+        ]
+    );
+}
+
+#[test]
+fn sessions_waiting_on_questions_sort_before_permissions() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+    app.handle_key(key(KeyCode::Char('s'))).unwrap();
+    let mut permission = session(
+        "ses_permission",
+        "Permission",
+        None,
+        SessionActivity::Running,
+        SessionWaiting {
+            permissions: 1,
+            questions: 0,
+        },
+    );
+    permission.updated_at = 100;
+    let question = session(
+        "ses_question",
+        "Question",
+        None,
+        SessionActivity::Running,
+        SessionWaiting {
+            permissions: 0,
+            questions: 1,
+        },
+    );
+    app.load_sessions(OpenCodeSnapshot {
+        sessions: vec![permission, question],
+        ..OpenCodeSnapshot::default()
+    });
+
+    assert_eq!(app.visible_detail_labels(), vec!["Question", "Permission"]);
+}
+
+#[test]
+fn session_refresh_preserves_the_selected_session_when_status_reorders_rows() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+    app.handle_key(key(KeyCode::Char('s'))).unwrap();
+    app.load_sessions(OpenCodeSnapshot {
+        sessions: vec![
+            session(
+                "ses_first",
+                "First",
+                None,
+                SessionActivity::Running,
+                SessionWaiting {
+                    permissions: 0,
+                    questions: 1,
+                },
+            ),
+            session(
+                "ses_selected",
+                "Selected",
+                None,
+                SessionActivity::Idle,
+                SessionWaiting::default(),
+            ),
+        ],
+        ..OpenCodeSnapshot::default()
+    });
+    app.handle_key(key(KeyCode::Down)).unwrap();
+
+    app.load_sessions(OpenCodeSnapshot {
+        sessions: vec![
+            session(
+                "ses_first",
+                "First",
+                None,
+                SessionActivity::Idle,
+                SessionWaiting::default(),
+            ),
+            session(
+                "ses_selected",
+                "Selected",
+                None,
+                SessionActivity::Running,
+                SessionWaiting {
+                    permissions: 0,
+                    questions: 1,
+                },
+            ),
+        ],
+        ..OpenCodeSnapshot::default()
+    });
+
+    let Command::Finish(Selection::OpenCodeSession { session_id, .. }) =
+        app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("session enter should finish with an OpenCode selection");
+    };
+    assert_eq!(session_id, "ses_selected");
+}
+
 #[test]
 fn windows_initial_view_focuses_the_current_projects_active_window() {
     let app = App::new(
@@ -81,7 +324,7 @@ fn windows_initial_view_focuses_the_current_projects_active_window() {
 #[test]
 fn windows_initial_view_falls_back_when_the_workspace_is_unmanaged() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 2,
+        "protocol_version": 3,
         "projects": {
             "api": { "labels": ["open"], "items": [] },
             "web": { "labels": ["new"], "items": [] },
@@ -504,7 +747,7 @@ fn narrow_renderer_stacks_projects_above_windows() {
 #[test]
 fn renderer_explains_when_an_open_project_has_no_windows() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 2,
+        "protocol_version": 3,
         "projects": {
             "docs": { "labels": ["current", "open"], "items": [] }
         }
@@ -527,7 +770,7 @@ fn renderer_explains_when_an_open_project_has_no_windows() {
 #[test]
 fn renderer_explains_when_the_selected_project_is_not_open() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 2,
+        "protocol_version": 3,
         "projects": {
             "api": { "labels": ["new"], "items": [] },
             "web": { "labels": ["open"], "items": [] },

@@ -14,8 +14,10 @@ end
 function helper.fake_wezterm(overrides)
   overrides = overrides or {}
   local logs = {}
+  local events = {}
   local wezterm = {
     executable_dir = overrides.executable_dir or "/Applications/WezTerm.app/Contents/MacOS",
+    events = events,
     home_dir = overrides.home_dir or "/Users/test",
     logs = logs,
     action = {},
@@ -62,6 +64,14 @@ function helper.fake_wezterm(overrides)
     table.insert(logs, { level = "info", message = message })
   end
 
+  wezterm.on = overrides.on or function(name, callback)
+    events[name] = callback
+  end
+
+  wezterm.format = overrides.format or function(items)
+    return items
+  end
+
   wezterm.run_child_process = overrides.run_child_process
     or function()
       return false, "", "run_child_process is not configured in this test"
@@ -88,12 +98,12 @@ function helper.load_wezterm_adapter(wezterm)
     return wezterm
   end
 
-  return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v1")
+  return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v3", "wezterm")
 end
 
 function helper.fake_window(workspace, mux_window)
   local performed = {}
-  local window = { performed = performed, toasts = {} }
+  local window = { performed = performed, right_status = nil, toasts = {} }
   mux_window = mux_window or {
     get_workspace = function()
       return workspace or "default"
@@ -108,12 +118,20 @@ function helper.fake_window(workspace, mux_window)
     return workspace or "default"
   end
 
+  function window:leader_is_active()
+    return false
+  end
+
   function window:mux_window()
     return mux_window
   end
 
   function window:toast_notification(title, message, icon, timeout)
     table.insert(self.toasts, { title = title, message = message, icon = icon, timeout = timeout })
+  end
+
+  function window:set_right_status(value)
+    self.right_status = value
   end
 
   return window
@@ -129,6 +147,20 @@ function helper.fake_pane(options)
 
   function pane:get_domain_name()
     return options.domain or "local"
+  end
+
+  function pane:get_foreground_process_name()
+    if options.process_error then
+      error(options.process_error)
+    end
+    return options.process_name
+  end
+
+  function pane:window()
+    if options.window_error then
+      error(options.window_error)
+    end
+    return options.mux_window
   end
 
   return pane
@@ -171,20 +203,6 @@ end
 function helper.run_callback(action, window, pane, ...)
   helper.assert_equal(action.kind, "Callback", "callback action kind")
   return action.callback(window, pane, ...)
-end
-
-function helper.with_fake_time(initial, callback)
-  local original_time = os.time
-  local now = initial
-  os.time = function()
-    return now
-  end
-
-  local ok, err = pcall(callback, function(value)
-    now = value
-  end)
-  os.time = original_time
-  assert(ok, err)
 end
 
 function helper.test(name, callback)

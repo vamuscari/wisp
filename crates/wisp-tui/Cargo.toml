@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Ratatui project and file picker for Wisp"
+description = "Ratatui project, session, and file picker for Wisp"
 
 [dependencies]
 crossterm = "0.28"

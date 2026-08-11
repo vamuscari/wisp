@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::{model::DirectoryEntry, path::comparison_key};
+use crate::{model::DirectoryEntry, path::comparison_key, protocol::PROTOCOL_VERSION};
 
-pub const CACHE_VERSION: u32 = 1;
+pub const CACHE_VERSION: u32 = PROTOCOL_VERSION;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

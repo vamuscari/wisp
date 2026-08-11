@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CONFIG_VERSION: u32 = 1;
+use crate::protocol::PROTOCOL_VERSION;
+
+pub const CONFIG_VERSION: u32 = PROTOCOL_VERSION;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Config {
@@ -13,6 +15,7 @@ pub struct Config {
     pub roots: Vec<RootConfig>,
     pub projects: Vec<ProjectConfig>,
     pub openers: Openers,
+    pub opencode: Option<OpenCodeConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -34,6 +37,13 @@ pub struct ProjectConfig {
 pub struct Openers {
     pub file: Option<Vec<String>>,
     pub project: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OpenCodeConfig {
+    pub server_url: String,
+    pub command: Vec<String>,
+    pub session_limit: usize,
 }
 
 #[derive(Debug, Error)]
@@ -65,6 +75,7 @@ struct RawConfig {
     projects: Vec<RawProjectConfig>,
     #[serde(default)]
     openers: RawOpeners,
+    opencode: Option<RawOpenCodeConfig>,
 }
 
 #[derive(Deserialize)]
@@ -91,8 +102,21 @@ struct RawOpeners {
     project: Option<toml::Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOpenCodeConfig {
+    server_url: String,
+    command: Option<toml::Value>,
+    #[serde(default = "default_opencode_session_limit")]
+    session_limit: usize,
+}
+
 const fn default_cache_ttl() -> u64 {
     60
+}
+
+const fn default_opencode_session_limit() -> usize {
+    100
 }
 
 impl Config {
@@ -144,6 +168,25 @@ impl Config {
             project: validated_opener(raw.openers.project, "openers.project")?,
         };
 
+        let opencode = raw
+            .opencode
+            .map(|opencode| {
+                if opencode.session_limit == 0 {
+                    return Err(ConfigError::Validation(
+                        "opencode.session_limit must be greater than zero".into(),
+                    ));
+                }
+                Ok(OpenCodeConfig {
+                    server_url: validated_loopback_url(&opencode.server_url)?,
+                    command: match opencode.command {
+                        Some(command) => validated_argv(command, "opencode.command")?,
+                        None => vec!["opencode".into()],
+                    },
+                    session_limit: opencode.session_limit,
+                })
+            })
+            .transpose()?;
+
         Ok(Self {
             version: raw.version,
             cache_ttl_seconds: raw.cache_ttl_seconds,
@@ -151,6 +194,7 @@ impl Config {
             roots,
             projects,
             openers,
+            opencode,
         })
     }
 
@@ -197,6 +241,10 @@ fn validated_opener(
     let Some(value) = value else {
         return Ok(None);
     };
+    validated_argv(value, field).map(Some)
+}
+
+fn validated_argv(value: toml::Value, field: &str) -> Result<Vec<String>, ConfigError> {
     let toml::Value::Array(values) = value else {
         return Err(ConfigError::Validation(format!(
             "{field} must be an argv array"
@@ -222,5 +270,58 @@ fn validated_opener(
         }
         args.push(value);
     }
-    Ok(Some(args))
+    Ok(args)
+}
+
+fn validated_loopback_url(value: &str) -> Result<String, ConfigError> {
+    let Some(authority) = value.strip_prefix("http://") else {
+        return Err(ConfigError::Validation(
+            "opencode.server_url must be a loopback HTTP URL".into(),
+        ));
+    };
+    let authority = authority.strip_suffix('/').unwrap_or(authority);
+    if authority.is_empty()
+        || authority.contains('/')
+        || authority.contains('?')
+        || authority.contains('#')
+        || authority.contains('@')
+    {
+        return Err(ConfigError::Validation(
+            "opencode.server_url must be a loopback HTTP URL".into(),
+        ));
+    }
+
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, remainder)) = rest.split_once(']') else {
+            return Err(ConfigError::Validation(
+                "opencode.server_url must be a loopback HTTP URL".into(),
+            ));
+        };
+        let port = remainder
+            .strip_prefix(':')
+            .filter(|_| !remainder.is_empty());
+        if !remainder.is_empty() && port.is_none() {
+            return Err(ConfigError::Validation(
+                "opencode.server_url must be a loopback HTTP URL".into(),
+            ));
+        }
+        (host, port)
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        (host, Some(port))
+    } else {
+        (authority, None)
+    };
+
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    let valid_port = port.is_none_or(|port| port.parse::<u16>().is_ok_and(|port| port > 0));
+    if !loopback || !valid_port {
+        return Err(ConfigError::Validation(
+            "opencode.server_url must be a loopback HTTP URL".into(),
+        ));
+    }
+
+    Ok(value.trim_end_matches('/').to_string())
 }

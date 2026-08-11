@@ -5,13 +5,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Standalone project and file picker"
+description = "Standalone project, session, and file picker"
 
 [[bin]]
 name = "wisp"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 blake3.workspace = true
 clap = { version = "4.5", features = ["derive"] }
 directories.workspace = true
@@ -20,6 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+ureq.workspace = true
 wisp-core = { path = "../wisp-core" }
 wisp-tui = { path = "../wisp-tui" }
 

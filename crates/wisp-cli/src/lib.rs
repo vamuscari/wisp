@@ -4,7 +4,7 @@ use std::{
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -17,17 +17,21 @@ use wisp_core::{
     config::{Config, ConfigError},
     discovery::StdFileSystem,
     model::{DirectoryEntry, Project},
-    protocol::{HostContext, ProjectsEnvelope, Selection, SelectionEnvelope, SelectionStatus},
+    protocol::{
+        HostContext, OpenCodeStatusEnvelope, ProjectsEnvelope, Selection, SelectionEnvelope,
+        SelectionStatus,
+    },
 };
 use wisp_tui::{App, DataSource, TuiError};
 
 mod deploy;
+pub mod opencode;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "wisp",
     version,
-    about = "Pick projects and files from the terminal"
+    about = "Pick projects, OpenCode sessions, and files from the terminal"
 )]
 struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
@@ -60,6 +64,11 @@ enum WispCommand {
         #[arg(value_name = "SELECTION_JSON")]
         selection_json: String,
     },
+    #[command(name = "opencode")]
+    Opencode {
+        #[command(subcommand)]
+        command: OpenCodeCommand,
+    },
 }
 
 #[derive(Clone, Debug, Default, Args)]
@@ -70,6 +79,8 @@ struct PickArgs {
     host_context_file: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = InitialView::Projects)]
     initial_view: InitialView,
+    #[arg(long)]
+    disable_sessions: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -77,6 +88,7 @@ enum InitialView {
     #[default]
     Projects,
     Windows,
+    Sessions,
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]
@@ -87,6 +99,45 @@ enum CacheCommand {
 #[derive(Clone, Copy, Debug, Subcommand)]
 enum ConfigCommand {
     Validate,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum OpenCodeCommand {
+    Install,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(hide = true)]
+    Register {
+        #[arg(long)]
+        server_url: String,
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        project_path: PathBuf,
+        #[arg(long)]
+        pid: u32,
+        #[arg(long)]
+        pane_id: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        session_status: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        waiting_permissions: usize,
+        #[arg(long, default_value_t = 0)]
+        waiting_questions: usize,
+        #[arg(long)]
+        session_error: Option<String>,
+    },
+    #[command(hide = true)]
+    Unregister {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        pid: u32,
+    },
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -145,6 +196,8 @@ pub enum CliError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Deploy(#[from] deploy::DeployError),
+    #[error(transparent)]
+    OpenCode(#[from] opencode::OpenCodeError),
 }
 
 pub fn run() -> i32 {
@@ -169,6 +222,7 @@ fn run_pick_command(config_override: Option<&Path>, args: PickArgs) -> i32 {
         config_override,
         args.host_context_file.as_deref(),
         args.initial_view,
+        !args.disable_sessions,
     );
     let (envelope, exit_code) = match result {
         Ok(Some(selection)) => (SelectionEnvelope::selected(selection), 0),
@@ -241,6 +295,77 @@ fn run_noninteractive(
             command: Some(DeployCommand::CheckBundle { root, bundle_id }),
         } => deploy::check_bundle(&root, &bundle_id).map_err(Into::into),
         WispCommand::Open { selection_json } => open_selection(&selection_json),
+        WispCommand::Opencode {
+            command: OpenCodeCommand::Install,
+        } => deploy::install_opencode().map(|_| ()).map_err(Into::into),
+        WispCommand::Opencode {
+            command: OpenCodeCommand::Status { json },
+        } => {
+            let registry = opencode::default_registry_dir()?;
+            let sessions = opencode::live_status(&registry)?;
+            if json {
+                let stdout = io::stdout();
+                let mut writer = stdout.lock();
+                serde_json::to_writer_pretty(&mut writer, &OpenCodeStatusEnvelope::new(sessions))?;
+                writer.write_all(b"\n")?;
+            } else {
+                println!(
+                    "OpenCode sessions: wait {}  run {}  retry {}  idle {}  err {}",
+                    sessions.waiting,
+                    sessions.running,
+                    sessions.retrying,
+                    sessions.idle,
+                    sessions.error
+                );
+            }
+            Ok(())
+        }
+        WispCommand::Opencode {
+            command:
+                OpenCodeCommand::Register {
+                    server_url,
+                    directory,
+                    project_path,
+                    pid,
+                    pane_id,
+                    session_id,
+                    session_status,
+                    waiting_permissions,
+                    waiting_questions,
+                    session_error,
+                },
+        } => {
+            let registry = opencode::default_registry_dir()?;
+            let session_activity = session_status
+                .as_deref()
+                .map(opencode::decode_session_status)
+                .transpose()?;
+            opencode::register_instance(
+                &registry,
+                &opencode::RegistryRegistration {
+                    server_url,
+                    directory,
+                    project_path,
+                    pid,
+                    pane_id,
+                    session_id,
+                    session_activity,
+                    session_waiting: wisp_core::opencode::SessionWaiting {
+                        permissions: waiting_permissions,
+                        questions: waiting_questions,
+                    },
+                    session_error,
+                },
+            )?;
+            Ok(())
+        }
+        WispCommand::Opencode {
+            command: OpenCodeCommand::Unregister { directory, pid },
+        } => {
+            let registry = opencode::default_registry_dir()?;
+            opencode::unregister_instance(&registry, pid, &directory)?;
+            Ok(())
+        }
         WispCommand::Pick(_) => unreachable!("pick is handled before noninteractive commands"),
     }
 }
@@ -249,28 +374,58 @@ fn pick(
     config_override: Option<&Path>,
     host_context_path: Option<&Path>,
     initial_view: InitialView,
+    sessions_enabled: bool,
 ) -> Result<Option<Selection>, CliError> {
     let (config, mut catalog) = load_catalog(config_override)?;
     let projects = catalog.projects(now())?;
     let context = host_context_path.map(read_host_context).transpose()?;
-    let app = App::new(
-        projects,
-        config.openers,
-        config.follow_symlinks,
-        context,
-        match initial_view {
-            InitialView::Projects => wisp_tui::InitialView::Projects,
-            InitialView::Windows => wisp_tui::InitialView::Windows,
-        },
-    );
+    let opencode_config = sessions_enabled.then(|| config.opencode.clone()).flatten();
+    let tui_initial_view = match initial_view {
+        InitialView::Projects => wisp_tui::InitialView::Projects,
+        InitialView::Windows => wisp_tui::InitialView::Windows,
+        InitialView::Sessions => wisp_tui::InitialView::Sessions,
+    };
+    let app = match &opencode_config {
+        Some(opencode) => App::new_with_opencode(
+            projects,
+            config.openers,
+            config.follow_symlinks,
+            context,
+            tui_initial_view,
+            opencode.command.clone(),
+        ),
+        None => App::new(
+            projects,
+            config.openers,
+            config.follow_symlinks,
+            context,
+            tui_initial_view,
+        ),
+    };
+    let opencode = opencode_config
+        .map(opencode::OpenCodeClient::new)
+        .transpose()?
+        .map(|client| OpenCodeDataSource {
+            watcher: client.watch_shared(),
+            client,
+            last_poll: Instant::now(),
+        });
     let mut data = CatalogDataSource {
         catalog: &mut catalog,
+        opencode,
     };
     Ok(wisp_tui::run(app, &mut data)?)
 }
 
 struct CatalogDataSource<'a> {
     catalog: &'a mut Catalog<StdFileSystem>,
+    opencode: Option<OpenCodeDataSource>,
+}
+
+struct OpenCodeDataSource {
+    client: opencode::OpenCodeClient,
+    watcher: opencode::OpenCodeWatcher,
+    last_poll: Instant,
 }
 
 impl DataSource for CatalogDataSource<'_> {
@@ -290,6 +445,33 @@ impl DataSource for CatalogDataSource<'_> {
         self.catalog
             .refresh_directory(path, now())
             .map_err(|error| error.to_string())
+    }
+
+    fn sessions(&mut self, path: &Path) -> Result<wisp_core::opencode::OpenCodeSnapshot, String> {
+        let opencode = self
+            .opencode
+            .as_mut()
+            .ok_or_else(|| "OpenCode integration is not configured".to_string())?;
+        let snapshot = opencode.client.snapshot(path);
+        opencode.last_poll = Instant::now();
+        snapshot.map_err(|error| error.to_string())
+    }
+
+    fn refresh_sessions(
+        &mut self,
+        path: &Path,
+    ) -> Result<wisp_core::opencode::OpenCodeSnapshot, String> {
+        self.sessions(path)
+    }
+
+    fn session_updates_pending(&mut self) -> bool {
+        let Some(opencode) = &mut self.opencode else {
+            return false;
+        };
+        if opencode.watcher.changed() || opencode.last_poll.elapsed() >= Duration::from_secs(1) {
+            return true;
+        }
+        false
     }
 }
 
@@ -370,6 +552,7 @@ fn open_selection(json: &str) -> Result<(), CliError> {
         Selection::Project { opener, .. } | Selection::File { opener, .. } => {
             opener.ok_or(CliError::MissingOpener)?
         }
+        Selection::OpenCodeSession { opener, .. } => opener,
         Selection::CloseProject { .. } | Selection::HostItem { .. } => {
             return Err(CliError::MissingOpener);
         }
@@ -427,4 +610,107 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    use tempfile::TempDir;
+    use wisp_core::config::OpenCodeConfig;
+
+    use super::*;
+
+    #[test]
+    fn session_poll_interval_starts_after_a_slow_snapshot_finishes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let target = read_target(&mut stream);
+                let body = if target.starts_with("/global/health") {
+                    r#"{"healthy":true,"version":"1.18.15"}"#
+                } else if target.starts_with("/session/status") {
+                    "{}"
+                } else if target.starts_with("/session?") {
+                    thread::sleep(Duration::from_millis(1_100));
+                    "[]"
+                } else if target.starts_with("/permission") || target.starts_with("/question") {
+                    "[]"
+                } else {
+                    panic!("unexpected OpenCode request {target}");
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let temporary = TempDir::new().unwrap();
+        let config = Config::parse("version = 3", temporary.path()).unwrap();
+        let cache =
+            CacheStore::open(temporary.path().join("cache.json"), config.fingerprint()).unwrap();
+        let mut catalog = Catalog::new(config, StdFileSystem, cache);
+        let client = opencode::OpenCodeClient::with_registry_dir(
+            OpenCodeConfig {
+                server_url,
+                command: vec!["opencode".into()],
+                session_limit: 100,
+            },
+            temporary.path().join("registry"),
+        );
+        let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
+        let watcher_url = format!("http://{}", unavailable.local_addr().unwrap());
+        drop(unavailable);
+        let watcher_client = opencode::OpenCodeClient::with_registry_dir(
+            OpenCodeConfig {
+                server_url: watcher_url,
+                command: vec!["opencode".into()],
+                session_limit: 100,
+            },
+            temporary.path().join("watcher-registry"),
+        );
+        let mut data = CatalogDataSource {
+            catalog: &mut catalog,
+            opencode: Some(OpenCodeDataSource {
+                client,
+                watcher: watcher_client.watch_shared(),
+                last_poll: Instant::now() - Duration::from_secs(2),
+            }),
+        };
+
+        DataSource::sessions(&mut data, Path::new("/repos/wisp")).unwrap();
+
+        assert!(
+            data.opencode.as_ref().unwrap().last_poll.elapsed() < Duration::from_millis(500),
+            "poll interval should start when the snapshot completes"
+        );
+        server.join().unwrap();
+    }
+
+    fn read_target(stream: &mut std::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        String::from_utf8(request)
+            .unwrap()
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap()
+            .to_owned()
+    }
 }

@@ -136,11 +136,11 @@ end
 
 local function load_adapter(vim)
   _G.vim = vim
-  return assert(loadfile "nvim/lua/wisp/init.lua")("/opt/bin/wisp", "wisp-deployment-v1")
+  return assert(loadfile "nvim/lua/wisp/init.lua")("/opt/bin/wisp", "wisp-deployment-v3")
 end
 
 helper.test("Neovim adapter rejects ordinary runtimepath loading", function()
-  local vim = fake_vim { protocol_version = 2, status = "cancelled" }
+  local vim = fake_vim { protocol_version = 3, status = "cancelled" }
   _G.vim = vim
   package.loaded.wisp = nil
   package.loaded["wisp.init"] = nil
@@ -154,7 +154,7 @@ helper.test("Neovim adapter rejects ordinary runtimepath loading", function()
 end)
 
 helper.test("Neovim setup registers a command, optional mapping, and inherited metadata", function()
-  local vim, state = fake_vim { protocol_version = 2, status = "cancelled" }
+  local vim, state = fake_vim { protocol_version = 3, status = "cancelled" }
   vim.env.WISP_PROJECT_DIR = "/Users/test/Repos/api"
   vim.env.WISP_PROJECT_NAME = "api"
   local wisp = load_adapter(vim)
@@ -170,7 +170,7 @@ end)
 
 helper.test("Neovim picker applies a file result to the originating tab", function()
   local vim, state = fake_vim {
-    protocol_version = 2,
+    protocol_version = 3,
     status = "selected",
     selection = {
       kind = "file",
@@ -193,6 +193,7 @@ helper.test("Neovim picker applies a file result to the originating tab", functi
     "--config",
     "/Users/test/.config/wisp/config.toml",
     "pick",
+    "--disable-sessions",
     "--result-file",
     argument_after(state.job.args, "--result-file"),
   }, "picker argv")
@@ -210,7 +211,7 @@ helper.test("Neovim picker applies a file result to the originating tab", functi
 end)
 
 helper.test("Neovim cancellation closes the float without changing the tab", function()
-  local vim, state = fake_vim { protocol_version = 2, status = "cancelled" }
+  local vim, state = fake_vim { protocol_version = 3, status = "cancelled" }
   local wisp = load_adapter(vim)
   wisp.setup()
 
@@ -235,7 +236,7 @@ end)
 
 helper.test("Neovim requires every project protocol field", function()
   local vim, state = fake_vim {
-    protocol_version = 2,
+    protocol_version = 3,
     status = "selected",
     selection = {
       kind = "file",
@@ -262,7 +263,7 @@ helper.test("Neovim rejects unknown project protocol fields", function()
     future_field = true,
   }
   local vim, state = fake_vim {
-    protocol_version = 2,
+    protocol_version = 3,
     status = "selected",
     selection = { kind = "project", project = project_with_extra },
   }
@@ -276,7 +277,7 @@ helper.test("Neovim rejects unknown project protocol fields", function()
 end)
 
 helper.test("Neovim rejects unknown result envelope fields", function()
-  local vim, state = fake_vim { protocol_version = 2, status = "cancelled", future_field = true }
+  local vim, state = fake_vim { protocol_version = 3, status = "cancelled", future_field = true }
   local wisp = load_adapter(vim)
   wisp.setup()
 
@@ -288,7 +289,7 @@ end)
 
 helper.test("Neovim rejects fields inconsistent with result status", function()
   local vim, state = fake_vim {
-    protocol_version = 2,
+    protocol_version = 3,
     status = "cancelled",
     selection = { kind = "project", project = project },
   }
@@ -303,7 +304,7 @@ end)
 
 helper.test("Neovim rejects unknown selection fields", function()
   local vim, state = fake_vim {
-    protocol_version = 2,
+    protocol_version = 3,
     status = "selected",
     selection = { kind = "project", project = project, future_field = true },
   }
@@ -318,7 +319,7 @@ end)
 
 helper.test("Neovim rejects malformed opener fields", function()
   local vim, state = fake_vim {
-    protocol_version = 2,
+    protocol_version = 3,
     status = "selected",
     selection = { kind = "project", project = project, opener = "nvim" },
   }

@@ -1,5 +1,5 @@
 {
-  "protocol_version": 2,
+  "protocol_version": 3,
   "projects": {
     "api": {
       "labels": ["current", "open"],
@@ -10,7 +10,10 @@
           "detail": "src/main.rs",
           "active": true
         }
-      ]
+      ],
+      "session_items": {
+        "ses_123": "tab:17"
+      }
     },
     "artifacts": {
       "labels": ["new"]

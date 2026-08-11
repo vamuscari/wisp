@@ -7,9 +7,9 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::value::RawValue;
 use thiserror::Error;
 
-use crate::model::Project;
+use crate::{model::Project, opencode::OpenCodeStatusCounts};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Deserialize)]
 struct VersionHeader {
@@ -64,6 +64,53 @@ impl<'de> Deserialize<'de> for ProjectsEnvelope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OpenCodeStatusEnvelope {
+    pub protocol_version: u32,
+    pub sessions: OpenCodeStatusCounts,
+}
+
+impl OpenCodeStatusEnvelope {
+    pub fn new(sessions: OpenCodeStatusCounts) -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            sessions,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenCodeStatusEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let json = Box::<RawValue>::deserialize(deserializer)?;
+        crate::strict_json::reject_duplicate_fields(json.get().as_bytes())
+            .map_err(de::Error::custom)?;
+        let header: VersionHeader = serde_json::from_str(json.get()).map_err(de::Error::custom)?;
+        if header.protocol_version != PROTOCOL_VERSION {
+            return Err(de::Error::custom(format!(
+                "unsupported OpenCode status protocol version {}",
+                header.protocol_version
+            )));
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawOpenCodeStatusEnvelope {
+            protocol_version: u32,
+            sessions: OpenCodeStatusCounts,
+        }
+
+        let raw: RawOpenCodeStatusEnvelope =
+            serde_json::from_str(json.get()).map_err(de::Error::custom)?;
+        Ok(Self {
+            protocol_version: raw.protocol_version,
+            sessions: raw.sessions,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HostContext {
     protocol_version: u32,
     projects: BTreeMap<String, HostProjectContext>,
@@ -83,6 +130,10 @@ pub enum HostContextError {
     EmptyItemLabel,
     #[error("host context project {project_id} contains duplicate item ID {item_id}")]
     DuplicateItemId { project_id: String, item_id: String },
+    #[error("OpenCode session IDs in host context must not be empty")]
+    EmptySessionId,
+    #[error("OpenCode session host item IDs must not be empty")]
+    EmptySessionItemId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +142,8 @@ pub struct HostProjectContext {
     pub labels: Vec<String>,
     #[serde(default)]
     pub items: Vec<HostItem>,
+    #[serde(default)]
+    pub session_items: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +181,12 @@ impl HostContext {
                     });
                 }
             }
+            if context.session_items.keys().any(String::is_empty) {
+                return Err(HostContextError::EmptySessionId);
+            }
+            if context.session_items.values().any(String::is_empty) {
+                return Err(HostContextError::EmptySessionItemId);
+            }
         }
         Ok(Self {
             protocol_version: PROTOCOL_VERSION,
@@ -147,6 +206,14 @@ impl HostContext {
             .get(project_id)
             .map(|context| context.items.as_slice())
             .unwrap_or_default()
+    }
+
+    pub fn session_item(&self, project_id: &str, session_id: &str) -> Option<&str> {
+        self.projects
+            .get(project_id)?
+            .session_items
+            .get(session_id)
+            .map(String::as_str)
     }
 }
 
@@ -297,5 +364,12 @@ pub enum Selection {
     HostItem {
         project: Project,
         id: String,
+    },
+    OpenCodeSession {
+        project: Project,
+        session_id: String,
+        opener: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        host_item_id: Option<String>,
     },
 }

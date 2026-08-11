@@ -1,12 +1,112 @@
 use std::path::Path;
 
-use wisp_core::config::{Config, ConfigError};
+use wisp_core::{
+    cache::CACHE_VERSION,
+    config::{CONFIG_VERSION, Config, ConfigError},
+    protocol::PROTOCOL_VERSION,
+};
+
+#[test]
+fn persistent_schema_versions_match_the_protocol() {
+    assert_eq!(CONFIG_VERSION, PROTOCOL_VERSION);
+    assert_eq!(CACHE_VERSION, PROTOCOL_VERSION);
+}
+
+#[test]
+fn parses_opencode_shared_server_config() {
+    let config = Config::parse(
+        r#"
+version = 3
+
+[opencode]
+server_url = "http://127.0.0.1:4096"
+command = ["opencode"]
+session_limit = 25
+"#,
+        Path::new("/Users/test"),
+    )
+    .expect("OpenCode config should parse");
+
+    let opencode = config.opencode.expect("OpenCode should be enabled");
+    assert_eq!(opencode.server_url, "http://127.0.0.1:4096");
+    assert_eq!(opencode.command, vec!["opencode"]);
+    assert_eq!(opencode.session_limit, 25);
+}
+
+#[test]
+fn opencode_config_defaults_command_and_limit() {
+    let config = Config::parse(
+        r#"
+version = 3
+
+[opencode]
+server_url = "http://localhost:4096"
+"#,
+        Path::new("/Users/test"),
+    )
+    .expect("OpenCode defaults should be valid");
+
+    let opencode = config.opencode.expect("OpenCode should be enabled");
+    assert_eq!(opencode.command, vec!["opencode"]);
+    assert_eq!(opencode.session_limit, 100);
+}
+
+#[test]
+fn rejects_non_loopback_opencode_servers_and_invalid_limits() {
+    for (server_url, expected) in [
+        ("https://127.0.0.1:4096", "loopback HTTP URL"),
+        ("http://example.com:4096", "loopback HTTP URL"),
+    ] {
+        let error = Config::parse(
+            &format!(
+                r#"
+version = 3
+
+[opencode]
+server_url = "{server_url}"
+"#
+            ),
+            Path::new("/Users/test"),
+        )
+        .expect_err("non-loopback OpenCode URLs should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
+
+    let limit_error = Config::parse(
+        r#"
+version = 3
+
+[opencode]
+server_url = "http://127.0.0.1:4096"
+session_limit = 0
+"#,
+        Path::new("/Users/test"),
+    )
+    .expect_err("a zero session limit should fail");
+    assert!(limit_error.to_string().contains("session_limit"));
+
+    let command_error = Config::parse(
+        r#"
+version = 3
+
+[opencode]
+server_url = "http://127.0.0.1:4096"
+command = []
+"#,
+        Path::new("/Users/test"),
+    )
+    .expect_err("an empty OpenCode command should fail");
+    assert!(command_error.to_string().contains("opencode.command"));
+}
 
 #[test]
 fn parses_shared_config_and_expands_home_paths() {
     let config = Config::parse(
         r#"
-version = 1
+version = 3
 
 [[roots]]
 path = "~/Repos"
@@ -26,7 +126,7 @@ file = ["nvim", "{path}"]
     )
     .expect("config should parse");
 
-    assert_eq!(config.version, 1);
+    assert_eq!(config.version, 3);
     assert_eq!(config.cache_ttl_seconds, 60);
     assert!(!config.follow_symlinks);
     assert_eq!(config.roots[0].path, Path::new("/Users/test/Repos"));
@@ -46,16 +146,16 @@ file = ["nvim", "{path}"]
 #[test]
 fn rejects_unsupported_versions_and_shell_string_openers() {
     let version_error = Config::parse("version = 2", Path::new("/home/test"))
-        .expect_err("unsupported versions should fail");
+        .expect_err("old versions should fail");
     assert!(matches!(version_error, ConfigError::UnsupportedVersion(2)));
 
-    let future_error = Config::parse("version = 2\nfuture_option = true", Path::new("/home/test"))
+    let future_error = Config::parse("version = 4\nfuture_option = true", Path::new("/home/test"))
         .expect_err("the version should be checked before future fields");
-    assert!(matches!(future_error, ConfigError::UnsupportedVersion(2)));
+    assert!(matches!(future_error, ConfigError::UnsupportedVersion(4)));
 
     let opener_error = Config::parse(
         r#"
-version = 1
+version = 3
 [openers]
 file = "nvim {path}"
 "#,
@@ -72,7 +172,7 @@ file = "nvim {path}"
 fn rejects_empty_paths_and_opener_arguments() {
     let root_error = Config::parse(
         r#"
-version = 1
+version = 3
 [[roots]]
 path = ""
 "#,
@@ -83,7 +183,7 @@ path = ""
 
     let opener_error = Config::parse(
         r#"
-version = 1
+version = 3
 [openers]
 file = ["nvim", ""]
 "#,

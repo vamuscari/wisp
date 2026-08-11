@@ -1,12 +1,17 @@
 local M = {}
 local deployed_wisp_path, deployment_token = ...
+local WISP_VERSION = 3
 
-if type(deployed_wisp_path) ~= "string" or deployed_wisp_path == "" or deployment_token ~= "wisp-deployment-v1" then
+if
+  type(deployed_wisp_path) ~= "string"
+  or deployed_wisp_path == ""
+  or deployment_token ~= "wisp-deployment-v" .. WISP_VERSION
+then
   error "Wisp's Neovim adapter must be loaded by the deployed runtime"
 end
 
 local options = {}
-local PROTOCOL_VERSION = 2
+local PROTOCOL_VERSION = WISP_VERSION
 
 local function configure(configured)
   configured = configured or {}
@@ -70,6 +75,7 @@ local function picker_args(result_path)
     table.insert(args, options.config_file)
   end
   table.insert(args, "pick")
+  table.insert(args, "--disable-sessions")
   table.insert(args, "--result-file")
   table.insert(args, result_path)
   return args

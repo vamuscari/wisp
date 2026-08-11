@@ -12,10 +12,16 @@ use tempfile::{Builder, NamedTempFile};
 use thiserror::Error;
 use wisp_core::protocol::PROTOCOL_VERSION;
 
-const DEPLOYMENT_SCHEMA_VERSION: u32 = 1;
+const DEPLOYMENT_SCHEMA_VERSION: u32 = PROTOCOL_VERSION;
 const WEZTERM_ADAPTER: &[u8] = include_bytes!("../../../wezterm/init.lua");
+const WEZTERM_OPTIONS: &[u8] = include_bytes!("../../../wezterm/options.lua");
+const WEZTERM_CLIENT: &[u8] = include_bytes!("../../../wezterm/client.lua");
+const WEZTERM_WORKSPACE: &[u8] = include_bytes!("../../../wezterm/workspace.lua");
+const WEZTERM_PICKER: &[u8] = include_bytes!("../../../wezterm/picker.lua");
+const WEZTERM_STATUS: &[u8] = include_bytes!("../../../wezterm/status.lua");
 const NVIM_ADAPTER: &[u8] = include_bytes!("../../../nvim/lua/wisp/init.lua");
 const NVIM_HELP: &[u8] = include_bytes!("../../../nvim/doc/wisp.txt");
+const OPENCODE_PLUGIN: &[u8] = include_bytes!("../../../opencode/wisp.js");
 
 #[derive(Debug, Error)]
 pub enum DeployError {
@@ -104,8 +110,14 @@ pub fn deploy() -> Result<PathBuf, DeployError> {
     let assets = [
         (executable_path.as_str(), executable_bytes.as_slice()),
         ("wezterm/init.lua", WEZTERM_ADAPTER),
+        ("wezterm/options.lua", WEZTERM_OPTIONS),
+        ("wezterm/client.lua", WEZTERM_CLIENT),
+        ("wezterm/workspace.lua", WEZTERM_WORKSPACE),
+        ("wezterm/picker.lua", WEZTERM_PICKER),
+        ("wezterm/status.lua", WEZTERM_STATUS),
         ("nvim/lua/wisp/init.lua", NVIM_ADAPTER),
         ("nvim/doc/wisp.txt", NVIM_HELP),
+        ("opencode/wisp.js", OPENCODE_PLUGIN),
     ];
     let bundle_id = bundle_id(&assets);
     let deployments = root.join("deployments");
@@ -245,6 +257,26 @@ pub fn check_bundle(root: &Path, bundle_id: &str) -> Result<(), DeployError> {
     Ok(())
 }
 
+pub fn install_opencode() -> Result<PathBuf, DeployError> {
+    let root = deployment_root()?;
+    let _lock = DeploymentLock::acquire_shared(&root)?;
+    let active = read_active(&root)?.ok_or_else(|| {
+        DeployError::Invalid("no active Wisp deployment; run wisp deploy first".into())
+    })?;
+    verify_compatible_bundle(
+        &root.join("deployments").join(&active.current_bundle_id),
+        &active.current_bundle_id,
+    )?;
+    let path = opencode_config_dir()?.join("plugins/wisp.js");
+    let loader = opencode_loader_contents(&root, executable_name())?;
+    write_atomic(path.clone(), loader.as_bytes())?;
+    println!(
+        "installed OpenCode integration at {}; restart OpenCode to load it",
+        path.display()
+    );
+    Ok(path)
+}
+
 fn deployment_root() -> Result<PathBuf, DeployError> {
     if let Some(path) = env::var_os("WISP_DEPLOY_ROOT").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(path));
@@ -269,9 +301,22 @@ fn wezterm_config_dir() -> Result<PathBuf, DeployError> {
     Ok(base.config_dir().join("wezterm"))
 }
 
+fn opencode_config_dir() -> Result<PathBuf, DeployError> {
+    if let Some(path) = env::var_os("WISP_OPENCODE_CONFIG_DIR").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path).join("opencode"));
+    }
+    BaseDirs::new()
+        .map(|base| base.home_dir().join(".config/opencode"))
+        .ok_or(DeployError::MissingConfigDirectory)
+}
+
 fn bundle_id(assets: &[(&str, &[u8])]) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"wisp-deployment-v1\0");
+    let deployment_token = format!("wisp-deployment-v{PROTOCOL_VERSION}\0");
+    hasher.update(deployment_token.as_bytes());
     for (path, contents) in assets {
         hasher.update(path.as_bytes());
         hasher.update(b"\0");
@@ -310,8 +355,14 @@ fn verify_bundle(path: &Path, expected_id: &str) -> Result<Manifest, DeployError
     let expected_paths = [
         executable,
         "wezterm/init.lua",
+        "wezterm/options.lua",
+        "wezterm/client.lua",
+        "wezterm/workspace.lua",
+        "wezterm/picker.lua",
+        "wezterm/status.lua",
         "nvim/lua/wisp/init.lua",
         "nvim/doc/wisp.txt",
+        "opencode/wisp.js",
     ];
     if manifest.files.len() != expected_paths.len()
         || expected_paths
@@ -449,7 +500,7 @@ local success, _, stderr = wezterm.run_child_process {{
 }}
 assert(success, "Wisp bundle verification failed: " .. (stderr or "unknown error"))
 local chunk = assert(loadfile(bundle .. "/wezterm/init.lua"))
-return chunk(binary, "wisp-deployment-v1")
+return chunk(binary, "wisp-deployment-v{PROTOCOL_VERSION}", bundle .. "/wezterm")
 "#
     );
     let nvim_loader = format!(
@@ -481,10 +532,49 @@ local verification = vim.system({{
 }}, {{ text = true }}):wait()
 assert(verification.code == 0, "Wisp bundle verification failed: " .. (verification.stderr or "unknown error"))
 local chunk = assert(loadfile(bundle .. "/nvim/lua/wisp/init.lua"))
-return chunk(binary, "wisp-deployment-v1")
+return chunk(binary, "wisp-deployment-v{PROTOCOL_VERSION}")
 "#
     );
     Ok((wezterm_loader, nvim_loader))
+}
+
+fn opencode_loader_contents(root: &Path, executable_name: &str) -> Result<String, DeployError> {
+    let root = serde_json::to_string(&root.to_string_lossy())?;
+    let executable = serde_json::to_string(executable_name)?;
+    Ok(format!(
+        r#"import {{ readFileSync }} from "node:fs"
+import path from "node:path"
+import {{ spawnSync }} from "node:child_process"
+import {{ pathToFileURL }} from "node:url"
+
+const root = {root}
+const executable = {executable}
+
+function readJSON(file) {{
+  return JSON.parse(readFileSync(file, "utf8"))
+}}
+
+export default async function WispPlugin(input) {{
+  const active = readJSON(path.join(root, "active.json"))
+  if (active.deployment_schema_version !== {DEPLOYMENT_SCHEMA_VERSION}) throw new Error("unsupported Wisp deployment version")
+  if (typeof active.current_bundle_id !== "string" || !/^[0-9a-f]{{64}}$/.test(active.current_bundle_id)) throw new Error("invalid Wisp bundle ID")
+  const bundle = path.join(root, "deployments", active.current_bundle_id)
+  const manifest = readJSON(path.join(bundle, "manifest.json"))
+  if (manifest.deployment_schema_version !== {DEPLOYMENT_SCHEMA_VERSION}) throw new Error("unsupported Wisp manifest version")
+  if (manifest.bundle_id !== active.current_bundle_id) throw new Error("Wisp manifest bundle mismatch")
+  if (manifest.protocol_version !== {PROTOCOL_VERSION}) throw new Error("unsupported Wisp protocol version")
+  const binary = path.join(bundle, "bin", executable)
+  const verified = spawnSync(binary, ["deploy", "check-bundle", root, active.current_bundle_id], {{
+    shell: false,
+    stdio: "pipe",
+    windowsHide: true,
+  }})
+  if (verified.status !== 0) throw new Error(`Wisp bundle verification failed: ${{verified.stderr?.toString() || "unknown error"}}`)
+  const plugin = await import(`${{pathToFileURL(path.join(bundle, "opencode/wisp.js")).href}}?bundle=${{active.current_bundle_id}}`)
+  return plugin.default(input)
+}}
+"#
+    ))
 }
 
 fn verify_stable_loaders(

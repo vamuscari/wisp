@@ -5,6 +5,7 @@ use thiserror::Error;
 use crate::{
     config::Openers,
     model::{DirectoryEntry, Project},
+    opencode::OpenCodeSession,
     protocol::Selection,
 };
 
@@ -99,6 +100,31 @@ impl Navigator {
         Ok(NavigationOutcome::Selected(Selection::HostItem {
             project,
             id: id.to_string(),
+        }))
+    }
+
+    pub fn select_opencode_session(
+        &self,
+        project_id: &str,
+        session: &OpenCodeSession,
+        command: &[String],
+        host_item_id: Option<&str>,
+    ) -> Result<NavigationOutcome, NavigationError> {
+        let project = self.project(project_id)?.clone();
+        let mut opener = command.to_vec();
+        opener.extend([
+            "attach".into(),
+            session.server_url.clone(),
+            "--dir".into(),
+            session.directory.to_string_lossy().into_owned(),
+            "--session".into(),
+            session.id.clone(),
+        ]);
+        Ok(NavigationOutcome::Selected(Selection::OpenCodeSession {
+            project,
+            session_id: session.id.clone(),
+            opener,
+            host_item_id: host_item_id.map(str::to_owned),
         }))
     }
 

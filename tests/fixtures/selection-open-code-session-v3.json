@@ -1,0 +1,25 @@
+{
+  "protocol_version": 3,
+  "status": "selected",
+  "selection": {
+    "kind": "open_code_session",
+    "project": {
+      "id": "api",
+      "path": "/home/user/Repos/api",
+      "group": "Repos",
+      "name": "api",
+      "display_name": "API"
+    },
+    "session_id": "ses_123",
+    "opener": [
+      "opencode",
+      "attach",
+      "http://127.0.0.1:4096",
+      "--dir",
+      "/home/user/Repos/api",
+      "--session",
+      "ses_123"
+    ],
+    "host_item_id": "tab:17"
+  }
+}

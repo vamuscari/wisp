@@ -35,6 +35,7 @@ coverage/
 .vscode/
 
 # Local tooling configuration
+/AGENTS.md
 /opencode.json
 /opencode.jsonc
 /.opencode/

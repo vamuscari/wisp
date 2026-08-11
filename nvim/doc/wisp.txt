@@ -19,6 +19,9 @@ opens in a floating terminal. A project selection sets the originating tab's
 local working directory. A file selection also edits that file in the
 originating tab.
 
+The Neovim adapter disables OpenCode session mode. Session focus and attach
+actions are currently implemented only by the WezTerm adapter.
+
 The tab-local variables `wisp_project_dir` and `wisp_project_name` contain the
 selected project metadata. They are initially seeded from $WISP_PROJECT_DIR
 and $WISP_PROJECT_NAME when those variables are present.
