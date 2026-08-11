@@ -553,7 +553,11 @@ fn open_selection(json: &str) -> Result<(), CliError> {
             opener.ok_or(CliError::MissingOpener)?
         }
         Selection::OpenCodeSession { opener, .. } => opener,
-        Selection::CloseProject { .. } | Selection::HostItem { .. } => {
+        Selection::CloseProject { .. }
+        | Selection::HostItem { .. }
+        | Selection::Workspace { .. }
+        | Selection::WorkspaceItem { .. }
+        | Selection::CloseWorkspace { .. } => {
             return Err(CliError::MissingOpener);
         }
     };

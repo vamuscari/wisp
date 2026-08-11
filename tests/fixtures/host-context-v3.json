@@ -18,5 +18,16 @@
     "artifacts": {
       "labels": ["new"]
     }
+  },
+  "workspaces": {
+    "default": {
+      "current": false,
+      "items": [
+        {
+          "id": "29",
+          "label": "shell"
+        }
+      ]
+    }
   }
 }

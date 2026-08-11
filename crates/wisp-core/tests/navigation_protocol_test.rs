@@ -207,7 +207,8 @@ fn host_context_maps_opencode_sessions_to_exact_host_items() {
                     "ses_123": "17"
                 }
             }
-        }
+        },
+        "workspaces": {}
     }))
     .unwrap();
 
@@ -264,7 +265,8 @@ fn host_context_contains_labels_and_items_keyed_by_project_id() {
                 ]
             },
             "web": { "labels": ["new"], "items": [] }
-        }
+        },
+        "workspaces": {}
     }))
     .unwrap();
 
@@ -286,12 +288,51 @@ fn host_context_contains_labels_and_items_keyed_by_project_id() {
 }
 
 #[test]
+fn host_context_contains_open_host_workspaces() {
+    let context = serde_json::from_value::<HostContext>(serde_json::json!({
+        "protocol_version": 3,
+        "projects": {},
+        "workspaces": {
+            "default": {
+                "current": true,
+                "items": [
+                    {
+                        "id": "17",
+                        "label": "shell",
+                        "active": true
+                    }
+                ]
+            }
+        }
+    }));
+
+    assert!(
+        context.is_ok(),
+        "open host workspaces should be valid context"
+    );
+    let encoded = serde_json::to_value(context.unwrap()).unwrap();
+    assert_eq!(encoded["workspaces"]["default"]["current"], true);
+    assert_eq!(encoded["workspaces"]["default"]["items"][0]["id"], "17");
+}
+
+#[test]
+fn host_context_requires_the_v3_workspace_collection() {
+    let context = serde_json::from_value::<HostContext>(serde_json::json!({
+        "protocol_version": 3,
+        "projects": {}
+    }));
+
+    assert!(context.is_err(), "v3 host context must include workspaces");
+}
+
+#[test]
 fn host_context_defaults_omitted_items_to_empty() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
         "protocol_version": 3,
         "projects": {
             "api": { "labels": ["new"] }
-        }
+        },
+        "workspaces": {}
     }))
     .unwrap();
 
@@ -320,7 +361,8 @@ fn host_context_rejects_unsupported_versions_and_invalid_items() {
                 "labels": ["open"],
                 "items": [{ "id": "", "label": "nvim" }]
             }
-        }
+        },
+        "workspaces": {}
     }));
     assert!(empty.is_err());
 
@@ -334,14 +376,20 @@ fn host_context_rejects_unsupported_versions_and_invalid_items() {
                     { "id": "17", "label": "shell" }
                 ]
             }
-        }
+        },
+        "workspaces": {}
     }));
     assert!(duplicate.is_err());
 
     let duplicate_project = serde_json::from_str::<HostContext>(
-        r#"{"protocol_version":3,"projects":{"api":{"labels":["new"]},"api":{"labels":["open"]}}}"#,
+        r#"{"protocol_version":3,"projects":{"api":{"labels":["new"]},"api":{"labels":["open"]}},"workspaces":{}}"#,
     );
     assert!(duplicate_project.is_err());
+
+    let duplicate_workspace = serde_json::from_str::<HostContext>(
+        r#"{"protocol_version":3,"projects":{},"workspaces":{"default":{"current":true},"default":{"current":false}}}"#,
+    );
+    assert!(duplicate_workspace.is_err());
 }
 
 #[test]
@@ -357,6 +405,7 @@ fn public_protocol_fixtures_decode_with_the_current_models() {
         serde_json::from_str(include_str!("../../../tests/fixtures/host-context-v3.json")).unwrap();
     assert_eq!(context.labels("api"), &["current", "open"]);
     assert_eq!(context.items("api")[0].id, "17");
+    assert!(context.workspaces().contains_key("default"));
 
     let projects: ProjectsEnvelope =
         serde_json::from_str(include_str!("../../../tests/fixtures/projects-v3.json")).unwrap();
@@ -522,4 +571,34 @@ fn host_item_is_a_versioned_selection_with_an_opaque_id() {
 
     let decoded: SelectionEnvelope = serde_json::from_value(encoded).unwrap();
     assert_eq!(decoded.selection, Some(selection));
+}
+
+#[test]
+fn host_workspace_actions_are_versioned_selections() {
+    for selection in [
+        serde_json::json!({
+            "kind": "workspace",
+            "workspace": "default"
+        }),
+        serde_json::json!({
+            "kind": "workspace_item",
+            "workspace": "default",
+            "id": "17"
+        }),
+        serde_json::json!({
+            "kind": "close_workspace",
+            "workspace": "default"
+        }),
+    ] {
+        let decoded = serde_json::from_value::<Selection>(selection.clone());
+        assert!(
+            decoded.is_ok(),
+            "host workspace action should decode: {selection}"
+        );
+        let envelope = SelectionEnvelope::selected(decoded.unwrap());
+        assert_eq!(
+            serde_json::to_value(envelope).unwrap()["protocol_version"],
+            PROTOCOL_VERSION
+        );
+    }
 }

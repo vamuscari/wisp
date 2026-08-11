@@ -55,7 +55,7 @@ function Picker:project_relative_cwd(project, pane)
   return nil
 end
 
-function Picker:host_item(project, tab_info, current_workspace)
+function Picker:host_item(project, workspace, tab_info, current_workspace)
   local tab = tab_info.tab
   local pane = tab:active_pane()
   local label = tab:get_title()
@@ -69,8 +69,8 @@ function Picker:host_item(project, tab_info, current_workspace)
     label = "Tab " .. tostring(tab_info.index)
   end
   return {
-    active = current_workspace == self.workspace:workspace_for(project) and tab_info.is_active == true,
-    detail = self:project_relative_cwd(project, pane),
+    active = current_workspace == workspace and tab_info.is_active == true,
+    detail = project and self:project_relative_cwd(project, pane) or nil,
     id = tostring(tab:tab_id()),
     label = label,
   }
@@ -78,11 +78,12 @@ end
 
 function Picker:host_context(window, projects)
   local open = {}
-  for _, workspace in ipairs(self.wezterm.mux.get_workspace_names()) do
+  local workspace_names = self.wezterm.mux.get_workspace_names()
+  for _, workspace in ipairs(workspace_names) do
     open[workspace] = true
   end
   local current = window:mux_window():get_workspace()
-  local context = { protocol_version = self.client.protocol_version, projects = {} }
+  local context = { protocol_version = self.client.protocol_version, projects = {}, workspaces = {} }
   local project_by_workspace = {}
   for _, project in ipairs(projects) do
     local workspace = self.workspace:workspace_for(project)
@@ -94,13 +95,32 @@ function Picker:host_context(window, projects)
     table.insert(labels, open[workspace] and "open" or "new")
     context.projects[project.id] = { labels = labels }
   end
+  local context_by_workspace = {}
+  for _, workspace in ipairs(workspace_names) do
+    if not project_by_workspace[workspace] then
+      local workspace_context = {
+        current = workspace == current,
+      }
+      context.workspaces[workspace] = workspace_context
+      context_by_workspace[workspace] = workspace_context
+    end
+  end
   for _, mux_window in ipairs(self.wezterm.mux.all_windows()) do
-    local project = project_by_workspace[mux_window:get_workspace()]
+    local workspace = mux_window:get_workspace()
+    local project = project_by_workspace[workspace]
     if project then
       for _, tab_info in ipairs(mux_window:tabs_with_info()) do
         local project_context = context.projects[project.id]
         project_context.items = project_context.items or {}
-        table.insert(project_context.items, self:host_item(project, tab_info, current))
+        table.insert(project_context.items, self:host_item(project, workspace, tab_info, current))
+      end
+    else
+      local workspace_context = context_by_workspace[workspace]
+      if workspace_context then
+        for _, tab_info in ipairs(mux_window:tabs_with_info()) do
+          workspace_context.items = workspace_context.items or {}
+          table.insert(workspace_context.items, self:host_item(nil, workspace, tab_info, current))
+        end
       end
     end
   end
@@ -219,6 +239,15 @@ function Picker:apply_result(window, pane, result, picker_pane_id)
   end
   if selection.kind == "host_item" then
     return self.workspace:activate_host_item(window, pane, selection.project, selection.id)
+  end
+  if selection.kind == "workspace" then
+    return self.workspace:activate_workspace(selection.workspace)
+  end
+  if selection.kind == "workspace_item" then
+    return self.workspace:activate_workspace_item(selection.workspace, selection.id)
+  end
+  if selection.kind == "close_workspace" then
+    return self.workspace:close_workspace(selection.workspace, picker_pane_id)
   end
   if selection.kind == "open_code_session" then
     return self:open_opencode_session(window, pane, result)

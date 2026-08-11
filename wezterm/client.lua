@@ -30,6 +30,9 @@ local function selection_has_only_fields(selection)
     file = { kind = true, project = true, path = true, opener = true },
     close_project = { kind = true, project = true },
     host_item = { kind = true, project = true, id = true },
+    workspace = { kind = true, workspace = true },
+    workspace_item = { kind = true, workspace = true, id = true },
+    close_workspace = { kind = true, workspace = true },
     open_code_session = {
       kind = true,
       project = true,
@@ -182,8 +185,20 @@ function Client:validate_result(result)
   if selection.opener ~= nil and not self:valid_argv(selection.opener) then
     return nil, "wisp result is not a valid selection"
   end
-  if not self:valid_project(selection.project) then
-    return nil, "wisp result contains an invalid project"
+  local uses_project = selection.kind == "project"
+    or selection.kind == "file"
+    or selection.kind == "close_project"
+    or selection.kind == "host_item"
+    or selection.kind == "open_code_session"
+  if uses_project then
+    if not self:valid_project(selection.project) then
+      return nil, "wisp result contains an invalid project"
+    end
+  elseif type(selection.workspace) ~= "string" or selection.workspace == "" then
+    return nil, "wisp result contains an invalid workspace"
+  end
+  if selection.kind == "workspace_item" and (type(selection.id) ~= "string" or selection.id == "") then
+    return nil, "wisp result contains an invalid workspace item"
   end
   if selection.kind == "open_code_session" then
     if

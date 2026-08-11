@@ -87,8 +87,10 @@ function Workspace:wezterm_executable()
   return self.wezterm.executable_dir .. "/" .. name
 end
 
-function Workspace:close_project(project, ignored_pane_id)
-  local workspace = self:workspace_for(project)
+function Workspace:close_workspace(workspace, ignored_pane_id)
+  if type(workspace) ~= "string" or workspace == "" then
+    return nil, "wisp result contains an invalid workspace"
+  end
   local pane_ids = {}
   for _, mux_window in ipairs(self.wezterm.mux.all_windows()) do
     if mux_window:get_workspace() == workspace then
@@ -124,6 +126,48 @@ function Workspace:close_project(project, ignored_pane_id)
     return nil, "wisp could not close every pane in " .. workspace .. ": " .. table.concat(failures, "; ")
   end
   return true
+end
+
+function Workspace:close_project(project, ignored_pane_id)
+  return self:close_workspace(self:workspace_for(project), ignored_pane_id)
+end
+
+function Workspace:activate_workspace(workspace)
+  if type(workspace) ~= "string" or workspace == "" then
+    return nil, "wisp result contains an invalid workspace"
+  end
+  local activated, activate_error = pcall(self.wezterm.mux.set_active_workspace, workspace)
+  if not activated then
+    return nil, "wisp could not activate workspace " .. workspace .. ": " .. tostring(activate_error)
+  end
+  return true
+end
+
+function Workspace:activate_workspace_item(workspace, id)
+  if type(workspace) ~= "string" or workspace == "" then
+    return nil, "wisp result contains an invalid workspace"
+  end
+  local tab_id = type(id) == "string" and tonumber(id) or nil
+  if not tab_id or tab_id % 1 ~= 0 then
+    return nil, "wisp result contains an invalid workspace item ID"
+  end
+  local found, tab = pcall(self.wezterm.mux.get_tab, tab_id)
+  if not found or not tab then
+    return nil, "wisp selected tab " .. tostring(id) .. " no longer exists"
+  end
+  local inspected, mux_window = pcall(function()
+    return tab:window()
+  end)
+  if not inspected or not mux_window or mux_window:get_workspace() ~= workspace then
+    return nil, "wisp selected tab " .. tostring(id) .. " no longer belongs to workspace " .. workspace
+  end
+  local activated, activate_error = pcall(function()
+    tab:activate()
+  end)
+  if not activated then
+    return nil, "wisp could not activate tab " .. tostring(id) .. ": " .. tostring(activate_error)
+  end
+  return self:activate_workspace(workspace)
 end
 
 function Workspace:activate_host_item(window, pane, project, id)

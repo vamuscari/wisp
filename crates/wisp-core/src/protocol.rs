@@ -114,6 +114,7 @@ impl<'de> Deserialize<'de> for OpenCodeStatusEnvelope {
 pub struct HostContext {
     protocol_version: u32,
     projects: BTreeMap<String, HostProjectContext>,
+    workspaces: BTreeMap<String, HostWorkspaceContext>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -134,6 +135,10 @@ pub enum HostContextError {
     EmptySessionId,
     #[error("OpenCode session host item IDs must not be empty")]
     EmptySessionItemId,
+    #[error("host workspace names must not be empty")]
+    EmptyWorkspaceName,
+    #[error("host context workspace {workspace} contains duplicate item ID {item_id}")]
+    DuplicateWorkspaceItemId { workspace: String, item_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +153,14 @@ pub struct HostProjectContext {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct HostWorkspaceContext {
+    pub current: bool,
+    #[serde(default)]
+    pub items: Vec<HostItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostItem {
     pub id: String,
     pub label: String,
@@ -158,7 +171,10 @@ pub struct HostItem {
 }
 
 impl HostContext {
-    pub fn new(projects: BTreeMap<String, HostProjectContext>) -> Result<Self, HostContextError> {
+    pub fn new(
+        projects: BTreeMap<String, HostProjectContext>,
+        workspaces: BTreeMap<String, HostWorkspaceContext>,
+    ) -> Result<Self, HostContextError> {
         if projects.keys().any(String::is_empty) {
             return Err(HostContextError::EmptyProjectId);
         }
@@ -188,9 +204,30 @@ impl HostContext {
                 return Err(HostContextError::EmptySessionItemId);
             }
         }
+        for (workspace_name, workspace) in &workspaces {
+            if workspace_name.is_empty() {
+                return Err(HostContextError::EmptyWorkspaceName);
+            }
+            let mut item_ids = BTreeSet::new();
+            for item in &workspace.items {
+                if item.id.is_empty() {
+                    return Err(HostContextError::EmptyItemId);
+                }
+                if item.label.is_empty() {
+                    return Err(HostContextError::EmptyItemLabel);
+                }
+                if !item_ids.insert(&item.id) {
+                    return Err(HostContextError::DuplicateWorkspaceItemId {
+                        workspace: workspace_name.clone(),
+                        item_id: item.id.clone(),
+                    });
+                }
+            }
+        }
         Ok(Self {
             protocol_version: PROTOCOL_VERSION,
             projects,
+            workspaces,
         })
     }
 
@@ -215,11 +252,15 @@ impl HostContext {
             .get(session_id)
             .map(String::as_str)
     }
+
+    pub fn workspaces(&self) -> &BTreeMap<String, HostWorkspaceContext> {
+        &self.workspaces
+    }
 }
 
 impl Default for HostContext {
     fn default() -> Self {
-        Self::new(BTreeMap::new()).expect("empty host context is valid")
+        Self::new(BTreeMap::new(), BTreeMap::new()).expect("empty host context is valid")
     }
 }
 
@@ -244,10 +285,11 @@ impl<'de> Deserialize<'de> for HostContext {
             #[serde(rename = "protocol_version")]
             _protocol_version: u32,
             projects: BTreeMap<String, HostProjectContext>,
+            workspaces: BTreeMap<String, HostWorkspaceContext>,
         }
 
         let raw: RawHostContext = serde_json::from_str(json.get()).map_err(de::Error::custom)?;
-        Self::new(raw.projects).map_err(de::Error::custom)
+        Self::new(raw.projects, raw.workspaces).map_err(de::Error::custom)
     }
 }
 
@@ -364,6 +406,16 @@ pub enum Selection {
     HostItem {
         project: Project,
         id: String,
+    },
+    Workspace {
+        workspace: String,
+    },
+    WorkspaceItem {
+        workspace: String,
+        id: String,
+    },
+    CloseWorkspace {
+        workspace: String,
     },
     OpenCodeSession {
         project: Project,

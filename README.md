@@ -178,11 +178,11 @@ wisp open "$(cat /tmp/wisp-selection.json)"
 | --- | --- |
 | `Up` / `Down`, `j` / `k` | Move in the focused pane |
 | `Left` / `Right`, `h` / `l`, `Tab` | Change pane focus |
-| `Enter` | Select a project, window, file, or session; enter a directory |
+| `Enter` | Select a project, host workspace, window, file, or session; enter a directory |
 | `w` | Show Windows and focus the detail pane |
 | `f` | Show Files and focus the detail pane |
 | `s` | Show OpenCode Sessions and focus the detail pane |
-| `x` | Close the selected open project from the Projects pane and exit |
+| `x` | Close the selected open project or host workspace from the Projects pane and exit |
 | `/` | Enter fuzzy search for the focused pane |
 | `Backspace` | Go to the parent directory; at the project root focus Projects |
 | `Ctrl-R` | Force-refresh projects or the active detail listing |
@@ -193,16 +193,18 @@ In search mode, printable characters update the focused pane's query,
 and `Enter` selects the current match. Project and detail queries are
 independent.
 
-When a host supplies context, projects are grouped by status:
-`◆` current, `●` open, then `○` new. Current and open projects appear before
-new projects. The indicators use green, cyan, and muted ANSI colors from the
-active terminal theme rather than fixed RGB values.
+When a host supplies context, projects and live host-only workspaces are grouped
+by status: `◆` current, `●` open, then `○` new. Host-only workspaces are present
+only while open, so only discovered projects can appear as new. The indicators
+use green, cyan, and muted ANSI colors from the active terminal theme rather
+than fixed RGB values.
 
-Projects remain in the left pane. The right pane shows host windows, the
-selected project's files, or its OpenCode sessions. Pressing `x` on a current or open project returns
-a host action rather than terminating processes directly. The WezTerm adapter
-applies it by closing every pane in that project's workspace; `x` has no effect
-for new or standalone projects.
+Projects and live host-only workspaces remain in the left pane. The right pane
+shows host windows, the selected project's files, or its OpenCode sessions.
+Files and OpenCode sessions are unavailable for a host-only workspace. Pressing
+`x` on a current or open row returns a host action rather than terminating
+processes directly. The WezTerm adapter applies it by closing every pane in the
+exact workspace; `x` has no effect for new or standalone projects.
 
 File browsing lists only the current directory. Child directories are read
 when entered rather than indexed recursively.
@@ -247,12 +249,13 @@ fresh OpenCode plugin registrations. Counts refresh every two seconds and retain
 their last valid values across transient failures. Set `status_bar = false` to
 leave the right status area untouched.
 
-The picker actions query `wisp projects --json`, snapshot project tabs and
-`current`, `open`, and `new` labels into host context, and launch `wisp pick` as
-the sole process in a temporary tab. The project action starts with Projects
-focused; the window action starts on the active tab of the current project. A
-completed result closes the owned picker tab and applies the selection through
-the original window and pane.
+The picker actions query `wisp projects --json`, snapshot every live workspace
+and its tabs, map configured project workspaces to `current`, `open`, and `new`
+labels, and include unmatched workspaces as host-only rows. They then launch
+`wisp pick` as the sole process in a temporary tab. The project action starts
+with Projects focused; the window action starts on the active tab of the current
+workspace. A completed result closes the owned picker tab and applies the
+selection through the original window and pane.
 
 ### WezTerm Options
 
@@ -304,8 +307,10 @@ Project workspaces and project-aware tabs/splits set `WISP_PROJECT_DIR` and
 `WISP_PROJECT_NAME`. File selections launch `wisp open` as the initial process
 in a new workspace or a new tab in an existing workspace; the adapter never
 executes opener argv itself. Window selections activate the exact tab captured
-when the picker launched. Closing a project terminates all panes in the
-selected project workspace through `wezterm cli kill-pane`.
+when the picker launched. Host-only workspace selections use WezTerm's
+existing-workspace API, so a stale selection cannot recreate a closed
+workspace. Closing a project or host-only workspace terminates all panes in the
+selected workspace through `wezterm cli kill-pane`.
 
 ## OpenCode
 
@@ -440,16 +445,19 @@ renderer:
 Host-managed project closure uses the same envelope with a
 `"kind": "close_project"` selection containing the project. Host window
 selection uses `"kind": "host_item"` with the project and an opaque `"id"`.
-Standalone Wisp cannot produce either selection without host context, and
-`wisp open` does not execute them.
+Host-only rows use `"workspace"`, `"workspace_item"`, and `"close_workspace"`
+selections carrying the exact `"workspace"` name; workspace items also carry an
+opaque `"id"`. Standalone Wisp cannot produce these selections without host
+context, and `wisp open` does not execute them.
 
 OpenCode session selection uses `"kind": "open_code_session"` with the owning
 project, session ID, resolved attach argv, and an optional opaque
 `host_item_id`. Unlike host-window actions, `wisp open` executes the attach argv
 directly when the host cannot focus the exact target.
 
-Host context is a separate versioned input keyed by project ID. Labels control
-project status and items describe host-owned windows:
+Host context is a separate versioned input. Project entries are keyed by project
+ID, while live host-only entries are keyed by exact workspace name. Project
+labels control status and both entry types can describe host-owned windows:
 
 ```json
 {
@@ -472,14 +480,26 @@ project status and items describe host-owned windows:
     "dotfiles": {
       "labels": ["new"]
     }
+  },
+  "workspaces": {
+    "default": {
+      "current": false,
+      "items": [
+        {
+          "id": "29",
+          "label": "shell"
+        }
+      ]
+    }
   }
 }
 ```
 
-Omitted `items` and `session_items` fields are empty. Host item IDs are opaque
-to the Rust picker. Adapters reject protocol versions other than 3
-rather than attempting compatibility. Canonical examples live in
-[`tests/fixtures`](tests/fixtures).
+The `workspaces` map is required; each key exists only while that workspace is
+open, and `current` selects the current row. Omitted `items` and `session_items`
+fields are empty. Host item IDs are opaque to the Rust picker. Adapters reject
+protocol versions other than 3 rather than attempting compatibility. Canonical
+examples live in [`tests/fixtures`](tests/fixtures).
 
 ## Cache And Limits
 

@@ -59,6 +59,27 @@ fn context() -> HostContext {
                     { "id": "18", "label": "docs-shell", "detail": "docs/", "active": true }
                 ]
             }
+        },
+        "workspaces": {}
+    }))
+    .unwrap()
+}
+
+fn host_workspace_context() -> HostContext {
+    serde_json::from_value(serde_json::json!({
+        "protocol_version": 3,
+        "projects": {
+            "api": { "labels": ["open"] },
+            "web": { "labels": ["new"] },
+            "docs": { "labels": ["new"] }
+        },
+        "workspaces": {
+            "default": {
+                "current": true,
+                "items": [
+                    { "id": "29", "label": "shell", "active": true }
+                ]
+            }
         }
     }))
     .unwrap()
@@ -148,7 +169,8 @@ fn selecting_a_session_uses_the_exact_host_mapping_and_attach_argv() {
                 "labels": ["current", "open"],
                 "session_items": { "ses_urgent": "18" }
             }
-        }
+        },
+        "workspaces": {}
     }))
     .unwrap();
     let mut app = App::new_with_opencode(
@@ -322,6 +344,26 @@ fn windows_initial_view_focuses_the_current_projects_active_window() {
 }
 
 #[test]
+fn windows_initial_view_focuses_a_current_host_workspace() {
+    let app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(host_workspace_context()),
+        InitialView::Windows,
+    );
+
+    assert_eq!(app.focus(), Focus::Detail);
+    assert_eq!(app.selected_project_id(), None);
+    assert_eq!(
+        app.visible_project_labels(),
+        vec!["default", "API Service", "Web Client", "Documentation"]
+    );
+    assert_eq!(app.visible_detail_labels(), vec!["shell"]);
+    assert_eq!(app.detail_cursor(), 0);
+}
+
+#[test]
 fn windows_initial_view_falls_back_when_the_workspace_is_unmanaged() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
         "protocol_version": 3,
@@ -329,7 +371,8 @@ fn windows_initial_view_falls_back_when_the_workspace_is_unmanaged() {
             "api": { "labels": ["open"], "items": [] },
             "web": { "labels": ["new"], "items": [] },
             "docs": { "labels": ["new"], "items": [] }
-        }
+        },
+        "workspaces": {}
     }))
     .unwrap();
     let app = App::new(
@@ -409,6 +452,24 @@ fn enter_on_the_project_pane_returns_the_selected_project() {
 }
 
 #[test]
+fn enter_on_a_host_workspace_returns_the_exact_workspace() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(host_workspace_context()),
+        InitialView::Projects,
+    );
+
+    let Command::Finish(Selection::Workspace { workspace }) =
+        app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("workspace enter should finish with a workspace selection");
+    };
+    assert_eq!(workspace, "default");
+}
+
+#[test]
 fn enter_on_the_windows_pane_returns_the_selected_host_item() {
     let mut app = App::new(
         projects(),
@@ -425,6 +486,87 @@ fn enter_on_the_windows_pane_returns_the_selected_host_item() {
     };
     assert_eq!(project.id, "docs");
     assert_eq!(id, "18");
+}
+
+#[test]
+fn enter_on_a_host_workspaces_window_returns_the_exact_target() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(host_workspace_context()),
+        InitialView::Windows,
+    );
+
+    let Command::Finish(Selection::WorkspaceItem { workspace, id }) =
+        app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("workspace window enter should finish with an exact host target");
+    };
+    assert_eq!(workspace, "default");
+    assert_eq!(id, "29");
+}
+
+#[test]
+fn files_are_unavailable_for_a_host_workspace() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(host_workspace_context()),
+        InitialView::Projects,
+    );
+
+    assert_eq!(
+        app.handle_key(key(KeyCode::Char('f'))).unwrap(),
+        Command::None
+    );
+    assert_eq!(app.right_mode(), RightMode::Windows);
+    assert_eq!(
+        app.status(),
+        Some("Workspace default is not a Wisp project")
+    );
+}
+
+#[test]
+fn opencode_sessions_are_unavailable_for_a_host_workspace() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(host_workspace_context()),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+
+    assert_eq!(
+        app.handle_key(key(KeyCode::Char('s'))).unwrap(),
+        Command::None
+    );
+    assert_eq!(app.right_mode(), RightMode::Windows);
+    assert_eq!(
+        app.status(),
+        Some("Workspace default is not a Wisp project")
+    );
+}
+
+#[test]
+fn sessions_initial_view_reports_a_current_host_workspace() {
+    let app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(host_workspace_context()),
+        InitialView::Sessions,
+        vec!["opencode".into()],
+    );
+
+    assert_eq!(app.focus(), Focus::Projects);
+    assert_eq!(app.right_mode(), RightMode::Windows);
+    assert_eq!(
+        app.status(),
+        Some("Workspace default is not a Wisp project")
+    );
 }
 
 #[test]
@@ -594,6 +736,24 @@ fn x_on_the_project_pane_closes_the_selected_open_project() {
 }
 
 #[test]
+fn x_on_a_host_workspace_closes_the_exact_workspace() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(host_workspace_context()),
+        InitialView::Projects,
+    );
+
+    let Command::Finish(Selection::CloseWorkspace { workspace }) =
+        app.handle_key(key(KeyCode::Char('x'))).unwrap()
+    else {
+        panic!("x should finish with a close-workspace selection");
+    };
+    assert_eq!(workspace, "default");
+}
+
+#[test]
 fn slash_search_treats_x_as_query_text_and_escape_keeps_the_query() {
     let mut app = App::new(
         projects(),
@@ -750,7 +910,8 @@ fn renderer_explains_when_an_open_project_has_no_windows() {
         "protocol_version": 3,
         "projects": {
             "docs": { "labels": ["current", "open"], "items": [] }
-        }
+        },
+        "workspaces": {}
     }))
     .unwrap();
     let app = App::new(
@@ -775,7 +936,8 @@ fn renderer_explains_when_the_selected_project_is_not_open() {
             "api": { "labels": ["new"], "items": [] },
             "web": { "labels": ["open"], "items": [] },
             "docs": { "labels": ["current", "open"], "items": [] }
-        }
+        },
+        "workspaces": {}
     }))
     .unwrap();
     let mut app = App::new(

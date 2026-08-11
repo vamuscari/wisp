@@ -62,6 +62,7 @@ local function fixture(result, mux_overrides)
       get_tab = mux_overrides.get_tab or function()
         return nil
       end,
+      set_active_workspace = mux_overrides.set_active_workspace or function() end,
     },
     run_child_process = function(args)
       table.insert(child_calls, args)
@@ -178,6 +179,7 @@ helper.test("project picker launches wisp with a v3 host context", function()
   helper.assert_equal(test.annotations().projects.api.items, nil, "empty current items are omitted")
   helper.assert_table_equal(test.annotations().projects.artifacts.labels, { "new" }, "new labels")
   helper.assert_equal(test.annotations().projects.artifacts.items, nil, "empty new items are omitted")
+  helper.assert_equal(next(test.annotations().workspaces), nil, "empty host workspace map")
   helper.assert_equal(test.picker_tab().activated, true, "picker tab activation")
 
   helper.assert_equal(test.window.performed[1].action.kind, "CloseCurrentTab", "picker close action")
@@ -259,6 +261,61 @@ helper.test("host context describes the selected project's WezTerm tabs", functi
   helper.assert_equal(items[2].detail, ".", "project root cwd")
   helper.assert_equal(items[2].active, false, "inactive tab")
   helper.assert_equal(test.annotations().projects.artifacts.items, nil, "closed project items are omitted")
+end)
+
+helper.test("host context includes only live workspaces not owned by projects", function()
+  local active_pane = {
+    get_current_working_dir = function()
+      return { scheme = "file", file_path = "/Users/test" }
+    end,
+    get_foreground_process_name = function()
+      return "/bin/zsh"
+    end,
+    get_title = function()
+      return "shell"
+    end,
+  }
+  local active_tab = {
+    active_pane = function()
+      return active_pane
+    end,
+    get_title = function()
+      return "default-shell"
+    end,
+    tab_id = function()
+      return 29
+    end,
+  }
+  local default_window = {
+    get_workspace = function()
+      return "default"
+    end,
+    tabs_with_info = function()
+      return { { index = 0, is_active = true, tab = active_tab } }
+    end,
+  }
+  local test = fixture({ protocol_version = 3, status = "cancelled" }, {
+    active_workspace = "default",
+    window_workspace = "default",
+    get_workspace_names = function()
+      return { "default", "wisp:Repos/api" }
+    end,
+    all_windows = function()
+      return { default_window }
+    end,
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_table_equal(test.annotations().projects.api.labels, { "open" }, "owned workspace labels")
+  helper.assert_equal(test.annotations().projects.default, nil, "host workspace is not a synthetic project")
+  local workspace = test.annotations().workspaces.default
+  assert(workspace, "live host workspace should be keyed by name")
+  helper.assert_equal(workspace.current, true, "current host workspace")
+  helper.assert_equal(#workspace.items, 1, "host workspace item count")
+  helper.assert_equal(workspace.items[1].id, "29", "host workspace tab ID")
+  helper.assert_equal(workspace.items[1].label, "default-shell", "host workspace tab label")
+  helper.assert_equal(workspace.items[1].active, true, "active host workspace tab")
 end)
 
 helper.test("window picker requests the windows initial view", function()
@@ -408,6 +465,114 @@ helper.test("wisp open becomes the initial process for a selected file in a new 
   }, "new file wisp open command")
   helper.assert_equal(test.encoded_result().selection.opener[1], "nvim", "new file encoded opener")
   helper.assert_equal(switch.value.spawn.cwd, "/Users/test/Artifacts", "new file cwd")
+end)
+
+helper.test("selected host workspace activates the exact existing workspace", function()
+  local activated_workspace
+  local test = fixture({
+    protocol_version = 3,
+    status = "selected",
+    selection = { kind = "workspace", workspace = "default" },
+  }, {
+    get_workspace_names = function()
+      return { "default", "wisp:Repos/api" }
+    end,
+    set_active_workspace = function(workspace)
+      activated_workspace = workspace
+    end,
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(activated_workspace, "default", "activated host workspace")
+  helper.assert_equal(#test.window.performed, 1, "host workspace action count")
+  helper.assert_equal(test.window.performed[1].action.kind, "CloseCurrentTab", "host workspace picker cleanup")
+end)
+
+helper.test("stale host workspace selection does not recreate the workspace", function()
+  local test = fixture({
+    protocol_version = 3,
+    status = "selected",
+    selection = { kind = "workspace", workspace = "default" },
+  }, {
+    set_active_workspace = function()
+      error "default is not an existing workspace"
+    end,
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(#test.window.performed, 1, "stale workspace action count")
+  helper.assert_equal(test.wezterm.logs[#test.wezterm.logs].level, "error", "stale workspace log level")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "could not activate", "stale workspace error")
+end)
+
+helper.test("selected host workspace item activates its tab in the exact workspace", function()
+  local activated = false
+  local activated_workspace
+  local workspace_window = {
+    get_workspace = function()
+      return "default"
+    end,
+  }
+  local target_tab = {
+    activate = function()
+      activated = true
+    end,
+    window = function()
+      return workspace_window
+    end,
+  }
+  local test = fixture({
+    protocol_version = 3,
+    status = "selected",
+    selection = { kind = "workspace_item", workspace = "default", id = "29" },
+  }, {
+    get_tab = function(id)
+      helper.assert_equal(id, 29, "numeric host workspace tab ID")
+      return target_tab
+    end,
+    set_active_workspace = function(workspace)
+      activated_workspace = workspace
+    end,
+  })
+
+  helper.run_callback(test.wisp.window_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(activated, true, "host workspace tab activation")
+  helper.assert_equal(activated_workspace, "default", "host workspace tab workspace")
+  helper.assert_equal(#test.window.performed, 1, "host workspace tab action count")
+end)
+
+helper.test("host workspace items moved to another workspace are rejected", function()
+  local activated = false
+  local target_tab = {
+    activate = function()
+      activated = true
+    end,
+    window = function()
+      return {
+        get_workspace = function()
+          return "scratch"
+        end,
+      }
+    end,
+  }
+  local test = fixture({
+    protocol_version = 3,
+    status = "selected",
+    selection = { kind = "workspace_item", workspace = "default", id = "29" },
+  }, {
+    get_tab = function()
+      return target_tab
+    end,
+  })
+
+  helper.run_callback(test.wisp.window_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(activated, false, "moved host workspace tab activation")
+  helper.assert_equal(#test.window.performed, 1, "moved host workspace tab action count")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "no longer belongs", "moved host workspace tab error")
 end)
 
 helper.test("selected host item activates its tab in the project workspace", function()
@@ -567,6 +732,76 @@ helper.test("close project terminates every pane in only that workspace", functi
     "third pane close"
   )
   helper.assert_equal(#test.child_calls, 4, "project close child call count")
+end)
+
+helper.test("close host workspace terminates panes in only the exact workspace", function()
+  local function pane(id)
+    return {
+      pane_id = function()
+        return id
+      end,
+    }
+  end
+  local function tab(...)
+    local panes = { ... }
+    return {
+      panes = function()
+        return panes
+      end,
+    }
+  end
+  local default_window = {
+    get_workspace = function()
+      return "default"
+    end,
+    tabs = function()
+      return { tab(pane(201), pane(202)) }
+    end,
+    tabs_with_info = function()
+      return {}
+    end,
+  }
+  local project_window = {
+    get_workspace = function()
+      return "wisp:Repos/api"
+    end,
+    tabs = function()
+      return { tab(pane(999)) }
+    end,
+    tabs_with_info = function()
+      return {}
+    end,
+  }
+  local test = fixture({
+    protocol_version = 3,
+    status = "selected",
+    selection = { kind = "close_workspace", workspace = "default" },
+  }, {
+    all_windows = function()
+      return { project_window, default_window }
+    end,
+    run_child_process = function(args)
+      if args[2] == "cli" then
+        return true, "", ""
+      end
+      return true, "PROJECTS", ""
+    end,
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  local executable = "/Applications/WezTerm.app/Contents/MacOS/wezterm"
+  helper.assert_table_equal(
+    test.child_calls[2],
+    { executable, "cli", "kill-pane", "--pane-id", "201" },
+    "first host workspace pane close"
+  )
+  helper.assert_table_equal(
+    test.child_calls[3],
+    { executable, "cli", "kill-pane", "--pane-id", "202" },
+    "second host workspace pane close"
+  )
+  helper.assert_equal(#test.child_calls, 3, "host workspace close child call count")
 end)
 
 helper.test("selected file without an opener reports an actionable error", function()

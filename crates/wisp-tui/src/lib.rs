@@ -24,7 +24,7 @@ use wisp_core::{
     model::{DirectoryEntry, Project},
     navigation::{NavigationError, NavigationOutcome, Navigator, Screen},
     opencode::{OpenCodeSession, OpenCodeSnapshot, SessionDisplayState},
-    protocol::{HostContext, Selection},
+    protocol::{HostContext, HostWorkspaceContext, Selection},
 };
 
 const THEME: Theme = Theme {
@@ -212,6 +212,8 @@ impl App {
             InitialView::Sessions => {
                 if app.opencode_command.is_none() {
                     app.status = Some("OpenCode integration is not configured".into());
+                } else if app.selected_workspace_name().is_some() {
+                    app.set_workspace_project_status();
                 } else {
                     app.focus = Focus::Detail;
                     app.right_mode = RightMode::Sessions;
@@ -243,10 +245,10 @@ impl App {
     }
 
     pub fn selected_project_id(&self) -> Option<&str> {
-        let project_id = self
-            .visible_project_items()
-            .get(self.project_cursor)
-            .map(|item| item.project.id.clone())?;
+        let project_id = match self.selected_target()? {
+            ProjectTarget::Project(project) => project.id,
+            ProjectTarget::Workspace { .. } => return None,
+        };
         self.navigator
             .projects()
             .iter()
@@ -272,7 +274,7 @@ impl App {
     pub fn visible_project_labels(&self) -> Vec<String> {
         self.visible_project_items()
             .into_iter()
-            .map(|item| item.project.display_name)
+            .map(|item| item.target.display_name().to_string())
             .collect()
     }
 
@@ -339,6 +341,29 @@ impl App {
             .iter()
             .find(|project| project.id == project_id)
             .map(|project| project.path.clone())
+    }
+
+    fn selected_target(&self) -> Option<ProjectTarget> {
+        self.visible_project_items()
+            .get(self.project_cursor)
+            .map(|item| item.target.clone())
+    }
+
+    fn selected_target_key(&self) -> Option<ProjectTargetKey> {
+        self.selected_target().map(|target| target.key())
+    }
+
+    fn selected_workspace_name(&self) -> Option<String> {
+        match self.selected_target()? {
+            ProjectTarget::Project(_) => None,
+            ProjectTarget::Workspace { name, .. } => Some(name),
+        }
+    }
+
+    fn set_workspace_project_status(&mut self) {
+        if let Some(workspace) = self.selected_workspace_name() {
+            self.status = Some(format!("Workspace {workspace} is not a Wisp project"));
+        }
     }
 
     pub fn set_status(&mut self, status: impl Into<String>) {
@@ -427,7 +452,7 @@ impl App {
     fn edit_query(&mut self, character: Option<char>) -> Result<Command, NavigationError> {
         match self.focus {
             Focus::Projects => {
-                let previous = self.selected_project_id().map(str::to_owned);
+                let previous = self.selected_target_key();
                 if let Some(character) = character {
                     self.project_query.push(character);
                 } else {
@@ -455,7 +480,7 @@ impl App {
     fn move_up(&mut self) -> Result<Command, NavigationError> {
         match self.focus {
             Focus::Projects => {
-                let previous = self.selected_project_id().map(str::to_owned);
+                let previous = self.selected_target_key();
                 self.project_cursor = self.project_cursor.saturating_sub(1);
                 self.project_changed(previous)
             }
@@ -467,10 +492,17 @@ impl App {
     }
 
     fn select_project(&self) -> Result<Command, NavigationError> {
-        let Some(project_id) = self.selected_project_id() else {
+        let Some(target) = self.selected_target() else {
             return Ok(Command::None);
         };
-        command_for_outcome(self.navigator.select_project(project_id, &self.openers)?)
+        match target {
+            ProjectTarget::Project(project) => {
+                command_for_outcome(self.navigator.select_project(&project.id, &self.openers)?)
+            }
+            ProjectTarget::Workspace { name, .. } => {
+                Ok(Command::Finish(Selection::Workspace { workspace: name }))
+            }
+        }
     }
 
     fn select_detail(&mut self) -> Result<Command, NavigationError> {
@@ -479,10 +511,20 @@ impl App {
         };
         match item.target {
             DetailTarget::HostItem(id) => {
-                let Some(project_id) = self.selected_project_id() else {
+                let Some(target) = self.selected_target() else {
                     return Ok(Command::None);
                 };
-                command_for_outcome(self.navigator.select_host_item(project_id, &id)?)
+                match target {
+                    ProjectTarget::Project(project) => {
+                        command_for_outcome(self.navigator.select_host_item(&project.id, &id)?)
+                    }
+                    ProjectTarget::Workspace { name, .. } => {
+                        Ok(Command::Finish(Selection::WorkspaceItem {
+                            workspace: name,
+                            id,
+                        }))
+                    }
+                }
             }
             DetailTarget::Entry(entry) => {
                 command_for_outcome(self.navigator.select_entry(&entry, &self.openers)?)
@@ -525,6 +567,10 @@ impl App {
     }
 
     fn show_files(&mut self) -> Result<Command, NavigationError> {
+        if self.selected_workspace_name().is_some() {
+            self.set_workspace_project_status();
+            return Ok(Command::None);
+        }
         self.focus = Focus::Detail;
         self.right_mode = RightMode::Files;
         self.entries.clear();
@@ -540,6 +586,10 @@ impl App {
     }
 
     fn show_sessions(&mut self) -> Result<Command, NavigationError> {
+        if self.selected_workspace_name().is_some() {
+            self.set_workspace_project_status();
+            return Ok(Command::None);
+        }
         if self.opencode_command.is_none() {
             self.status = Some("OpenCode integration is not configured".into());
             return Ok(Command::None);
@@ -569,6 +619,7 @@ impl App {
         self.session_conflicts.clear();
         self.detail_query.clear();
         self.detail_cursor = 0;
+        self.status = None;
         self.select_active_host_item();
     }
 
@@ -594,13 +645,22 @@ impl App {
         if !item.status.is_open() {
             return Ok(Command::None);
         }
-        command_for_outcome(self.navigator.close_project(&item.project.id)?)
+        match item.target {
+            ProjectTarget::Project(project) => {
+                command_for_outcome(self.navigator.close_project(&project.id)?)
+            }
+            ProjectTarget::Workspace { name, .. } => {
+                Ok(Command::Finish(Selection::CloseWorkspace {
+                    workspace: name,
+                }))
+            }
+        }
     }
 
     fn move_down(&mut self) -> Result<Command, NavigationError> {
         match self.focus {
             Focus::Projects => {
-                let previous = self.selected_project_id().map(str::to_owned);
+                let previous = self.selected_target_key();
                 self.project_cursor = self
                     .project_cursor
                     .saturating_add(1)
@@ -617,8 +677,11 @@ impl App {
         }
     }
 
-    fn project_changed(&mut self, previous: Option<String>) -> Result<Command, NavigationError> {
-        let current = self.selected_project_id().map(str::to_owned);
+    fn project_changed(
+        &mut self,
+        previous: Option<ProjectTargetKey>,
+    ) -> Result<Command, NavigationError> {
+        let current = self.selected_target_key();
         if current == previous {
             return Ok(Command::None);
         }
@@ -628,14 +691,21 @@ impl App {
         self.session_conflicts.clear();
         self.detail_query.clear();
         self.detail_cursor = 0;
+        self.status = None;
+        if self.selected_workspace_name().is_some() && self.right_mode != RightMode::Windows {
+            self.right_mode = RightMode::Windows;
+            self.set_workspace_project_status();
+            self.select_active_host_item();
+            return Ok(Command::None);
+        }
         if self.right_mode == RightMode::Files {
-            if let Some(project_id) = current {
+            if let Some(project_id) = self.selected_project_id().map(str::to_owned) {
                 return command_for_outcome(self.navigator.browse_project(&project_id)?);
             }
         }
         if self.right_mode == RightMode::Sessions {
-            return Ok(current
-                .and_then(|_| self.selected_project_path())
+            return Ok(self
+                .selected_project_path()
                 .map_or(Command::None, Command::LoadSessions));
         }
         Ok(Command::None)
@@ -706,15 +776,30 @@ impl App {
             .iter()
             .enumerate()
             .map(|(order, project)| ProjectItem {
-                project: project.clone(),
+                target: ProjectTarget::Project(project.clone()),
                 status: ProjectStatus::from_labels(self.context.labels(&project.id)),
                 score: order,
             })
             .collect::<Vec<_>>();
+        let project_count = items.len();
+        items.extend(self.context.workspaces().iter().enumerate().map(
+            |(order, (name, context))| ProjectItem {
+                target: ProjectTarget::Workspace {
+                    name: name.clone(),
+                    context: context.clone(),
+                },
+                status: if context.current {
+                    ProjectStatus::Current
+                } else {
+                    ProjectStatus::Open
+                },
+                score: project_count + order,
+            },
+        ));
 
         if !self.project_query.is_empty() {
             items.retain_mut(|item| {
-                let Some(score) = fuzzy_score(&self.project_query, &item.project.display_name)
+                let Some(score) = fuzzy_score(&self.project_query, item.target.display_name())
                 else {
                     return false;
                 };
@@ -727,23 +812,24 @@ impl App {
     }
 
     fn visible_detail_items(&self) -> Vec<DetailItem> {
-        let Some(project_id) = self.selected_project_id() else {
+        let Some(target) = self.selected_target() else {
             return Vec::new();
         };
         let mut items: Vec<DetailItem> = match self.right_mode {
-            RightMode::Windows => self
-                .context
-                .items(project_id)
-                .iter()
-                .enumerate()
-                .map(|(score, item)| DetailItem {
-                    label: item.label.clone(),
-                    detail: item.detail.clone(),
-                    active: item.active,
-                    score,
-                    target: DetailTarget::HostItem(item.id.clone()),
-                })
-                .collect(),
+            RightMode::Windows => match &target {
+                ProjectTarget::Project(project) => self.context.items(&project.id),
+                ProjectTarget::Workspace { context, .. } => &context.items,
+            }
+            .iter()
+            .enumerate()
+            .map(|(score, item)| DetailItem {
+                label: item.label.clone(),
+                detail: item.detail.clone(),
+                active: item.active,
+                score,
+                target: DetailTarget::HostItem(item.id.clone()),
+            })
+            .collect(),
             RightMode::Files => self
                 .entries
                 .iter()
@@ -764,27 +850,34 @@ impl App {
                     target: DetailTarget::Entry(entry.clone()),
                 })
                 .collect(),
-            RightMode::Sessions => self
-                .ordered_sessions()
-                .into_iter()
-                .enumerate()
-                .map(|(score, (session, depth))| {
-                    let conflict = self.session_conflicts.contains(&session.id);
-                    let state = if conflict {
-                        "conflict: multiple live servers".into()
-                    } else {
-                        session_state_label(&session)
-                    };
-                    DetailItem {
-                        label: format!("{}{}", "  ".repeat(depth), session.title),
-                        detail: Some(format!("{} · {state}", session.type_label())),
-                        active: self.context.session_item(project_id, &session.id).is_some()
-                            || self.session_host_items.contains_key(&session.id),
-                        score,
-                        target: DetailTarget::OpenCodeSession(session.id),
-                    }
-                })
-                .collect(),
+            RightMode::Sessions => {
+                let ProjectTarget::Project(project) = &target else {
+                    return Vec::new();
+                };
+                self.ordered_sessions()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(score, (session, depth))| {
+                        let conflict = self.session_conflicts.contains(&session.id);
+                        let state = if conflict {
+                            "conflict: multiple live servers".into()
+                        } else {
+                            session_state_label(&session)
+                        };
+                        DetailItem {
+                            label: format!("{}{}", "  ".repeat(depth), session.title),
+                            detail: Some(format!("{} · {state}", session.type_label())),
+                            active: self
+                                .context
+                                .session_item(&project.id, &session.id)
+                                .is_some()
+                                || self.session_host_items.contains_key(&session.id),
+                            score,
+                            target: DetailTarget::OpenCodeSession(session.id),
+                        }
+                    })
+                    .collect()
+            }
         };
         if !self.detail_query.is_empty() {
             items.retain_mut(|item| {
@@ -847,9 +940,40 @@ fn command_for_outcome(outcome: NavigationOutcome) -> Result<Command, Navigation
 
 #[derive(Clone, Debug)]
 struct ProjectItem {
-    project: Project,
+    target: ProjectTarget,
     status: ProjectStatus,
     score: usize,
+}
+
+#[derive(Clone, Debug)]
+enum ProjectTarget {
+    Project(Project),
+    Workspace {
+        name: String,
+        context: HostWorkspaceContext,
+    },
+}
+
+impl ProjectTarget {
+    fn display_name(&self) -> &str {
+        match self {
+            Self::Project(project) => &project.display_name,
+            Self::Workspace { name, .. } => name,
+        }
+    }
+
+    fn key(self) -> ProjectTargetKey {
+        match self {
+            Self::Project(project) => ProjectTargetKey::Project(project.id),
+            Self::Workspace { name, .. } => ProjectTargetKey::Workspace(name),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProjectTargetKey {
+    Project(String),
+    Workspace(String),
 }
 
 #[derive(Clone, Debug)]
@@ -1113,7 +1237,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             ListItem::new(Line::from(vec![
                 Span::styled(item.status.icon(), Style::default().fg(item.status.color())),
                 Span::raw(" "),
-                Span::raw(item.project.display_name),
+                Span::raw(item.target.display_name().to_string()),
             ]))
         })
         .collect::<Vec<_>>();
