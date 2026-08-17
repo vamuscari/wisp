@@ -3,24 +3,24 @@ Options.__index = Options
 
 local DEFAULT_STATUS_COLORS = {
   foreground = "#E9E2C9",
+  opencode_background = "#2A5173",
   workspace_background = "#333F0A",
   active_workspace_background = "#7A1405",
   waiting_background = "#957C16",
   running_background = "#50620F",
-  retrying_background = "#683504",
   idle_background = "#66615C",
-  error_background = "#5E0F04",
+  failure_background = "#5E0F04",
 }
 
 local STATUS_COLOR_FIELDS = {
   foreground = true,
+  opencode_background = true,
   workspace_background = true,
   active_workspace_background = true,
   waiting_background = true,
   running_background = true,
-  retrying_background = true,
   idle_background = true,
-  error_background = true,
+  failure_background = true,
 }
 
 local function validate_domain(domain, label)

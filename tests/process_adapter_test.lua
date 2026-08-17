@@ -95,7 +95,7 @@ local function fixture(result, mux_overrides)
     picker_domain = { DomainName = "unix" },
   })
   local window = helper.fake_window(mux_overrides.active_workspace or "wisp:Repos/api", picker_mux)
-  local pane = helper.fake_pane()
+  local pane = helper.fake_pane(mux_overrides.pane)
   return {
     annotations = function()
       return encoded_annotations
@@ -187,6 +187,59 @@ helper.test("project picker launches wisp with a v3 host context", function()
   helper.assert_equal(test.window.performed[2].action.kind, "SwitchToWorkspace", "project action")
   helper.assert_equal(test.window.performed[2].pane, test.pane, "project original pane")
   helper.assert_equal(test.window.performed[2].action.value.name, "wisp:Repos/api", "project workspace")
+end)
+
+helper.test("project picker forwards the active Neovim file from an unmanaged workspace", function()
+  local test = fixture({ protocol_version = 3, status = "cancelled" }, {
+    active_workspace = "default",
+    window_workspace = "default",
+    get_workspace_names = function()
+      return { "default", "wisp:Repos/api" }
+    end,
+    pane = {
+      process_name = "/opt/homebrew/bin/nvim",
+      user_vars = { WISP_NVIM_FILE = "/Users/test/Repos/api/src/main.rs" },
+    },
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(
+    argument_after(test.picker_mux.spawned[1].args, "--active-file"),
+    "/Users/test/Repos/api/src/main.rs",
+    "active Neovim file"
+  )
+  helper.assert_table_equal(test.annotations().projects.api.labels, { "open" }, "unmanaged project labels")
+  helper.assert_equal(test.annotations().workspaces.default.current, true, "current unmanaged workspace")
+end)
+
+helper.test("project picker ignores a stale Neovim file when a shell is active", function()
+  local test = fixture({ protocol_version = 3, status = "cancelled" }, {
+    pane = {
+      process_name = "/bin/zsh",
+      user_vars = { WISP_NVIM_FILE = "/Users/test/Repos/api/src/stale.rs" },
+    },
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(argument_after(test.picker_mux.spawned[1].args, "--active-file"), nil, "stale active file")
+end)
+
+helper.test("project picker accepts Neovim pane context when mux process inspection is unavailable", function()
+  local test = fixture({ protocol_version = 3, status = "cancelled" }, {
+    pane = {
+      user_vars = { WISP_NVIM_FILE = "/Users/test/Repos/api/src/mux.rs" },
+    },
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(
+    argument_after(test.picker_mux.spawned[1].args, "--active-file"),
+    "/Users/test/Repos/api/src/mux.rs",
+    "mux active file"
+  )
 end)
 
 helper.test("host context uses the displayed mux window workspace when client state is stale", function()

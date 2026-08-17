@@ -8,7 +8,10 @@ use wisp_core::{
     opencode::{OpenCodeSession, OpenCodeSnapshot, SessionActivity, SessionWaiting},
     protocol::{HostContext, Selection},
 };
-use wisp_tui::{App, Command, Focus, InitialView, InputMode, RightMode, render};
+use wisp_tui::{
+    ActiveProjectContext, App, Command, Focus, GitSummary, InitialView, InputMode, RightMode,
+    render,
+};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -845,6 +848,241 @@ fn wide_renderer_shows_projects_and_window_metadata_side_by_side() {
 }
 
 #[test]
+fn active_project_file_and_git_status_render_inline_without_adding_a_window() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.set_active_project_context(ActiveProjectContext {
+        project_id: "api".into(),
+        file: Some("src/main.rs".into()),
+        git: Some(GitSummary {
+            branch: "main".into(),
+            dirty: true,
+        }),
+    });
+    let backend = TestBackend::new(160, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal);
+    let project_row = lines
+        .iter()
+        .position(|line| line.contains("API Service"))
+        .unwrap() as u16;
+    let rendered = lines.join("\n");
+
+    assert_eq!(app.selected_project_id(), Some("api"));
+    assert_eq!(app.visible_detail_labels(), vec!["api-shell"]);
+    assert!(
+        rendered.contains("◆ API Service  src/main.rs    main dirty"),
+        "active metadata should be part of the project row:\n{rendered}"
+    );
+    assert_eq!(terminal.backend().buffer()[(42, project_row)].symbol(), "y");
+    assert_eq!(terminal.backend().buffer()[(43, project_row)].symbol(), "│");
+    assert!(!rendered.contains("src/main.rs  api-shell"));
+}
+
+#[test]
+fn editor_active_project_is_not_treated_as_host_open() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        None,
+        InitialView::Projects,
+    );
+    app.set_active_project_context(ActiveProjectContext {
+        project_id: "web".into(),
+        file: Some("src/app.rs".into()),
+        git: None,
+    });
+
+    assert_eq!(app.selected_project_id(), Some("web"));
+    assert_eq!(
+        app.handle_key(key(KeyCode::Char('x'))).unwrap(),
+        Command::None
+    );
+
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+
+    assert!(rendered.contains("◆ Web Client  src/app.rs"));
+    assert!(rendered.contains("Project is not open"));
+}
+
+#[test]
+fn git_update_for_an_inactive_project_is_ignored() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        None,
+        InitialView::Projects,
+    );
+    app.set_active_project_context(ActiveProjectContext {
+        project_id: "web".into(),
+        file: None,
+        git: None,
+    });
+
+    app.set_active_project_git(
+        "api",
+        GitSummary {
+            branch: "wrong-branch".into(),
+            dirty: true,
+        },
+    );
+
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+
+    assert!(rendered.contains("◆ Web Client"));
+    assert!(!rendered.contains("wrong-branch"));
+}
+
+#[test]
+fn active_project_row_keeps_the_filename_and_clean_git_state_when_space_is_limited() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.set_active_project_context(ActiveProjectContext {
+        project_id: "api".into(),
+        file: Some("a/very/long/project/relative/path/src/main.rs".into()),
+        git: Some(GitSummary {
+            branch: "main".into(),
+            dirty: false,
+        }),
+    });
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal);
+    let project_row = lines
+        .iter()
+        .position(|line| line.contains("API Service"))
+        .unwrap() as u16;
+    let rendered = lines.join("\n");
+
+    assert!(
+        rendered.contains("◆ API Service  …/main.rs  main clean"),
+        "the file should truncate from the left without hiding Git state:\n{rendered}"
+    );
+    assert_eq!(terminal.backend().buffer()[(38, project_row)].symbol(), "n");
+    assert_eq!(terminal.backend().buffer()[(39, project_row)].symbol(), "│");
+}
+
+#[test]
+fn long_git_branch_truncates_before_the_right_aligned_state() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.set_active_project_context(ActiveProjectContext {
+        project_id: "api".into(),
+        file: None,
+        git: Some(GitSummary {
+            branch: "feature/an-excessively-long-branch-name".into(),
+            dirty: true,
+        }),
+    });
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal);
+    let project_row = lines
+        .iter()
+        .position(|line| line.contains("API Service"))
+        .unwrap() as u16;
+    let rendered = lines.join("\n");
+
+    assert!(
+        rendered.contains("◆ API Service  feature… dirty"),
+        "the branch should truncate before the state:\n{rendered}"
+    );
+    assert_eq!(terminal.backend().buffer()[(31, project_row)].symbol(), "y");
+    assert_eq!(terminal.backend().buffer()[(32, project_row)].symbol(), "│");
+}
+
+#[test]
+fn long_project_name_truncates_before_the_right_aligned_git_metadata() {
+    let mut projects = projects();
+    projects[0].display_name = "An extremely long project name".into();
+    let mut app = App::new(
+        projects,
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.set_active_project_context(ActiveProjectContext {
+        project_id: "api".into(),
+        file: None,
+        git: Some(GitSummary {
+            branch: "main".into(),
+            dirty: true,
+        }),
+    });
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+
+    assert!(
+        rendered.contains("main dirty"),
+        "Git metadata should remain visible after the project name truncates:\n{rendered}"
+    );
+    assert!(!rendered.contains("An extremely long project name"));
+}
+
+#[test]
+fn wide_renderer_uses_an_adaptive_capped_projects_width() {
+    for (terminal_width, detail_start) in [(100, 33), (160, 44)] {
+        let app = App::new(
+            projects(),
+            Openers::default(),
+            false,
+            Some(context()),
+            InitialView::Projects,
+        );
+        let backend = TestBackend::new(terminal_width, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let title_row = rendered_lines(&terminal)
+            .iter()
+            .position(|line| line.contains("Projects") && line.contains("Windows"))
+            .unwrap() as u16;
+
+        assert_eq!(
+            terminal.backend().buffer()[(detail_start - 1, title_row)].symbol(),
+            "┐"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(detail_start, title_row)].symbol(),
+            "┌"
+        );
+    }
+}
+
+#[test]
 fn renderer_uses_the_accent_border_for_only_the_focused_pane() {
     let mut app = App::new(
         projects(),
@@ -863,7 +1101,7 @@ fn renderer_uses_the_accent_border_for_only_the_focused_pane() {
         .unwrap() as u16;
     assert_eq!(terminal.backend().buffer()[(0, title_row)].fg, Color::Cyan);
     assert_eq!(
-        terminal.backend().buffer()[(40, title_row)].fg,
+        terminal.backend().buffer()[(33, title_row)].fg,
         Color::DarkGray
     );
 
@@ -873,7 +1111,7 @@ fn renderer_uses_the_accent_border_for_only_the_focused_pane() {
         terminal.backend().buffer()[(0, title_row)].fg,
         Color::DarkGray
     );
-    assert_eq!(terminal.backend().buffer()[(40, title_row)].fg, Color::Cyan);
+    assert_eq!(terminal.backend().buffer()[(33, title_row)].fg, Color::Cyan);
 }
 
 #[test]

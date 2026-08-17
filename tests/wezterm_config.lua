@@ -1,6 +1,11 @@
 local wezterm = require "wezterm"
 local config = wezterm.config_builder()
 config.disable_default_key_bindings = true
+assert(type(wezterm.format {
+  { Attribute = { Invisible = true } },
+  { Text = "status" },
+  { Attribute = { Invisible = false } },
+}) == "string", "minimum WezTerm must support status visibility attributes")
 
 local root = assert(wezterm.config_dir:match "^(.*)[/\\]tests$", "could not resolve the Wisp test root")
 local wisp = assert(loadfile(root .. "/wezterm/init.lua"))("wisp", "wisp-deployment-v3", root .. "/wezterm")

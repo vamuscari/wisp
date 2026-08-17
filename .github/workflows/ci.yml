@@ -140,5 +140,6 @@ jobs:
         run: >-
           nvim --headless -u NONE
           --cmd "set runtimepath+=$RUNNER_TEMP/wisp/nvim"
+          -c "lua assert(type(vim.base64.encode) == 'function')"
           -c "lua require('wisp').setup()"
           -c "qa"

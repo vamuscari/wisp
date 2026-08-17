@@ -71,6 +71,19 @@ pub enum InitialView {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitSummary {
+    pub branch: String,
+    pub dirty: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveProjectContext {
+    pub project_id: String,
+    pub file: Option<String>,
+    pub git: Option<GitSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     None,
     LoadDirectory(PathBuf),
@@ -83,6 +96,9 @@ pub enum Command {
 }
 
 pub trait DataSource {
+    fn active_project_git_update(&mut self) -> Option<(String, GitSummary)> {
+        None
+    }
     fn directory(&mut self, path: &Path) -> Result<Vec<DirectoryEntry>, String>;
     fn refresh_projects(&mut self) -> Result<Vec<Project>, String>;
     fn refresh_directory(&mut self, path: &Path) -> Result<Vec<DirectoryEntry>, String>;
@@ -132,6 +148,7 @@ pub struct App {
     input_mode: InputMode,
     status: Option<String>,
     startup_command: Option<Command>,
+    active_project: Option<ActiveProjectContext>,
 }
 
 impl App {
@@ -197,6 +214,7 @@ impl App {
             input_mode: InputMode::Normal,
             status: None,
             startup_command: None,
+            active_project: None,
         };
         app.select_current_project();
         match initial_view {
@@ -283,6 +301,26 @@ impl App {
             .into_iter()
             .map(|item| item.label)
             .collect()
+    }
+
+    pub fn set_active_project_context(&mut self, context: ActiveProjectContext) {
+        let update_startup_sessions =
+            matches!(&self.startup_command, Some(Command::LoadSessions(_)));
+        self.active_project = Some(context);
+        self.select_current_project();
+        if update_startup_sessions {
+            self.startup_command = self.selected_project_path().map(Command::LoadSessions);
+        }
+    }
+
+    pub fn set_active_project_git(&mut self, project_id: &str, git: GitSummary) {
+        if let Some(active) = self
+            .active_project
+            .as_mut()
+            .filter(|active| active.project_id == project_id)
+        {
+            active.git = Some(git);
+        }
     }
 
     pub fn replace_projects(&mut self, projects: Vec<Project>) {
@@ -642,7 +680,7 @@ impl App {
         else {
             return Ok(Command::None);
         };
-        if !item.status.is_open() {
+        if !item.host_open {
             return Ok(Command::None);
         }
         match item.target {
@@ -750,13 +788,13 @@ impl App {
     fn selected_project_is_current(&self) -> bool {
         self.visible_project_items()
             .get(self.project_cursor)
-            .is_some_and(|item| item.status == ProjectStatus::Current)
+            .is_some_and(|item| item.host_current)
     }
 
     fn selected_project_is_open(&self) -> bool {
         self.visible_project_items()
             .get(self.project_cursor)
-            .is_some_and(|item| item.status.is_open())
+            .is_some_and(|item| item.host_open)
     }
 
     fn select_active_host_item(&mut self) {
@@ -775,10 +813,16 @@ impl App {
             .projects()
             .iter()
             .enumerate()
-            .map(|(order, project)| ProjectItem {
-                target: ProjectTarget::Project(project.clone()),
-                status: ProjectStatus::from_labels(self.context.labels(&project.id)),
-                score: order,
+            .map(|(order, project)| {
+                let labels = self.context.labels(&project.id);
+                let host_current = labels.iter().any(|label| label == "current");
+                ProjectItem {
+                    target: ProjectTarget::Project(project.clone()),
+                    status: self.project_status(project),
+                    host_current,
+                    host_open: host_current || labels.iter().any(|label| label == "open"),
+                    score: order,
+                }
             })
             .collect::<Vec<_>>();
         let project_count = items.len();
@@ -793,6 +837,8 @@ impl App {
                 } else {
                     ProjectStatus::Open
                 },
+                host_current: context.current,
+                host_open: true,
                 score: project_count + order,
             },
         ));
@@ -809,6 +855,18 @@ impl App {
         }
         items.sort_by_key(|item| (item.status.rank(), item.score));
         items
+    }
+
+    fn project_status(&self, project: &Project) -> ProjectStatus {
+        let labels = self.context.labels(&project.id);
+        let Some(active) = &self.active_project else {
+            return ProjectStatus::from_labels(labels);
+        };
+        if active.project_id == project.id {
+            ProjectStatus::Current
+        } else {
+            ProjectStatus::from_inactive_labels(labels)
+        }
     }
 
     fn visible_detail_items(&self) -> Vec<DetailItem> {
@@ -942,6 +1000,8 @@ fn command_for_outcome(outcome: NavigationOutcome) -> Result<Command, Navigation
 struct ProjectItem {
     target: ProjectTarget,
     status: ProjectStatus,
+    host_current: bool,
+    host_open: bool,
     score: usize,
 }
 
@@ -1128,6 +1188,16 @@ impl ProjectStatus {
         }
     }
 
+    fn from_inactive_labels(labels: &[String]) -> Self {
+        if labels.iter().any(|label| label == "open") {
+            Self::Open
+        } else if labels.iter().any(|label| label == "new") {
+            Self::New
+        } else {
+            Self::Unknown
+        }
+    }
+
     const fn rank(self) -> usize {
         match self {
             Self::Current => 0,
@@ -1153,10 +1223,6 @@ impl ProjectStatus {
             Self::New | Self::Unknown => THEME.muted,
         }
     }
-
-    const fn is_open(self) -> bool {
-        matches!(self, Self::Current | Self::Open)
-    }
 }
 
 fn fuzzy_score(query: &str, candidate: &str) -> Option<usize> {
@@ -1176,6 +1242,146 @@ fn fuzzy_score(query: &str, candidate: &str) -> Option<usize> {
         previous = Some(index);
     }
     Some(score)
+}
+
+fn truncate_left(value: &str, width: usize) -> Option<String> {
+    if width == 0 {
+        return None;
+    }
+    if Span::raw(value).width() <= width {
+        return Some(value.to_string());
+    }
+    if width == 1 {
+        return Some("…".into());
+    }
+    value
+        .char_indices()
+        .map(|(index, _)| &value[index..])
+        .find(|suffix| Span::raw(*suffix).width().saturating_add(1) <= width)
+        .map(|suffix| format!("…{suffix}"))
+        .or_else(|| Some("…".into()))
+}
+
+fn truncate_right(value: &str, width: usize) -> Option<String> {
+    if width == 0 {
+        return None;
+    }
+    if Span::raw(value).width() <= width {
+        return Some(value.to_string());
+    }
+    if width == 1 {
+        return Some("…".into());
+    }
+    let mut end = value.len();
+    while end > 0 {
+        let candidate = &value[..end];
+        if Span::raw(candidate).width().saturating_add(1) <= width {
+            return Some(format!("{candidate}…"));
+        }
+        end = value[..end]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(index, _)| index);
+    }
+    Some("…".into())
+}
+
+fn project_row(
+    item: ProjectItem,
+    active: Option<&ActiveProjectContext>,
+    width: usize,
+) -> ListItem<'static> {
+    const GIT_GAP: usize = 2;
+    const COMPACT_PROJECT_NAME_WIDTH: usize = 15;
+
+    let display_name = item.target.display_name();
+    let git = active.and_then(|active| active.git.as_ref()).map(|git| {
+        (
+            git.branch.as_str(),
+            if git.dirty { "dirty" } else { "clean" },
+            git.dirty,
+        )
+    });
+    let status_width = Span::raw(item.status.icon()).width().saturating_add(1);
+    let full_name_width = Span::raw(display_name).width();
+    let name_width = git.map_or_else(
+        || width.saturating_sub(status_width),
+        |(branch, state, _)| {
+            let state_width = Span::raw(state).width();
+            let full_git_width = Span::raw(branch)
+                .width()
+                .saturating_add(1)
+                .saturating_add(state_width);
+            let preferred_name_width = full_name_width.min(COMPACT_PROJECT_NAME_WIDTH).min(
+                width
+                    .saturating_sub(status_width)
+                    .saturating_sub(GIT_GAP)
+                    .saturating_sub(state_width),
+            );
+            let available_git_width = width
+                .saturating_sub(status_width)
+                .saturating_sub(GIT_GAP)
+                .saturating_sub(preferred_name_width);
+            if full_git_width <= available_git_width {
+                full_name_width.min(
+                    width
+                        .saturating_sub(status_width)
+                        .saturating_sub(GIT_GAP)
+                        .saturating_sub(full_git_width),
+                )
+            } else {
+                preferred_name_width
+            }
+        },
+    );
+    let display_name = truncate_right(display_name, name_width).unwrap_or_default();
+    let mut spans = vec![
+        Span::styled(item.status.icon(), Style::default().fg(item.status.color())),
+        Span::raw(" "),
+        Span::raw(display_name),
+    ];
+    let base_width = Line::from(spans.clone()).width();
+
+    let git = git.map(|(branch, state, dirty)| {
+        let state_width = Span::raw(state).width();
+        let available = width.saturating_sub(base_width).saturating_sub(GIT_GAP);
+        let branch_width = available.saturating_sub(state_width).saturating_sub(1);
+        let branch = truncate_right(branch, branch_width);
+        let width = branch.as_ref().map_or(state_width, |branch| {
+            Span::raw(branch).width() + 1 + state_width
+        });
+        (branch, state, dirty, width)
+    });
+    let git_width = git.as_ref().map_or(0, |(_, _, _, width)| *width);
+    let file_width = width
+        .saturating_sub(base_width)
+        .saturating_sub(git_width)
+        .saturating_sub(if git.is_some() { GIT_GAP } else { 0 })
+        .saturating_sub(2);
+    if let Some(file) = active
+        .and_then(|active| active.file.as_deref())
+        .and_then(|file| truncate_left(file, file_width))
+    {
+        spans.push(Span::styled(
+            format!("  {file}"),
+            Style::default().fg(THEME.muted),
+        ));
+    }
+    if let Some((branch, state, dirty, _)) = git {
+        let padding = width
+            .saturating_sub(Line::from(spans.clone()).width())
+            .saturating_sub(git_width);
+        spans.push(Span::raw(" ".repeat(padding)));
+        if let Some(branch) = branch {
+            spans.push(Span::styled(branch, Style::default().fg(THEME.accent)));
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            state,
+            Style::default().fg(if dirty { THEME.input } else { THEME.active }),
+        ));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -1225,8 +1431,9 @@ pub fn render(frame: &mut Frame, app: &App) {
                 .areas(content);
         (projects_area, detail_area)
     } else {
+        let projects_width = (content.width / 3).clamp(32, 44);
         let [projects_area, detail_area] =
-            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+            Layout::horizontal([Constraint::Length(projects_width), Constraint::Min(0)])
                 .areas(content);
         (projects_area, detail_area)
     };
@@ -1234,11 +1441,14 @@ pub fn render(frame: &mut Frame, app: &App) {
         .visible_project_items()
         .into_iter()
         .map(|item| {
-            ListItem::new(Line::from(vec![
-                Span::styled(item.status.icon(), Style::default().fg(item.status.color())),
-                Span::raw(" "),
-                Span::raw(item.target.display_name().to_string()),
-            ]))
+            let active = match &item.target {
+                ProjectTarget::Project(project) => app
+                    .active_project
+                    .as_ref()
+                    .filter(|active| active.project_id == project.id),
+                ProjectTarget::Workspace { .. } => None,
+            };
+            project_row(item, active, projects_area.width.saturating_sub(4).into())
         })
         .collect::<Vec<_>>();
     let mut project_state = ListState::default()
@@ -1389,6 +1599,9 @@ where
         }
     }
     loop {
+        if let Some((project_id, git)) = data.active_project_git_update() {
+            app.set_active_project_git(&project_id, git);
+        }
         if app.right_mode == RightMode::Sessions && data.session_updates_pending() {
             if let Some(path) = app.selected_project_path() {
                 match data.sessions(&path) {

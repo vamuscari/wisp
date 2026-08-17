@@ -12,7 +12,10 @@ use wisp_core::{
     opencode::{OpenCodeSession, OpenCodeSnapshot, SessionActivity, SessionWaiting},
     protocol::Selection,
 };
-use wisp_tui::{App, Command, DataSource, InitialView, Input, RightMode, run_with_terminal};
+use wisp_tui::{
+    ActiveProjectContext, App, Command, DataSource, GitSummary, InitialView, Input, RightMode,
+    run_with_terminal,
+};
 
 fn projects() -> Vec<Project> {
     vec![
@@ -119,6 +122,8 @@ fn replacing_projects_resets_the_two_pane_view() {
 
 #[derive(Default)]
 struct FixtureData {
+    active_project_git: Option<(String, GitSummary)>,
+    active_project_git_delay: usize,
     directory_calls: Vec<PathBuf>,
     directory_error: Option<String>,
     session_calls: Vec<PathBuf>,
@@ -126,6 +131,14 @@ struct FixtureData {
 }
 
 impl DataSource for FixtureData {
+    fn active_project_git_update(&mut self) -> Option<(String, GitSummary)> {
+        if self.active_project_git_delay > 0 {
+            self.active_project_git_delay -= 1;
+            return None;
+        }
+        self.active_project_git.take()
+    }
+
     fn directory(&mut self, path: &Path) -> Result<Vec<DirectoryEntry>, String> {
         self.directory_calls.push(path.to_path_buf());
         if let Some(error) = &self.directory_error {
@@ -159,6 +172,33 @@ impl Input for ScriptedInput {
             .pop_front()
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "input exhausted"))
     }
+}
+
+struct TimedInput(VecDeque<Option<KeyEvent>>);
+
+impl Input for TimedInput {
+    fn read_key(&mut self) -> io::Result<KeyEvent> {
+        self.read_key_timeout(std::time::Duration::ZERO)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "input timed out"))
+    }
+
+    fn read_key_timeout(&mut self, _timeout: std::time::Duration) -> io::Result<Option<KeyEvent>> {
+        self.0
+            .pop_front()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "input exhausted"))
+    }
+}
+
+fn rendered_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area;
+    (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
 }
 
 #[test]
@@ -259,4 +299,73 @@ fn sessions_initial_view_loads_before_input_and_returns_the_selected_session() {
         selection,
         Selection::OpenCodeSession { ref session_id, .. } if session_id == "ses_123"
     ));
+}
+
+#[test]
+fn active_project_updates_the_sessions_initial_view_before_input() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        None,
+        InitialView::Sessions,
+        vec!["opencode".into()],
+    );
+    app.set_active_project_context(ActiveProjectContext {
+        project_id: "web".into(),
+        file: None,
+        git: None,
+    });
+    let mut data = FixtureData::default();
+    let mut input = ScriptedInput(VecDeque::from([KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )]));
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let selection = run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).unwrap();
+
+    assert_eq!(selection, None);
+    assert_eq!(data.session_calls, vec![PathBuf::from("/repos/web")]);
+}
+
+#[test]
+fn terminal_loop_applies_a_delayed_active_project_git_update() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        None,
+        InitialView::Projects,
+    );
+    app.set_active_project_context(ActiveProjectContext {
+        project_id: "web".into(),
+        file: None,
+        git: None,
+    });
+    let mut data = FixtureData {
+        active_project_git: Some((
+            "web".into(),
+            GitSummary {
+                branch: "main".into(),
+                dirty: true,
+            },
+        )),
+        active_project_git_delay: 1,
+        ..FixtureData::default()
+    };
+    let mut input = TimedInput(VecDeque::from([
+        None,
+        Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+    ]));
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let selection = run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+
+    assert_eq!(selection, None);
+    assert!(rendered.contains("◆ Web Client"));
+    assert!(rendered.contains("main dirty"));
 }

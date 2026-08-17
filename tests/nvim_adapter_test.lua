@@ -20,18 +20,25 @@ end
 
 local function fake_vim(result)
   local state = {
+    autocmds = {},
+    augroups = {},
     buffers = {},
+    buffer_names = { [5] = "", [11] = "" },
+    buffer_types = { [5] = "", [11] = "terminal" },
     commands = {},
+    current_buffer = 5,
     keymaps = {},
     notifications = {},
     tab_calls = {},
     user_commands = {},
+    uis = { { chan = 1 } },
     windows = {},
   }
   local temporary = os.tmpname()
   os.remove(temporary)
   local vim = {
     api = {},
+    base64 = {},
     cmd = {},
     env = {},
     fn = {},
@@ -46,8 +53,37 @@ local function fake_vim(result)
     state.user_commands[name] = { callback = callback, options = options }
   end
 
+  function vim.api.nvim_create_augroup(name, options)
+    table.insert(state.augroups, { name = name, options = options })
+    return 19
+  end
+
+  function vim.api.nvim_create_autocmd(events, options)
+    table.insert(state.autocmds, { events = events, options = options })
+    return #state.autocmds
+  end
+
   function vim.api.nvim_get_current_tabpage()
     return 7
+  end
+
+  function vim.api.nvim_get_current_buf()
+    return state.current_buffer
+  end
+
+  function vim.api.nvim_list_uis()
+    return state.uis
+  end
+
+  function vim.api.nvim_buf_get_name(buffer)
+    return state.buffer_names[buffer] or ""
+  end
+
+  function vim.api.nvim_get_option_value(name, options)
+    if name == "buftype" then
+      return state.buffer_types[options.buf] or ""
+    end
+    error("unexpected option " .. tostring(name))
   end
 
   function vim.api.nvim_create_buf()
@@ -56,6 +92,9 @@ local function fake_vim(result)
 
   function vim.api.nvim_open_win(buffer, enter, config)
     table.insert(state.windows, { buffer = buffer, config = config, enter = enter })
+    if enter then
+      state.current_buffer = buffer
+    end
     return 13
   end
 
@@ -123,6 +162,10 @@ local function fake_vim(result)
     return result
   end
 
+  function vim.base64.encode(value)
+    return value == "" and "" or "base64:" .. value
+  end
+
   function vim.schedule(callback)
     callback()
   end
@@ -137,6 +180,23 @@ end
 local function load_adapter(vim)
   _G.vim = vim
   return assert(loadfile "nvim/lua/wisp/init.lua")("/opt/bin/wisp", "wisp-deployment-v3")
+end
+
+local function capture_stdout(callback)
+  local original = io.stdout
+  local chunks = {}
+  io.stdout = {
+    flush = function() end,
+    write = function(_, value)
+      table.insert(chunks, value)
+    end,
+  }
+  local completed, callback_error = pcall(callback)
+  io.stdout = original
+  if not completed then
+    error(callback_error)
+  end
+  return table.concat(chunks)
 end
 
 helper.test("Neovim adapter rejects ordinary runtimepath loading", function()
@@ -208,6 +268,79 @@ helper.test("Neovim picker applies a file result to the originating tab", functi
   helper.assert_equal(vim.t.wisp_project_name, project.name, "tab project name")
   helper.assert_equal(state.closed_window.window, 13, "float closed")
   helper.assert_equal(state.deleted_buffer.buffer, 11, "terminal buffer deleted")
+end)
+
+helper.test("Neovim picker passes the originating normal file and project to Wisp", function()
+  local vim, state = fake_vim { protocol_version = 3, status = "cancelled" }
+  state.buffer_names[5] = "/Users/test/Repos/api/src/main.rs"
+  vim.t.wisp_project_dir = "/Users/test/Repos/api"
+  local wisp = load_adapter(vim)
+  wisp.setup()
+
+  wisp.open()
+
+  helper.assert_equal(
+    argument_after(state.job.args, "--active-project-path"),
+    "/Users/test/Repos/api",
+    "active project path"
+  )
+  helper.assert_equal(
+    argument_after(state.job.args, "--active-file"),
+    "/Users/test/Repos/api/src/main.rs",
+    "active file"
+  )
+  helper.assert_equal(state.current_buffer, 11, "picker terminal should be current after context capture")
+end)
+
+helper.test("Neovim publishes only normal files to the containing WezTerm pane", function()
+  local vim, state = fake_vim { protocol_version = 3, status = "cancelled" }
+  vim.env.WEZTERM_PANE = "9"
+  state.buffer_names[5] = "/Users/test/Repos/api/src/main.rs"
+  local wisp = load_adapter(vim)
+
+  local output = capture_stdout(function()
+    wisp.setup()
+    helper.assert_equal(#state.autocmds, 2, "pane context autocmd count")
+    helper.assert_table_equal(state.autocmds[1].events, { "BufEnter", "BufFilePost" }, "file events")
+    helper.assert_equal(state.autocmds[2].events, "VimLeavePre", "exit event")
+
+    state.current_buffer = 6
+    state.buffer_names[6] = "term://shell"
+    state.buffer_types[6] = "terminal"
+    state.autocmds[1].options.callback()
+    state.autocmds[2].options.callback()
+  end)
+
+  helper.assert_equal(
+    output,
+    "\27]1337;SetUserVar=WISP_NVIM_FILE=base64:/Users/test/Repos/api/src/main.rs\27\\"
+      .. "\27]1337;SetUserVar=WISP_NVIM_FILE=\27\\"
+      .. "\27]1337;SetUserVar=WISP_NVIM_FILE=\27\\",
+    "pane user variable output"
+  )
+end)
+
+helper.test("Neovim defers pane escapes until a UI is attached", function()
+  local vim, state = fake_vim { protocol_version = 3, status = "cancelled" }
+  vim.env.WEZTERM_PANE = "9"
+  state.buffer_names[5] = "/Users/test/Repos/api/src/main.rs"
+  state.uis = {}
+  local wisp = load_adapter(vim)
+
+  local output = capture_stdout(function()
+    wisp.setup()
+    helper.assert_equal(#state.autocmds, 1, "deferred pane autocmd count")
+    helper.assert_equal(state.autocmds[1].events, "UIEnter", "deferred pane event")
+    state.uis = { { chan = 1 } }
+    state.autocmds[1].options.callback()
+  end)
+
+  helper.assert_equal(
+    output,
+    "\27]1337;SetUserVar=WISP_NVIM_FILE=base64:/Users/test/Repos/api/src/main.rs\27\\",
+    "deferred pane output"
+  )
+  helper.assert_equal(#state.autocmds, 3, "attached pane autocmd count")
 end)
 
 helper.test("Neovim cancellation closes the float without changing the tab", function()

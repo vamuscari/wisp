@@ -33,7 +33,17 @@ local function status_backgrounds(status)
   return colors
 end
 
-helper.test("status bar is enabled by default and renders workspace and session cells", function()
+local function status_invisibility(status)
+  local values = {}
+  for _, item in ipairs(status) do
+    if item.Attribute and item.Attribute.Invisible ~= nil then
+      table.insert(values, item.Attribute.Invisible)
+    end
+  end
+  return values
+end
+
+helper.test("status bar renders compact OpenCode counts before the project name", function()
   local calls = {}
   local wezterm = helper.fake_wezterm {
     run_child_process = function(args)
@@ -63,21 +73,178 @@ helper.test("status bar is enabled by default and renders workspace and session 
     "status command"
   )
   helper.assert_table_equal(status_text(window.right_status), {
-    " wisp:group/repo ",
-    " wait 1 ",
-    " run 2 ",
-    " retry 3 ",
-    " idle 4 ",
-    " err 5 ",
+    " OC ",
+    " 4 ",
+    " 2 ",
+    " 1 ",
+    " 8 ",
+    " repo ",
   }, "status text")
   helper.assert_table_equal(status_backgrounds(window.right_status), {
-    "#333F0A",
-    "#957C16",
-    "#50620F",
-    "#683504",
+    "#2A5173",
     "#66615C",
+    "#50620F",
+    "#957C16",
     "#5E0F04",
+    "#333F0A",
   }, "default status colors")
+end)
+
+helper.test("status bar omits zero waiting and failure counts", function()
+  local wezterm = helper.fake_wezterm {
+    run_child_process = function()
+      return true, "status", ""
+    end,
+    json_parse = function()
+      return {
+        protocol_version = 3,
+        sessions = { waiting = 0, running = 2, retrying = 0, idle = 4, error = 0 },
+      }
+    end,
+  }
+  local wisp = helper.load_wezterm_adapter(wezterm)
+  wisp.apply_to_config({}, {})
+  local window = helper.fake_window "wisp:group/repo"
+
+  wezterm.events["update-status"](window, helper.fake_pane())
+
+  helper.assert_table_equal(status_text(window.right_status), {
+    " OC ",
+    " 4 ",
+    " 2 ",
+    " repo ",
+  }, "status text")
+  helper.assert_table_equal(status_backgrounds(window.right_status), {
+    "#2A5173",
+    "#66615C",
+    "#50620F",
+    "#333F0A",
+  }, "status colors")
+end)
+
+helper.test("waiting and failure counts flash three times when they appear", function()
+  local scheduled = {}
+  local wezterm = helper.fake_wezterm {
+    call_after = function(interval, callback)
+      table.insert(scheduled, { interval = interval, callback = callback })
+    end,
+    run_child_process = function()
+      return true, "status", ""
+    end,
+    json_parse = function()
+      return valid_status
+    end,
+  }
+  local wisp = helper.load_wezterm_adapter(wezterm)
+  wisp.apply_to_config({}, {})
+  local window = helper.fake_window "wisp:group/repo"
+  function window:effective_config()
+    return { text_blink_rate = 0 }
+  end
+
+  wezterm.events["update-status"](window, helper.fake_pane())
+
+  helper.assert_table_equal(status_invisibility(window.right_status), {}, "initial attention visibility")
+  helper.assert_equal(#scheduled, 3, "cooldown and flash timers")
+  helper.assert_equal(scheduled[1].interval, 2, "refresh cooldown")
+  helper.assert_equal(scheduled[2].interval, 0.25, "waiting flash interval")
+  helper.assert_equal(scheduled[3].interval, 0.25, "failure flash interval")
+
+  scheduled[2].callback()
+  scheduled[3].callback()
+  helper.assert_table_equal(status_invisibility(window.right_status), {
+    true,
+    false,
+    true,
+    false,
+  }, "hidden attention counts")
+
+  local next_timer = 4
+  while next_timer <= #scheduled do
+    scheduled[next_timer].callback()
+    next_timer = next_timer + 1
+  end
+
+  helper.assert_equal(#scheduled, 13, "three flashes per attention count")
+  helper.assert_table_equal(status_invisibility(window.right_status), {}, "solid attention counts")
+  helper.assert_table_equal(status_text(window.right_status), {
+    " OC ",
+    " 4 ",
+    " 2 ",
+    " 1 ",
+    " 8 ",
+    " repo ",
+  }, "solid status text")
+
+  scheduled[1].callback()
+  wezterm.events["update-status"](window, helper.fake_pane())
+  helper.assert_equal(#scheduled, 14, "positive counts do not restart flashes")
+  helper.assert_equal(scheduled[14].interval, 2, "next refresh cooldown")
+end)
+
+helper.test("stale flash timers do not stop a later appearance", function()
+  local scheduled = {}
+  local sessions = { waiting = 1, running = 0, retrying = 0, idle = 0, error = 0 }
+  local wezterm = helper.fake_wezterm {
+    call_after = function(interval, callback)
+      table.insert(scheduled, { interval = interval, callback = callback })
+    end,
+    run_child_process = function()
+      return true, "status", ""
+    end,
+    json_parse = function()
+      return { protocol_version = 3, sessions = sessions }
+    end,
+  }
+  local wisp = helper.load_wezterm_adapter(wezterm)
+  wisp.apply_to_config({}, {})
+  local window = helper.fake_window "wisp:group/repo"
+  local pane = helper.fake_pane()
+
+  wezterm.events["update-status"](window, pane)
+  local stale_expiration = scheduled[2].callback
+  scheduled[1].callback()
+
+  sessions = { waiting = 0, running = 0, retrying = 0, idle = 1, error = 0 }
+  wezterm.events["update-status"](window, pane)
+  scheduled[3].callback()
+
+  sessions = { waiting = 2, running = 0, retrying = 0, idle = 0, error = 0 }
+  wezterm.events["update-status"](window, pane)
+  stale_expiration()
+  scheduled[5].callback()
+
+  helper.assert_table_equal(status_invisibility(window.right_status), { true, false }, "guarded waiting flash")
+end)
+
+helper.test("flash transitions rerender every observed GUI window", function()
+  local scheduled = {}
+  local wezterm = helper.fake_wezterm {
+    call_after = function(interval, callback)
+      table.insert(scheduled, { interval = interval, callback = callback })
+    end,
+    run_child_process = function()
+      return true, "status", ""
+    end,
+    json_parse = function()
+      return {
+        protocol_version = 3,
+        sessions = { waiting = 1, running = 0, retrying = 0, idle = 0, error = 0 },
+      }
+    end,
+  }
+  local wisp = helper.load_wezterm_adapter(wezterm)
+  wisp.apply_to_config({}, {})
+  local first = helper.fake_window "wisp:group/one"
+  local second = helper.fake_window "wisp:group/two"
+  local pane = helper.fake_pane()
+
+  wezterm.events["update-status"](first, pane)
+  wezterm.events["update-status"](second, pane)
+  scheduled[2].callback()
+
+  helper.assert_table_equal(status_invisibility(first.right_status), { true, false }, "first window flash")
+  helper.assert_table_equal(status_invisibility(second.right_status), { true, false }, "second window flash")
 end)
 
 helper.test("status bar can be disabled", function()
@@ -101,18 +268,18 @@ helper.test("status options are strict and custom colors are used", function()
   assert_config_error({ status_interval_seconds = 0 }, "status_interval_seconds")
   assert_config_error({ status_colors = false }, "status_colors")
   assert_config_error({ status_colors = { foreground = "" } }, "foreground")
-  assert_config_error({ status_colors = { process_background = "#000000" } }, "process_background")
+  assert_config_error({ status_colors = { retrying_background = "#000000" } }, "retrying_background")
   assert_config_error({ status_colors = { unknown = "#000000" } }, "unknown")
 
   local colors = {
     foreground = "fg",
+    opencode_background = "opencode",
     workspace_background = "workspace",
     active_workspace_background = "active",
     waiting_background = "waiting",
     running_background = "running",
-    retrying_background = "retrying",
     idle_background = "idle",
-    error_background = "error",
+    failure_background = "failure",
   }
   local wezterm = helper.fake_wezterm {
     run_child_process = function()
@@ -128,12 +295,12 @@ helper.test("status options are strict and custom colors are used", function()
   wezterm.events["update-status"](window, helper.fake_pane())
 
   helper.assert_table_equal(status_backgrounds(window.right_status), {
-    "workspace",
-    "waiting",
-    "running",
-    "retrying",
+    "opencode",
     "idle",
-    "error",
+    "running",
+    "waiting",
+    "failure",
+    "workspace",
   }, "custom status colors")
   for _, item in ipairs(window.right_status) do
     if item.Foreground then
@@ -155,8 +322,11 @@ helper.test("status cache is shared throttled and retained across deduplicated f
   local release_cooldown
   local wezterm = helper.fake_wezterm {
     call_after = function(interval, callback)
-      helper.assert_equal(interval, 2, "status cooldown interval")
-      release_cooldown = callback
+      if interval == 2 then
+        release_cooldown = callback
+      else
+        callback()
+      end
     end,
     run_child_process = function()
       calls = calls + 1
@@ -196,16 +366,16 @@ helper.test("status cache is shared throttled and retained across deduplicated f
   release()
   event(first, pane)
   helper.assert_equal(#wezterm.logs, 1, "duplicate command errors")
-  helper.assert_equal(status_text(first.right_status)[2], " wait 1 ", "retained status after command errors")
+  helper.assert_equal(status_text(first.right_status)[4], " 1 ", "retained status after command errors")
 
   release()
   event(first, pane)
   helper.assert_equal(#wezterm.logs, 2, "different JSON error")
-  helper.assert_equal(status_text(first.right_status)[2], " wait 1 ", "retained status after JSON error")
+  helper.assert_equal(status_text(first.right_status)[4], " 1 ", "retained status after JSON error")
 
   release()
   event(first, pane)
-  helper.assert_equal(status_text(first.right_status)[2], " wait 6 ", "updated status after success")
+  helper.assert_equal(status_text(first.right_status)[4], " 6 ", "updated status after success")
   release()
   event(first, pane)
   helper.assert_equal(#wezterm.logs, 3, "error logged again after success")
@@ -225,7 +395,10 @@ helper.test("fractional status intervals remain throttled until the cooldown exp
       return true, "status", ""
     end,
     json_parse = function()
-      return valid_status
+      return {
+        protocol_version = 3,
+        sessions = { waiting = 0, running = 2, retrying = 0, idle = 4, error = 0 },
+      }
     end,
   }
   local wisp = helper.load_wezterm_adapter(wezterm)
@@ -274,7 +447,12 @@ helper.test("status response validation rejects every malformed envelope without
     wezterm.events["update-status"](window, helper.fake_pane { process_name = "fish" })
 
     helper.assert_equal(#wezterm.logs, 1, "validation error " .. index)
-    helper.assert_equal(status_text(window.right_status)[2], " wait 0 ", "unchanged count " .. index)
+    helper.assert_table_equal(status_text(window.right_status), {
+      " OC ",
+      " 0 ",
+      " 0 ",
+      " default ",
+    }, "unchanged counts " .. index)
   end
 end)
 
@@ -290,7 +468,10 @@ helper.test("status refresh prevents overlapping commands", function()
       return true, "status", ""
     end,
     json_parse = function()
-      return valid_status
+      return {
+        protocol_version = 3,
+        sessions = { waiting = 0, running = 2, retrying = 0, idle = 4, error = 0 },
+      }
     end,
   }
   local wisp = helper.load_wezterm_adapter(wezterm)
@@ -316,7 +497,10 @@ helper.test("status refresh cooldown starts after the command completes", functi
       return true, "status", ""
     end,
     json_parse = function()
-      return valid_status
+      return {
+        protocol_version = 3,
+        sessions = { waiting = 0, running = 2, retrying = 0, idle = 4, error = 0 },
+      }
     end,
   }
   local wisp = helper.load_wezterm_adapter(wezterm)
@@ -354,6 +538,6 @@ helper.test("status renderer tolerates a stale startup pane", function()
   wezterm.events["update-status"](window, stale_pane)
 
   assert(window.right_status, "stale pane should not prevent status rendering")
-  helper.assert_equal(status_text(window.right_status)[1], " wisp:Repos/wisp ", "fallback workspace")
-  helper.assert_equal(status_text(window.right_status)[2], " wait 1 ", "status count")
+  helper.assert_equal(status_text(window.right_status)[4], " 1 ", "status count")
+  helper.assert_equal(status_text(window.right_status)[6], " wisp ", "fallback project")
 end)

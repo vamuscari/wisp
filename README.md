@@ -142,7 +142,9 @@ Running `wisp` without a subcommand is equivalent to `wisp pick`.
 
 ```text
 wisp pick
-wisp pick --result-file <path> --host-context-file <path> --initial-view projects|windows|sessions [--disable-sessions]
+wisp pick --result-file <path> --host-context-file <path> \
+  [--active-project-path <path>] [--active-file <path>] \
+  --initial-view projects|windows|sessions [--disable-sessions]
 wisp projects --json
 wisp refresh
 wisp cache clear
@@ -163,6 +165,10 @@ result. Handled errors produce an `error` result and a nonzero process status.
 `projects --json` also returns a protocol-versioned envelope rather than a raw
 project array. Embedded hosts that cannot apply OpenCode selections pass
 `--disable-sessions`, which makes session mode unavailable in that picker.
+Adapters use `--active-project-path` and `--active-file` to identify the
+originating editor context. Wisp accepts the file only when it is inside the
+resolved active project. It prefers a matching explicit project, then a mapped
+host-current project, then the deepest project containing the active file.
 
 `open` is the only command that executes a resolved opener. It launches argv
 directly without a shell. For example:
@@ -193,18 +199,29 @@ In search mode, printable characters update the focused pane's query,
 and `Enter` selects the current match. Project and detail queries are
 independent.
 
-When a host supplies context, projects and live host-only workspaces are grouped
-by status: `◆` current, `●` open, then `○` new. Host-only workspaces are present
-only while open, so only discovered projects can appear as new. The indicators
-use green, cyan, and muted ANSI colors from the active terminal theme rather
-than fixed RGB values.
+Projects and live host-only workspaces are grouped by status: `◆` current, `●`
+open, then `○` new. Editor context can make a discovered project current for
+selection and display without making it host-open. Host-only workspaces are
+present only while open, so only discovered projects can appear as new. The
+indicators use green, cyan, and muted ANSI colors from the active terminal theme
+rather than fixed RGB values.
+
+The current project row includes the active Neovim file as a project-relative
+path when the current buffer is a normal file. It also includes the Git branch
+and `clean` or `dirty` state when `git` can inspect the project. This metadata
+stays inline in Projects; the Git summary is anchored to the right edge while
+the file path uses the remaining space and truncates from the left when needed.
+Git inspection runs after the picker opens and updates the row when it finishes.
+The Projects pane uses a capped adaptive width so most horizontal space remains
+available to the detail pane.
 
 Projects and live host-only workspaces remain in the left pane. The right pane
 shows host windows, the selected project's files, or its OpenCode sessions.
 Files and OpenCode sessions are unavailable for a host-only workspace. Pressing
-`x` on a current or open row returns a host action rather than terminating
-processes directly. The WezTerm adapter applies it by closing every pane in the
-exact workspace; `x` has no effect for new or standalone projects.
+`x` on a host-current or host-open row returns a host action rather than
+terminating processes directly. The WezTerm adapter applies it by closing every
+pane in the exact workspace; `x` has no effect for new, standalone, or
+editor-active-only projects.
 
 File browsing lists only the current directory. Child directories are read
 when entered rather than indexed recursively.
@@ -243,11 +260,13 @@ present; that convenience option binds the project-focused picker. Roots, fixed
 projects, cache settings, and openers belong in shared TOML, not in the Lua
 options.
 
-By default, the adapter owns WezTerm's right status area. It shows the full
-workspace name followed by `wait`, `run`, `retry`, `idle`, and `err` counts for
-fresh OpenCode plugin registrations. Counts refresh every two seconds and retain
-their last valid values across transient failures. Set `status_bar = false` to
-leave the right status area untouched.
+By default, the adapter owns WezTerm's right status area. It shows `OC`, the
+idle and running counts, optional waiting and failure counts, then the short
+project name. Failure is the sum of retrying and error registrations. Waiting
+and failure are hidden at zero; each flashes three times when it becomes
+nonzero, then remains solid. Counts refresh every two seconds and retain their
+last valid values across transient failures. Set `status_bar = false` to leave
+the right status area untouched.
 
 The picker actions query `wisp projects --json`, snapshot every live workspace
 and its tabs, map configured project workspaces to `current`, `open`, and `new`
@@ -256,6 +275,13 @@ labels, and include unmatched workspaces as host-only rows. They then launch
 with Projects focused; the window action starts on the active tab of the current
 workspace. A completed result closes the owned picker tab and applies the
 selection through the original window and pane.
+
+When the original pane is running Neovim with Wisp configured, the adapter
+reads Neovim's pane-local current-file variable before launching the picker.
+A known non-Neovim foreground process rejects stale values; mux panes where
+process inspection is unavailable use the pane variable directly. In an
+unmanaged workspace, the active file can still identify its containing Wisp
+project.
 
 ### WezTerm Options
 
@@ -272,11 +298,13 @@ selection through the original window and pane.
 | `picker_timeout_seconds` | `3600` | Missing-result timeout |
 | `status_bar` | `true` | Install the workspace and OpenCode right-status renderer |
 | `status_interval_seconds` | `2` | Minimum interval between OpenCode status queries |
-| `status_colors` | built-in OldBook palette | Partial status color override table |
+| `status_colors` | built-in OldBook palette | Partial semantic status color table |
 
-`status_colors` accepts only `foreground`, `workspace_background`,
-`active_workspace_background`, `waiting_background`, `running_background`,
-`retrying_background`, `idle_background`, and `error_background`.
+`status_colors` accepts only `foreground`, `opencode_background`,
+`workspace_background`, `active_workspace_background`, `idle_background`,
+`running_background`, `waiting_background`, and `failure_background`. A main
+WezTerm theme can derive these semantic roles from its selected scheme and pass
+the resulting Lua table directly to Wisp.
 
 Mux workspace names and domains remain host policy:
 
@@ -378,6 +406,12 @@ to the tab that launched the picker, even if another tab becomes active:
 - File selection sets tab-local cwd and edits the file.
 - `vim.t.wisp_project_dir` and `vim.t.wisp_project_name` store project metadata.
 - Initial metadata is seeded from `WISP_PROJECT_DIR` and `WISP_PROJECT_NAME`.
+- The originating normal-file buffer is shown inline on the current project.
+
+Inside WezTerm, the adapter publishes the active normal-file path as a
+pane-local user variable. Unnamed buffers and tool buffers such as terminals,
+quickfix lists, and file trees clear it, so they are never shown as the current
+file. The same context is passed directly when `:Wisp` opens the picker.
 
 The Neovim adapter disables OpenCode session mode because this first release
 implements session focus and attach behavior only in the WezTerm adapter.

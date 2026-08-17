@@ -12,6 +12,7 @@ end
 
 local options = {}
 local PROTOCOL_VERSION = WISP_VERSION
+local WEZTERM_FILE_VAR = "WISP_NVIM_FILE"
 
 local function configure(configured)
   configured = configured or {}
@@ -68,7 +69,61 @@ local function dimension(value, available)
   return math.max(1, math.min(cells, math.max(1, available - 2)))
 end
 
-local function picker_args(result_path)
+local function current_file()
+  local buffer = vim.api.nvim_get_current_buf()
+  if vim.api.nvim_get_option_value("buftype", { buf = buffer }) ~= "" then
+    return nil
+  end
+  local path = vim.api.nvim_buf_get_name(buffer)
+  return path ~= "" and path or nil
+end
+
+local function in_wezterm()
+  return type(vim.env.WEZTERM_PANE) == "string" and vim.env.WEZTERM_PANE ~= ""
+end
+
+local function pane_context_available()
+  return in_wezterm() and #vim.api.nvim_list_uis() > 0
+end
+
+local function publish_current_file(path)
+  if not pane_context_available() then
+    return
+  end
+  local encoded = vim.base64.encode(path or "")
+  io.stdout:write("\27]1337;SetUserVar=" .. WEZTERM_FILE_VAR .. "=" .. encoded .. "\27\\")
+  io.stdout:flush()
+end
+
+local function install_pane_context()
+  if not in_wezterm() then
+    return
+  end
+  local group = vim.api.nvim_create_augroup("WispPaneContext", { clear = true })
+  if #vim.api.nvim_list_uis() == 0 then
+    vim.api.nvim_create_autocmd("UIEnter", {
+      group = group,
+      once = true,
+      callback = install_pane_context,
+    })
+    return
+  end
+  vim.api.nvim_create_autocmd({ "BufEnter", "BufFilePost" }, {
+    group = group,
+    callback = function()
+      publish_current_file(current_file())
+    end,
+  })
+  vim.api.nvim_create_autocmd("VimLeavePre", {
+    group = group,
+    callback = function()
+      publish_current_file(nil)
+    end,
+  })
+  publish_current_file(current_file())
+end
+
+local function picker_args(result_path, active_project_path, active_file)
   local args = { options.executable_path }
   if options.config_file then
     table.insert(args, "--config")
@@ -76,6 +131,14 @@ local function picker_args(result_path)
   end
   table.insert(args, "pick")
   table.insert(args, "--disable-sessions")
+  if active_project_path then
+    table.insert(args, "--active-project-path")
+    table.insert(args, active_project_path)
+  end
+  if active_file then
+    table.insert(args, "--active-file")
+    table.insert(args, active_file)
+  end
   table.insert(args, "--result-file")
   table.insert(args, result_path)
   return args
@@ -228,6 +291,8 @@ end
 
 function M.open()
   local originating_tab = vim.api.nvim_get_current_tabpage()
+  local active_project_path = vim.t.wisp_project_dir
+  local active_file = current_file()
   local result_path = vim.fn.tempname()
   vim.fn.delete(result_path)
 
@@ -247,7 +312,7 @@ function M.open()
     width = width,
   })
 
-  local job = vim.fn.jobstart(picker_args(result_path), {
+  local job = vim.fn.jobstart(picker_args(result_path, active_project_path, active_file), {
     on_exit = function(_, exit_code)
       vim.schedule(function()
         cleanup(window, buffer)
@@ -278,6 +343,7 @@ function M.setup(configured)
   if vim.t.wisp_project_name == nil and vim.env.WISP_PROJECT_NAME and vim.env.WISP_PROJECT_NAME ~= "" then
     vim.t.wisp_project_name = vim.env.WISP_PROJECT_NAME
   end
+  install_pane_context()
 
   vim.api.nvim_create_user_command(options.command, M.open, {
     desc = "Open Wisp project and file picker",

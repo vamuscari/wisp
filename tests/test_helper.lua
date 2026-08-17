@@ -156,6 +156,10 @@ function helper.fake_pane(options)
     return options.process_name
   end
 
+  function pane:get_user_vars()
+    return options.user_vars or {}
+  end
+
   function pane:window()
     if options.window_error then
       error(options.window_error)

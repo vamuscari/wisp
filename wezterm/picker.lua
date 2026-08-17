@@ -55,6 +55,22 @@ function Picker:project_relative_cwd(project, pane)
   return nil
 end
 
+function Picker:active_nvim_file(pane)
+  local inspected_process, process = pcall(function()
+    return pane and pane:get_foreground_process_name()
+  end)
+  process = inspected_process and basename(process) or nil
+  process = type(process) == "string" and process:lower() or nil
+  if process and process ~= "nvim" and process ~= "nvim.exe" then
+    return nil
+  end
+  local inspected_vars, user_vars = pcall(function()
+    return pane and pane:get_user_vars()
+  end)
+  local file = inspected_vars and type(user_vars) == "table" and user_vars.WISP_NVIM_FILE or nil
+  return type(file) == "string" and file ~= "" and file or nil
+end
+
 function Picker:host_item(project, workspace, tab_info, current_workspace)
   local tab = tab_info.tab
   local pane = tab:active_pane()
@@ -332,17 +348,24 @@ function Picker:launch(window, pane, initial_view)
     return
   end
 
+  local picker_args = self.client:args(
+    "pick",
+    "--result-file",
+    result_path,
+    "--host-context-file",
+    host_context_path,
+    "--initial-view",
+    initial_view
+  )
+  local active_file = self:active_nvim_file(pane)
+  if active_file then
+    table.insert(picker_args, "--active-file")
+    table.insert(picker_args, active_file)
+  end
+
   local spawned, picker_tab, picker_pane = pcall(function()
     return window:mux_window():spawn_tab {
-      args = self.client:args(
-        "pick",
-        "--result-file",
-        result_path,
-        "--host-context-file",
-        host_context_path,
-        "--initial-view",
-        initial_view
-      ),
+      args = picker_args,
       domain = self.options:get().picker_domain,
     }
   end)

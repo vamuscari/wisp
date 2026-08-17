@@ -4,6 +4,8 @@ use std::{
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
+    sync::mpsc::{self, Receiver, TryRecvError},
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,12 +19,13 @@ use wisp_core::{
     config::{Config, ConfigError},
     discovery::StdFileSystem,
     model::{DirectoryEntry, Project},
+    path::{comparison_key, normalized_path},
     protocol::{
         HostContext, OpenCodeStatusEnvelope, ProjectsEnvelope, Selection, SelectionEnvelope,
         SelectionStatus,
     },
 };
-use wisp_tui::{App, DataSource, TuiError};
+use wisp_tui::{ActiveProjectContext, App, DataSource, GitSummary, TuiError};
 
 mod deploy;
 pub mod opencode;
@@ -77,6 +80,10 @@ struct PickArgs {
     result_file: Option<PathBuf>,
     #[arg(long, value_name = "PATH")]
     host_context_file: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    active_project_path: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    active_file: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = InitialView::Projects)]
     initial_view: InitialView,
     #[arg(long)]
@@ -221,6 +228,8 @@ fn run_pick_command(config_override: Option<&Path>, args: PickArgs) -> i32 {
     let result = pick(
         config_override,
         args.host_context_file.as_deref(),
+        args.active_project_path.as_deref(),
+        args.active_file.as_deref(),
         args.initial_view,
         !args.disable_sessions,
     );
@@ -373,19 +382,33 @@ fn run_noninteractive(
 fn pick(
     config_override: Option<&Path>,
     host_context_path: Option<&Path>,
+    active_project_path: Option<&Path>,
+    active_file: Option<&Path>,
     initial_view: InitialView,
     sessions_enabled: bool,
 ) -> Result<Option<Selection>, CliError> {
     let (config, mut catalog) = load_catalog(config_override)?;
     let projects = catalog.projects(now())?;
     let context = host_context_path.map(read_host_context).transpose()?;
+    let active_project = build_active_project_context(
+        &projects,
+        context.as_ref(),
+        active_project_path,
+        active_file,
+    );
+    let active_project_git = active_project.as_ref().and_then(|active| {
+        projects
+            .iter()
+            .find(|project| project.id == active.project_id)
+            .map(|project| spawn_git_summary(project.id.clone(), project.path.clone()))
+    });
     let opencode_config = sessions_enabled.then(|| config.opencode.clone()).flatten();
     let tui_initial_view = match initial_view {
         InitialView::Projects => wisp_tui::InitialView::Projects,
         InitialView::Windows => wisp_tui::InitialView::Windows,
         InitialView::Sessions => wisp_tui::InitialView::Sessions,
     };
-    let app = match &opencode_config {
+    let mut app = match &opencode_config {
         Some(opencode) => App::new_with_opencode(
             projects,
             config.openers,
@@ -402,6 +425,9 @@ fn pick(
             tui_initial_view,
         ),
     };
+    if let Some(active_project) = active_project {
+        app.set_active_project_context(active_project);
+    }
     let opencode = opencode_config
         .map(opencode::OpenCodeClient::new)
         .transpose()?
@@ -412,13 +438,139 @@ fn pick(
         });
     let mut data = CatalogDataSource {
         catalog: &mut catalog,
+        active_project_git,
         opencode,
     };
     Ok(wisp_tui::run(app, &mut data)?)
 }
 
+fn resolve_active_project<'a>(
+    projects: &'a [Project],
+    context: Option<&HostContext>,
+    active_project_path: Option<&Path>,
+    active_file: Option<&Path>,
+) -> Option<&'a Project> {
+    if let Some(path) = active_project_path {
+        let active_project_path = comparison_key(&path.to_string_lossy());
+        if let Some(project) = projects
+            .iter()
+            .find(|project| comparison_key(&project.path.to_string_lossy()) == active_project_path)
+        {
+            return Some(project);
+        }
+    }
+    if let Some(context) = context {
+        if let Some(project) = projects.iter().find(|project| {
+            context
+                .labels(&project.id)
+                .iter()
+                .any(|label| label == "current")
+        }) {
+            return Some(project);
+        }
+    }
+    let active_file = comparison_key(&active_file?.to_string_lossy());
+    projects
+        .iter()
+        .filter(|project| {
+            path_contains(
+                &comparison_key(&project.path.to_string_lossy()),
+                &active_file,
+            )
+        })
+        .max_by_key(|project| comparison_key(&project.path.to_string_lossy()).len())
+}
+
+fn path_contains(directory: &str, candidate: &str) -> bool {
+    candidate == directory
+        || candidate
+            .strip_prefix(directory)
+            .is_some_and(|relative| directory.ends_with('/') || relative.starts_with('/'))
+}
+
+fn relative_project_file(project: &Project, file: &Path) -> Option<String> {
+    let project_key = comparison_key(&project.path.to_string_lossy());
+    let file_key = comparison_key(&file.to_string_lossy());
+    if !path_contains(&project_key, &file_key) || project_key == file_key {
+        return None;
+    }
+    if let Ok(relative) = file.strip_prefix(&project.path) {
+        return Some(relative.to_string_lossy().replace('\\', "/"));
+    }
+    let relative = file_key.strip_prefix(&project_key)?.trim_start_matches('/');
+    let normalized_file = normalized_path(&file.to_string_lossy());
+    normalized_file
+        .get(normalized_file.len().checked_sub(relative.len())?..)
+        .map(str::to_owned)
+}
+
+fn parse_git_status(status: &str) -> Option<GitSummary> {
+    let mut branch = None;
+    let mut object_id = None;
+    let mut dirty = false;
+    for line in status.lines() {
+        if let Some(head) = line.strip_prefix("# branch.head ") {
+            branch = Some(head.to_string());
+        } else if let Some(oid) = line.strip_prefix("# branch.oid ") {
+            object_id = Some(oid.to_string());
+        } else if !line.is_empty() && !line.starts_with("# ") {
+            dirty = true;
+        }
+    }
+    let branch = match branch?.as_str() {
+        "(detached)" => format!("@{}", object_id?.chars().take(7).collect::<String>()),
+        branch => branch.to_string(),
+    };
+    Some(GitSummary { branch, dirty })
+}
+
+fn git_summary(project_path: &Path) -> Option<GitSummary> {
+    let output = ProcessCommand::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .arg("-C")
+        .arg(project_path)
+        .args([
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--no-ahead-behind",
+            "--untracked-files=normal",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_git_status(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn spawn_git_summary(project_id: String, project_path: PathBuf) -> Receiver<(String, GitSummary)> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        if let Some(summary) = git_summary(&project_path) {
+            let _ = sender.send((project_id, summary));
+        }
+    });
+    receiver
+}
+
+fn build_active_project_context(
+    projects: &[Project],
+    context: Option<&HostContext>,
+    active_project_path: Option<&Path>,
+    active_file: Option<&Path>,
+) -> Option<ActiveProjectContext> {
+    let project = resolve_active_project(projects, context, active_project_path, active_file)?;
+    Some(ActiveProjectContext {
+        project_id: project.id.clone(),
+        file: active_file.and_then(|file| relative_project_file(project, file)),
+        git: None,
+    })
+}
+
 struct CatalogDataSource<'a> {
     catalog: &'a mut Catalog<StdFileSystem>,
+    active_project_git: Option<Receiver<(String, GitSummary)>>,
     opencode: Option<OpenCodeDataSource>,
 }
 
@@ -429,6 +581,21 @@ struct OpenCodeDataSource {
 }
 
 impl DataSource for CatalogDataSource<'_> {
+    fn active_project_git_update(&mut self) -> Option<(String, GitSummary)> {
+        let update = self.active_project_git.as_ref()?.try_recv();
+        match update {
+            Ok(update) => {
+                self.active_project_git = None;
+                Some(update)
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.active_project_git = None;
+                None
+            }
+        }
+    }
+
     fn directory(&mut self, path: &Path) -> Result<Vec<DirectoryEntry>, String> {
         self.catalog
             .directory(path, now())
@@ -630,6 +797,303 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_project_path_resolves_a_project_relative_active_file() {
+        let projects = vec![Project {
+            id: "api".into(),
+            path: PathBuf::from("/repos/api"),
+            group: "Repos".into(),
+            name: "api".into(),
+            display_name: "API".into(),
+        }];
+
+        let project = resolve_active_project(
+            &projects,
+            None,
+            Some(Path::new("/repos/api")),
+            Some(Path::new("/repos/api/src/main.rs")),
+        )
+        .unwrap();
+
+        assert_eq!(project.id, "api");
+        assert_eq!(
+            relative_project_file(project, Path::new("/repos/api/src/main.rs")).as_deref(),
+            Some("src/main.rs")
+        );
+    }
+
+    #[test]
+    fn active_file_infers_the_deepest_containing_project_without_host_context() {
+        let projects = vec![
+            Project {
+                id: "repos".into(),
+                path: PathBuf::from("/repos"),
+                group: "Home".into(),
+                name: "repos".into(),
+                display_name: "Repos".into(),
+            },
+            Project {
+                id: "api".into(),
+                path: PathBuf::from("/repos/api"),
+                group: "Repos".into(),
+                name: "api".into(),
+                display_name: "API".into(),
+            },
+        ];
+
+        let project = resolve_active_project(
+            &projects,
+            None,
+            None,
+            Some(Path::new("/repos/api/src/main.rs")),
+        )
+        .unwrap();
+
+        assert_eq!(project.id, "api");
+    }
+
+    #[test]
+    fn project_relative_file_rejects_paths_that_escape_the_project() {
+        let project = Project {
+            id: "api".into(),
+            path: PathBuf::from("/repos/api"),
+            group: "Repos".into(),
+            name: "api".into(),
+            display_name: "API".into(),
+        };
+
+        assert_eq!(
+            relative_project_file(&project, Path::new("/repos/api/../other/secrets.txt")),
+            None
+        );
+    }
+
+    #[test]
+    fn project_relative_file_preserves_windows_filename_casing() {
+        let project = Project {
+            id: "api".into(),
+            path: PathBuf::from(r"C:\Repos\Api"),
+            group: "Repos".into(),
+            name: "api".into(),
+            display_name: "API".into(),
+        };
+
+        assert_eq!(
+            relative_project_file(&project, Path::new(r"c:\repos\api\Src\Main.RS")).as_deref(),
+            Some("Src/Main.RS")
+        );
+    }
+
+    #[test]
+    fn host_current_project_takes_precedence_over_file_inference() {
+        let projects = vec![
+            Project {
+                id: "api".into(),
+                path: PathBuf::from("/repos/api"),
+                group: "Repos".into(),
+                name: "api".into(),
+                display_name: "API".into(),
+            },
+            Project {
+                id: "web".into(),
+                path: PathBuf::from("/repos/web"),
+                group: "Repos".into(),
+                name: "web".into(),
+                display_name: "Web".into(),
+            },
+        ];
+        let context: HostContext = serde_json::from_value(serde_json::json!({
+            "protocol_version": 3,
+            "projects": {
+                "api": { "labels": ["open"] },
+                "web": { "labels": ["current", "open"] }
+            },
+            "workspaces": {}
+        }))
+        .unwrap();
+
+        let project = resolve_active_project(
+            &projects,
+            Some(&context),
+            None,
+            Some(Path::new("/repos/api/src/main.rs")),
+        )
+        .unwrap();
+
+        assert_eq!(project.id, "web");
+    }
+
+    #[test]
+    fn unmatched_explicit_project_falls_back_to_the_host_current_project() {
+        let projects = vec![
+            Project {
+                id: "api".into(),
+                path: PathBuf::from("/repos/api"),
+                group: "Repos".into(),
+                name: "api".into(),
+                display_name: "API".into(),
+            },
+            Project {
+                id: "web".into(),
+                path: PathBuf::from("/repos/web"),
+                group: "Repos".into(),
+                name: "web".into(),
+                display_name: "Web".into(),
+            },
+        ];
+        let context: HostContext = serde_json::from_value(serde_json::json!({
+            "protocol_version": 3,
+            "projects": {
+                "api": { "labels": ["open"] },
+                "web": { "labels": ["current", "open"] }
+            },
+            "workspaces": {}
+        }))
+        .unwrap();
+
+        let project = resolve_active_project(
+            &projects,
+            Some(&context),
+            Some(Path::new("/repos/missing")),
+            Some(Path::new("/repos/api/src/main.rs")),
+        )
+        .unwrap();
+
+        assert_eq!(project.id, "web");
+    }
+
+    #[test]
+    fn host_context_without_a_current_project_falls_back_to_the_active_file() {
+        let projects = vec![
+            Project {
+                id: "repos".into(),
+                path: PathBuf::from("/repos"),
+                group: "Home".into(),
+                name: "repos".into(),
+                display_name: "Repos".into(),
+            },
+            Project {
+                id: "api".into(),
+                path: PathBuf::from("/repos/api"),
+                group: "Repos".into(),
+                name: "api".into(),
+                display_name: "API".into(),
+            },
+        ];
+        let context: HostContext = serde_json::from_value(serde_json::json!({
+            "protocol_version": 3,
+            "projects": {
+                "repos": { "labels": ["open"] },
+                "api": { "labels": ["new"] }
+            },
+            "workspaces": {
+                "default": { "current": true }
+            }
+        }))
+        .unwrap();
+
+        let project = resolve_active_project(
+            &projects,
+            Some(&context),
+            None,
+            Some(Path::new("/repos/api/src/main.rs")),
+        )
+        .unwrap();
+
+        assert_eq!(project.id, "api");
+    }
+
+    #[test]
+    fn porcelain_v2_status_reports_the_branch_and_dirty_state() {
+        let status = parse_git_status(
+            "# branch.oid 1cf82045403b6911084598a4487b373dc341638e\n\
+             # branch.head main\n\
+             ? src/new.rs\n",
+        )
+        .unwrap();
+
+        assert_eq!(status.branch, "main");
+        assert!(status.dirty);
+    }
+
+    #[test]
+    fn detached_git_status_uses_the_short_object_id() {
+        let status = parse_git_status(
+            "# branch.oid 1cf82045403b6911084598a4487b373dc341638e\n\
+             # branch.head (detached)\n",
+        )
+        .unwrap();
+
+        assert_eq!(status.branch, "@1cf8204");
+        assert!(!status.dirty);
+    }
+
+    #[test]
+    fn git_summary_reads_clean_and_dirty_repository_state() {
+        let repository = TempDir::new().unwrap();
+        let initialized = ProcessCommand::new("git")
+            .args(["init", "--quiet", "--initial-branch", "main"])
+            .arg(repository.path())
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+
+        let clean = git_summary(repository.path()).unwrap();
+        assert_eq!(clean.branch, "main");
+        assert!(!clean.dirty);
+
+        fs::write(repository.path().join("README.md"), "new\n").unwrap();
+        let dirty = git_summary(repository.path()).unwrap();
+        assert_eq!(dirty.branch, "main");
+        assert!(dirty.dirty);
+    }
+
+    #[test]
+    fn git_summary_worker_reports_the_matching_project_snapshot() {
+        let repository = TempDir::new().unwrap();
+        let initialized = ProcessCommand::new("git")
+            .args(["init", "--quiet", "--initial-branch", "main"])
+            .arg(repository.path())
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+        fs::write(repository.path().join("README.md"), "new\n").unwrap();
+
+        let receiver = spawn_git_summary("api".into(), repository.path().to_path_buf());
+        let (project_id, summary) = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        assert_eq!(project_id, "api");
+        assert_eq!(summary.branch, "main");
+        assert!(summary.dirty);
+    }
+
+    #[test]
+    fn active_context_is_available_before_the_git_snapshot() {
+        let repository = TempDir::new().unwrap();
+        let initialized = ProcessCommand::new("git")
+            .args(["init", "--quiet", "--initial-branch", "main"])
+            .arg(repository.path())
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+        let projects = vec![Project {
+            id: "api".into(),
+            path: repository.path().to_path_buf(),
+            group: "Repos".into(),
+            name: "api".into(),
+            display_name: "API".into(),
+        }];
+        let file = repository.path().join("src/main.rs");
+
+        let context =
+            build_active_project_context(&projects, None, Some(repository.path()), Some(&file))
+                .unwrap();
+
+        assert_eq!(context.project_id, "api");
+        assert_eq!(context.file.as_deref(), Some("src/main.rs"));
+        assert_eq!(context.git, None);
+    }
+
+    #[test]
     fn session_poll_interval_starts_after_a_slow_snapshot_finishes() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let server_url = format!("http://{}", listener.local_addr().unwrap());
@@ -683,6 +1147,7 @@ mod tests {
         );
         let mut data = CatalogDataSource {
             catalog: &mut catalog,
+            active_project_git: None,
             opencode: Some(OpenCodeDataSource {
                 client,
                 watcher: watcher_client.watch_shared(),

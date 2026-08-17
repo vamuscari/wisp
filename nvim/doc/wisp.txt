@@ -17,7 +17,14 @@ Run `wisp deploy`, add its stable `nvim` directory to 'runtimepath', then call:
 The deployed adapter always invokes the executable from its own bundle. Wisp
 opens in a floating terminal. A project selection sets the originating tab's
 local working directory. A file selection also edits that file in the
-originating tab.
+originating tab. The originating normal-file buffer is shown inline on the
+current project together with available Git branch and clean/dirty state. Git
+metadata loads after the picker opens. Editor activity does not make a project
+host-open or closable.
+
+Inside WezTerm, Wisp publishes the active normal-file path to the containing
+pane. Unnamed and non-file buffers, including terminals, quickfix lists, and
+file-tree buffers, are omitted. The picker does not add a separate tool pane.
 
 The Neovim adapter disables OpenCode session mode. Session focus and attach
 actions are currently implemented only by the WezTerm adapter.

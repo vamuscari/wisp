@@ -307,7 +307,7 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
         serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["deployment_schema_version"], 3);
     assert_eq!(manifest["bundle_id"], bundle_id);
-    assert_eq!(manifest["package_version"], "0.3.0");
+    assert_eq!(manifest["package_version"], "0.4.0");
     assert_eq!(manifest["protocol_version"], 3);
     assert!(manifest["files"][executable].is_string());
     assert!(manifest["files"]["wezterm/status.lua"].is_string());
@@ -770,6 +770,8 @@ fn pick_help_exposes_host_context_and_initial_view_options() {
     let stdout = String::from_utf8(output.stdout).unwrap();
 
     assert!(stdout.contains("--host-context-file"));
+    assert!(stdout.contains("--active-project-path"));
+    assert!(stdout.contains("--active-file"));
     assert!(stdout.contains("--initial-view"));
     assert!(!stdout.contains("--annotations-file"));
 }

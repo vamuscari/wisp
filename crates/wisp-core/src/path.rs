@@ -1,4 +1,16 @@
 pub fn comparison_key(path: &str) -> String {
+    let (mut normalized, windows) = normalize(path);
+    if windows {
+        normalized.make_ascii_lowercase();
+    }
+    normalized
+}
+
+pub fn normalized_path(path: &str) -> String {
+    normalize(path).0
+}
+
+fn normalize(path: &str) -> (String, bool) {
     let bytes = path.as_bytes();
     let windows_drive = bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
@@ -42,10 +54,7 @@ pub fn comparison_key(path: &str) -> String {
     if normalized.is_empty() {
         normalized.push('.');
     }
-    if windows {
-        normalized.make_ascii_lowercase();
-    }
-    normalized
+    (normalized, windows)
 }
 
 fn collapse_slashes(path: &str) -> String {
