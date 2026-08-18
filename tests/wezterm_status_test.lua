@@ -3,7 +3,7 @@ package.path = "./?.lua;./?/init.lua;" .. package.path
 local helper = require "tests.test_helper"
 
 local valid_status = {
-  protocol_version = 3,
+  protocol_version = 4,
   sessions = {
     waiting = 1,
     running = 2,
@@ -97,7 +97,7 @@ helper.test("status bar omits zero waiting and failure counts", function()
     end,
     json_parse = function()
       return {
-        protocol_version = 3,
+        protocol_version = 4,
         sessions = { waiting = 0, running = 2, retrying = 0, idle = 4, error = 0 },
       }
     end,
@@ -193,7 +193,7 @@ helper.test("stale flash timers do not stop a later appearance", function()
       return true, "status", ""
     end,
     json_parse = function()
-      return { protocol_version = 3, sessions = sessions }
+      return { protocol_version = 4, sessions = sessions }
     end,
   }
   local wisp = helper.load_wezterm_adapter(wezterm)
@@ -228,7 +228,7 @@ helper.test("flash transitions rerender every observed GUI window", function()
     end,
     json_parse = function()
       return {
-        protocol_version = 3,
+        protocol_version = 4,
         sessions = { waiting = 1, running = 0, retrying = 0, idle = 0, error = 0 },
       }
     end,
@@ -338,7 +338,7 @@ helper.test("status cache is shared throttled and retained across deduplicated f
       end
       if value == "second" then
         return {
-          protocol_version = 3,
+          protocol_version = 4,
           sessions = { waiting = 6, running = 7, retrying = 8, idle = 9, error = 10 },
         }
       end
@@ -396,7 +396,7 @@ helper.test("fractional status intervals remain throttled until the cooldown exp
     end,
     json_parse = function()
       return {
-        protocol_version = 3,
+        protocol_version = 4,
         sessions = { waiting = 0, running = 2, retrying = 0, idle = 4, error = 0 },
       }
     end,
@@ -420,16 +420,16 @@ end)
 helper.test("status response validation rejects every malformed envelope without replacing counts", function()
   local malformed = {
     { protocol_version = 2, sessions = valid_status.sessions },
-    { protocol_version = 3, sessions = valid_status.sessions, extra = true },
-    { protocol_version = 3 },
+    { protocol_version = 4, sessions = valid_status.sessions, extra = true },
+    { protocol_version = 4 },
     {
-      protocol_version = 3,
+      protocol_version = 4,
       sessions = { waiting = 9, running = 2, retrying = 3, idle = 4, error = 5, extra = 0 },
     },
-    { protocol_version = 3, sessions = { waiting = 9, running = 2, retrying = 3, idle = 4 } },
-    { protocol_version = 3, sessions = { waiting = 9, running = -1, retrying = 3, idle = 4, error = 5 } },
-    { protocol_version = 3, sessions = { waiting = 9, running = 2.5, retrying = 3, idle = 4, error = 5 } },
-    { protocol_version = 3, sessions = { waiting = 9, running = 2, retrying = "3", idle = 4, error = 5 } },
+    { protocol_version = 4, sessions = { waiting = 9, running = 2, retrying = 3, idle = 4 } },
+    { protocol_version = 4, sessions = { waiting = 9, running = -1, retrying = 3, idle = 4, error = 5 } },
+    { protocol_version = 4, sessions = { waiting = 9, running = 2.5, retrying = 3, idle = 4, error = 5 } },
+    { protocol_version = 4, sessions = { waiting = 9, running = 2, retrying = "3", idle = 4, error = 5 } },
   }
 
   for index, response in ipairs(malformed) do
@@ -469,7 +469,7 @@ helper.test("status refresh prevents overlapping commands", function()
     end,
     json_parse = function()
       return {
-        protocol_version = 3,
+        protocol_version = 4,
         sessions = { waiting = 0, running = 2, retrying = 0, idle = 4, error = 0 },
       }
     end,
@@ -498,7 +498,7 @@ helper.test("status refresh cooldown starts after the command completes", functi
     end,
     json_parse = function()
       return {
-        protocol_version = 3,
+        protocol_version = 4,
         sessions = { waiting = 0, running = 2, retrying = 0, idle = 4, error = 0 },
       }
     end,

@@ -30,7 +30,7 @@ impl Fixture {
         fs::write(
             &config,
             r#"
-version = 3
+version = 4
 cache_ttl_seconds = 60
 
 [[roots]]
@@ -258,7 +258,7 @@ fn validates_configuration_and_lists_discovered_projects_as_json() {
             .unwrap(),
     );
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(envelope["protocol_version"], 3);
+    assert_eq!(envelope["protocol_version"], 4);
     let projects: Vec<Project> = serde_json::from_value(envelope["projects"].clone()).unwrap();
 
     assert_eq!(projects.len(), 2);
@@ -281,7 +281,7 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
 
     let active: serde_json::Value =
         serde_json::from_slice(&fs::read(deployment_root.join("active.json")).unwrap()).unwrap();
-    assert_eq!(active["deployment_schema_version"], 3);
+    assert_eq!(active["deployment_schema_version"], 4);
     let bundle_id = active["current_bundle_id"].as_str().unwrap();
     assert_eq!(bundle_id.len(), 64);
     assert!(active["previous_bundle_id"].is_null());
@@ -305,10 +305,10 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
 
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["deployment_schema_version"], 3);
+    assert_eq!(manifest["deployment_schema_version"], 4);
     assert_eq!(manifest["bundle_id"], bundle_id);
-    assert_eq!(manifest["package_version"], "0.4.0");
-    assert_eq!(manifest["protocol_version"], 3);
+    assert_eq!(manifest["package_version"], "0.5.0");
+    assert_eq!(manifest["protocol_version"], 4);
     assert!(manifest["files"][executable].is_string());
     assert!(manifest["files"]["wezterm/status.lua"].is_string());
     assert!(manifest["files"]["opencode/wisp.js"].is_string());
@@ -316,7 +316,7 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
     let config_home = fixture.config.parent().unwrap().parent().unwrap();
     let wezterm_loader = fs::read_to_string(config_home.join("wezterm/wisp/init.lua")).unwrap();
     assert!(wezterm_loader.contains("wezterm.run_child_process"));
-    assert!(wezterm_loader.contains("wisp-deployment-v3"));
+    assert!(wezterm_loader.contains("wisp-deployment-v4"));
     let nvim_loader = fs::read_to_string(deployment_root.join("nvim/lua/wisp/init.lua")).unwrap();
     assert!(nvim_loader.contains("vim.system"));
 }
@@ -377,7 +377,7 @@ fn deploy_verify_and_status_detect_bundle_corruption() {
             .unwrap(),
     );
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(status["deployment_schema_version"], 3);
+    assert_eq!(status["deployment_schema_version"], 4);
     assert_eq!(status["valid"], true);
     assert!(status["bundle_id"].is_string());
 
@@ -543,7 +543,7 @@ fn deploy_prune_keeps_a_valid_previous_release() {
     assets[3].1.extend_from_slice(b"\nprevious release\n");
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"wisp-deployment-v3\0");
+    hasher.update(b"wisp-deployment-v4\0");
     for (relative, contents) in &assets {
         hasher.update(relative.as_bytes());
         hasher.update(b"\0");
@@ -750,7 +750,7 @@ fn pick_writes_a_versioned_error_atomically_when_setup_fails() {
     assert!(output.stdout.is_empty());
     let envelope: SelectionEnvelope =
         serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
-    assert_eq!(envelope.protocol_version, 3);
+    assert_eq!(envelope.protocol_version, 4);
     assert_eq!(envelope.status, SelectionStatus::Error);
     assert!(envelope.error.unwrap().contains("missing.toml"));
     assert_eq!(
@@ -777,7 +777,7 @@ fn pick_help_exposes_host_context_and_initial_view_options() {
 }
 
 #[test]
-fn pick_writes_a_v3_error_envelope_for_a_v1_host_context() {
+fn pick_writes_a_v4_error_envelope_for_a_v1_host_context() {
     let fixture = Fixture::new();
     let context_path = fixture.home.join("context.json");
     let result_path = fixture.home.join("result.json");
@@ -796,7 +796,7 @@ fn pick_writes_a_v3_error_envelope_for_a_v1_host_context() {
     assert!(!output.status.success());
     let envelope: SelectionEnvelope =
         serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
-    assert_eq!(envelope.protocol_version, 3);
+    assert_eq!(envelope.protocol_version, 4);
     assert_eq!(envelope.status, SelectionStatus::Error);
     assert!(
         envelope

@@ -16,6 +16,7 @@ pub struct Config {
     pub projects: Vec<ProjectConfig>,
     pub openers: Openers,
     pub opencode: Option<OpenCodeConfig>,
+    pub vcs: VcsConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -44,6 +45,42 @@ pub struct OpenCodeConfig {
     pub server_url: String,
     pub command: Vec<String>,
     pub session_limit: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct VcsConfig {
+    pub icons: VcsIcons,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VcsIcons {
+    pub clean: Option<String>,
+    pub dirty: Option<String>,
+    pub untracked: Option<String>,
+    pub modified: Option<String>,
+    pub staged: Option<String>,
+    pub conflicted: Option<String>,
+    pub ahead: Option<String>,
+    pub behind: Option<String>,
+    pub diverged: Option<String>,
+    pub stashed: Option<String>,
+}
+
+impl Default for VcsIcons {
+    fn default() -> Self {
+        Self {
+            clean: Some("✓".into()),
+            dirty: Some("✗".into()),
+            untracked: Some("?".into()),
+            modified: Some("!".into()),
+            staged: Some("+".into()),
+            conflicted: Some("×".into()),
+            ahead: Some("⇡".into()),
+            behind: Some("⇣".into()),
+            diverged: Some("⇕".into()),
+            stashed: Some("*".into()),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -76,6 +113,8 @@ struct RawConfig {
     #[serde(default)]
     openers: RawOpeners,
     opencode: Option<RawOpenCodeConfig>,
+    #[serde(default)]
+    vcs: RawVcsConfig,
 }
 
 #[derive(Deserialize)]
@@ -109,6 +148,28 @@ struct RawOpenCodeConfig {
     command: Option<toml::Value>,
     #[serde(default = "default_opencode_session_limit")]
     session_limit: usize,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawVcsConfig {
+    #[serde(default)]
+    icons: RawVcsIcons,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawVcsIcons {
+    clean: Option<toml::Value>,
+    dirty: Option<toml::Value>,
+    untracked: Option<toml::Value>,
+    modified: Option<toml::Value>,
+    staged: Option<toml::Value>,
+    conflicted: Option<toml::Value>,
+    ahead: Option<toml::Value>,
+    behind: Option<toml::Value>,
+    diverged: Option<toml::Value>,
+    stashed: Option<toml::Value>,
 }
 
 const fn default_cache_ttl() -> u64 {
@@ -187,6 +248,50 @@ impl Config {
             })
             .transpose()?;
 
+        let defaults = VcsIcons::default();
+        let vcs = VcsConfig {
+            icons: VcsIcons {
+                clean: validated_vcs_icon(raw.vcs.icons.clean, defaults.clean, "vcs.icons.clean")?,
+                dirty: validated_vcs_icon(raw.vcs.icons.dirty, defaults.dirty, "vcs.icons.dirty")?,
+                untracked: validated_vcs_icon(
+                    raw.vcs.icons.untracked,
+                    defaults.untracked,
+                    "vcs.icons.untracked",
+                )?,
+                modified: validated_vcs_icon(
+                    raw.vcs.icons.modified,
+                    defaults.modified,
+                    "vcs.icons.modified",
+                )?,
+                staged: validated_vcs_icon(
+                    raw.vcs.icons.staged,
+                    defaults.staged,
+                    "vcs.icons.staged",
+                )?,
+                conflicted: validated_vcs_icon(
+                    raw.vcs.icons.conflicted,
+                    defaults.conflicted,
+                    "vcs.icons.conflicted",
+                )?,
+                ahead: validated_vcs_icon(raw.vcs.icons.ahead, defaults.ahead, "vcs.icons.ahead")?,
+                behind: validated_vcs_icon(
+                    raw.vcs.icons.behind,
+                    defaults.behind,
+                    "vcs.icons.behind",
+                )?,
+                diverged: validated_vcs_icon(
+                    raw.vcs.icons.diverged,
+                    defaults.diverged,
+                    "vcs.icons.diverged",
+                )?,
+                stashed: validated_vcs_icon(
+                    raw.vcs.icons.stashed,
+                    defaults.stashed,
+                    "vcs.icons.stashed",
+                )?,
+            },
+        };
+
         Ok(Self {
             version: raw.version,
             cache_ttl_seconds: raw.cache_ttl_seconds,
@@ -195,6 +300,7 @@ impl Config {
             projects,
             openers,
             opencode,
+            vcs,
         })
     }
 
@@ -242,6 +348,21 @@ fn validated_opener(
         return Ok(None);
     };
     validated_argv(value, field).map(Some)
+}
+
+fn validated_vcs_icon(
+    value: Option<toml::Value>,
+    default: Option<String>,
+    field: &str,
+) -> Result<Option<String>, ConfigError> {
+    match value {
+        None => Ok(default),
+        Some(toml::Value::Boolean(false)) => Ok(None),
+        Some(toml::Value::String(value)) if !value.is_empty() => Ok(Some(value)),
+        Some(_) => Err(ConfigError::Validation(format!(
+            "{field} must be a non-empty string or false"
+        ))),
+    }
 }
 
 fn validated_argv(value: toml::Value, field: &str) -> Result<Vec<String>, ConfigError> {

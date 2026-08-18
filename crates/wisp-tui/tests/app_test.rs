@@ -350,6 +350,7 @@ fn terminal_loop_applies_a_delayed_active_project_git_update() {
             GitSummary {
                 branch: "main".into(),
                 dirty: true,
+                ..GitSummary::default()
             },
         )),
         active_project_git_delay: 1,
@@ -367,5 +368,5 @@ fn terminal_loop_applies_a_delayed_active_project_git_update() {
 
     assert_eq!(selection, None);
     assert!(rendered.contains("◆ Web Client"));
-    assert!(rendered.contains("main dirty"));
+    assert!(rendered.contains("main ✗"));
 }

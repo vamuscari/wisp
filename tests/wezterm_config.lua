@@ -8,7 +8,7 @@ assert(type(wezterm.format {
 }) == "string", "minimum WezTerm must support status visibility attributes")
 
 local root = assert(wezterm.config_dir:match "^(.*)[/\\]tests$", "could not resolve the Wisp test root")
-local wisp = assert(loadfile(root .. "/wezterm/init.lua"))("wisp", "wisp-deployment-v3", root .. "/wezterm")
+local wisp = assert(loadfile(root .. "/wezterm/init.lua"))("wisp", "wisp-deployment-v4", root .. "/wezterm")
 
 wisp.apply_to_config(config, {
   picker_binding = { key = "f", mods = "CTRL|SHIFT" },

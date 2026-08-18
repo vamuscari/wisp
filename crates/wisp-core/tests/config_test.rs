@@ -8,6 +8,7 @@ use wisp_core::{
 
 #[test]
 fn persistent_schema_versions_match_the_protocol() {
+    assert_eq!(PROTOCOL_VERSION, 4);
     assert_eq!(CONFIG_VERSION, PROTOCOL_VERSION);
     assert_eq!(CACHE_VERSION, PROTOCOL_VERSION);
 }
@@ -16,7 +17,7 @@ fn persistent_schema_versions_match_the_protocol() {
 fn parses_opencode_shared_server_config() {
     let config = Config::parse(
         r#"
-version = 3
+version = 4
 
 [opencode]
 server_url = "http://127.0.0.1:4096"
@@ -37,7 +38,7 @@ session_limit = 25
 fn opencode_config_defaults_command_and_limit() {
     let config = Config::parse(
         r#"
-version = 3
+version = 4
 
 [opencode]
 server_url = "http://localhost:4096"
@@ -60,7 +61,7 @@ fn rejects_non_loopback_opencode_servers_and_invalid_limits() {
         let error = Config::parse(
             &format!(
                 r#"
-version = 3
+version = 4
 
 [opencode]
 server_url = "{server_url}"
@@ -77,7 +78,7 @@ server_url = "{server_url}"
 
     let limit_error = Config::parse(
         r#"
-version = 3
+version = 4
 
 [opencode]
 server_url = "http://127.0.0.1:4096"
@@ -90,7 +91,7 @@ session_limit = 0
 
     let command_error = Config::parse(
         r#"
-version = 3
+version = 4
 
 [opencode]
 server_url = "http://127.0.0.1:4096"
@@ -106,7 +107,7 @@ command = []
 fn parses_shared_config_and_expands_home_paths() {
     let config = Config::parse(
         r#"
-version = 3
+version = 4
 
 [[roots]]
 path = "~/Repos"
@@ -126,7 +127,7 @@ file = ["nvim", "{path}"]
     )
     .expect("config should parse");
 
-    assert_eq!(config.version, 3);
+    assert_eq!(config.version, 4);
     assert_eq!(config.cache_ttl_seconds, 60);
     assert!(!config.follow_symlinks);
     assert_eq!(config.roots[0].path, Path::new("/Users/test/Repos"));
@@ -144,18 +145,81 @@ file = ["nvim", "{path}"]
 }
 
 #[test]
+fn vcs_icons_default_to_the_documented_symbols() {
+    let config = Config::parse("version = 4", Path::new("/Users/test")).unwrap();
+    let icons = config.vcs.icons;
+
+    assert_eq!(icons.clean.as_deref(), Some("✓"));
+    assert_eq!(icons.dirty.as_deref(), Some("✗"));
+    assert_eq!(icons.untracked.as_deref(), Some("?"));
+    assert_eq!(icons.modified.as_deref(), Some("!"));
+    assert_eq!(icons.staged.as_deref(), Some("+"));
+    assert_eq!(icons.conflicted.as_deref(), Some("×"));
+    assert_eq!(icons.ahead.as_deref(), Some("⇡"));
+    assert_eq!(icons.behind.as_deref(), Some("⇣"));
+    assert_eq!(icons.diverged.as_deref(), Some("⇕"));
+    assert_eq!(icons.stashed.as_deref(), Some("*"));
+}
+
+#[test]
+fn vcs_icons_can_be_overridden_or_disabled_individually() {
+    let config = Config::parse(
+        r#"
+version = 4
+
+[vcs.icons]
+clean = "ok"
+dirty = false
+untracked = "U"
+stashed = false
+"#,
+        Path::new("/Users/test"),
+    )
+    .unwrap();
+    let icons = config.vcs.icons;
+
+    assert_eq!(icons.clean.as_deref(), Some("ok"));
+    assert_eq!(icons.dirty, None);
+    assert_eq!(icons.untracked.as_deref(), Some("U"));
+    assert_eq!(icons.modified.as_deref(), Some("!"));
+    assert_eq!(icons.stashed, None);
+}
+
+#[test]
+fn vcs_icon_configuration_rejects_invalid_values_and_unknown_fields() {
+    for (field, value) in [("clean", "\"\""), ("dirty", "true"), ("staged", "5")] {
+        let error = Config::parse(
+            &format!("version = 4\n[vcs.icons]\n{field} = {value}"),
+            Path::new("/Users/test"),
+        )
+        .expect_err("invalid VCS icon values should fail");
+        assert!(
+            error.to_string().contains(&format!("vcs.icons.{field}")),
+            "unexpected error: {error}"
+        );
+    }
+
+    let error = Config::parse(
+        "version = 4\n[vcs.icons]\nfuture = \"?\"",
+        Path::new("/Users/test"),
+    )
+    .expect_err("unknown VCS icon fields should fail");
+    assert!(error.to_string().contains("future"));
+}
+
+#[test]
 fn rejects_unsupported_versions_and_shell_string_openers() {
     let version_error = Config::parse("version = 2", Path::new("/home/test"))
         .expect_err("old versions should fail");
     assert!(matches!(version_error, ConfigError::UnsupportedVersion(2)));
 
-    let future_error = Config::parse("version = 4\nfuture_option = true", Path::new("/home/test"))
+    let future_error = Config::parse("version = 5\nfuture_option = true", Path::new("/home/test"))
         .expect_err("the version should be checked before future fields");
-    assert!(matches!(future_error, ConfigError::UnsupportedVersion(4)));
+    assert!(matches!(future_error, ConfigError::UnsupportedVersion(5)));
 
     let opener_error = Config::parse(
         r#"
-version = 3
+version = 4
 [openers]
 file = "nvim {path}"
 "#,
@@ -172,7 +236,7 @@ file = "nvim {path}"
 fn rejects_empty_paths_and_opener_arguments() {
     let root_error = Config::parse(
         r#"
-version = 3
+version = 4
 [[roots]]
 path = ""
 "#,
@@ -183,7 +247,7 @@ path = ""
 
     let opener_error = Config::parse(
         r#"
-version = 3
+version = 4
 [openers]
 file = ["nvim", ""]
 "#,

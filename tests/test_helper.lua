@@ -98,7 +98,7 @@ function helper.load_wezterm_adapter(wezterm)
     return wezterm
   end
 
-  return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v3", "wezterm")
+  return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v4", "wezterm")
 end
 
 function helper.fake_window(workspace, mux_window)

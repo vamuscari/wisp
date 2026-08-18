@@ -1,6 +1,6 @@
 local wezterm = require "wezterm"
 local deployed_wisp_path, deployment_token, module_directory = ...
-local WISP_VERSION = 3
+local WISP_VERSION = 4
 
 if
   type(deployed_wisp_path) ~= "string"

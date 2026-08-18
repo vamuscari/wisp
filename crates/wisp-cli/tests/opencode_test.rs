@@ -269,7 +269,7 @@ fn registry_adds_unmanaged_servers_and_exact_pane_mappings() {
     fs::write(
         registry.path().join("instance.json"),
         serde_json::json!({
-            "registry_version": 3,
+            "registry_version": 4,
             "instance_id": "123:/repos/wisp",
             "pid": 123,
             "server_url": unmanaged.url(),
@@ -348,7 +348,7 @@ fn registry_project_matching_uses_windows_path_identity_rules() {
     fs::write(
         registry.path().join("instance.json"),
         serde_json::json!({
-            "registry_version": 3,
+            "registry_version": 4,
             "instance_id": "123:C:\\Repos\\Wisp",
             "pid": 123,
             "server_url": unmanaged.url(),
@@ -380,7 +380,7 @@ fn transient_unmanaged_server_failure_preserves_its_registration() {
     fs::write(
         &path,
         serde_json::json!({
-            "registry_version": 3,
+            "registry_version": 4,
             "instance_id": "123:/repos/wisp",
             "pid": 123,
             "server_url": unavailable_url,
@@ -416,7 +416,7 @@ fn stale_registry_entries_are_discarded_before_session_aggregation() {
     fs::write(
         &path,
         serde_json::json!({
-            "registry_version": 3,
+            "registry_version": 4,
             "instance_id": "123:/repos/wisp",
             "pid": 123,
             "server_url": stale.url(),
@@ -464,7 +464,7 @@ fn current_registry_entries_with_invalid_semantics_are_discarded() {
     fs::write(
         &path,
         serde_json::json!({
-            "registry_version": 3,
+            "registry_version": 4,
             "instance_id": "0:/repos/wisp",
             "pid": 0,
             "server_url": server.url(),
@@ -494,7 +494,7 @@ fn registry_entries_from_the_future_are_discarded() {
     fs::write(
         &path,
         serde_json::json!({
-            "registry_version": 3,
+            "registry_version": 4,
             "instance_id": "1:/repos/wisp",
             "pid": 1,
             "server_url": server.url(),
@@ -529,7 +529,7 @@ fn duplicate_live_session_ids_from_different_servers_are_marked_as_conflicts() {
     fs::write(
         registry.path().join("instance.json"),
         serde_json::json!({
-            "registry_version": 3,
+            "registry_version": 4,
             "instance_id": "456:/repos/wisp",
             "pid": 456,
             "server_url": unmanaged.url(),
@@ -567,7 +567,7 @@ fn plugin_registration_is_versioned_atomic_updatable_and_removable() {
 
     let path = register_instance(registry.path(), &registration).unwrap();
     let first: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(first["registry_version"], 3);
+    assert_eq!(first["registry_version"], 4);
     assert_eq!(first["instance_id"], "123:/repos/wisp/packages/cli");
     assert_eq!(first["pane_id"], "42");
     assert_eq!(first["session_id"], serde_json::Value::Null);
@@ -734,7 +734,7 @@ fn live_status_uses_event_backed_registration_state_without_http() {
         fs::write(
             registry.path().join(format!("{pid}.json")),
             serde_json::json!({
-                "registry_version": 3,
+                "registry_version": 4,
                 "instance_id": format!("{pid}:/repos/wisp"),
                 "pid": pid,
                 "server_url": server_url,

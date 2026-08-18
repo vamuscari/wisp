@@ -1,6 +1,6 @@
 local M = {}
 local deployed_wisp_path, deployment_token = ...
-local WISP_VERSION = 3
+local WISP_VERSION = 4
 
 if
   type(deployed_wisp_path) ~= "string"

@@ -42,7 +42,7 @@ impl FileSystem for FakeFileSystem {
 fn discovers_typed_directories_deduplicates_paths_and_sorts_projects() {
     let config = Config::parse(
         r#"
-version = 3
+version = 4
 
 [[roots]]
 path = "~/Repos"
@@ -95,7 +95,7 @@ name = "Artifacts"
 fn follows_directory_symlinks_only_when_configured() {
     let mut config = Config::parse(
         r#"
-version = 3
+version = 4
 [[roots]]
 path = "~/Repos"
 "#,
@@ -117,7 +117,7 @@ path = "~/Repos"
 fn rejects_duplicate_explicit_project_ids() {
     let config = Config::parse(
         r#"
-version = 3
+version = 4
 
 [[projects]]
 id = "api"

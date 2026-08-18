@@ -403,6 +403,7 @@ fn pick(
             .map(|project| spawn_git_summary(project.id.clone(), project.path.clone()))
     });
     let opencode_config = sessions_enabled.then(|| config.opencode.clone()).flatten();
+    let vcs_icons = config.vcs.icons;
     let tui_initial_view = match initial_view {
         InitialView::Projects => wisp_tui::InitialView::Projects,
         InitialView::Windows => wisp_tui::InitialView::Windows,
@@ -428,6 +429,7 @@ fn pick(
     if let Some(active_project) = active_project {
         app.set_active_project_context(active_project);
     }
+    app.set_vcs_icons(vcs_icons);
     let opencode = opencode_config
         .map(opencode::OpenCodeClient::new)
         .transpose()?
@@ -508,11 +510,39 @@ fn parse_git_status(status: &str) -> Option<GitSummary> {
     let mut branch = None;
     let mut object_id = None;
     let mut dirty = false;
+    let mut untracked = 0;
+    let mut modified = 0;
+    let mut staged = 0;
+    let mut conflicted = 0;
+    let mut ahead = 0;
+    let mut behind = 0;
+    let mut stashed = 0;
     for line in status.lines() {
         if let Some(head) = line.strip_prefix("# branch.head ") {
             branch = Some(head.to_string());
         } else if let Some(oid) = line.strip_prefix("# branch.oid ") {
             object_id = Some(oid.to_string());
+        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            let mut counts = ab.split_whitespace();
+            ahead = counts.next()?.strip_prefix('+')?.parse().ok()?;
+            behind = counts.next()?.strip_prefix('-')?.parse().ok()?;
+        } else if let Some(count) = line.strip_prefix("# stash ") {
+            stashed = count.parse().ok()?;
+        } else if line.starts_with("? ") {
+            dirty = true;
+            untracked += 1;
+        } else if line.starts_with("u ") {
+            dirty = true;
+            conflicted += 1;
+        } else if let Some(record) = line.strip_prefix("1 ").or_else(|| line.strip_prefix("2 ")) {
+            dirty = true;
+            let mut status = record.split_whitespace().next()?.chars();
+            if status.next()? != '.' {
+                staged += 1;
+            }
+            if status.next()? != '.' {
+                modified += 1;
+            }
         } else if !line.is_empty() && !line.starts_with("# ") {
             dirty = true;
         }
@@ -521,7 +551,17 @@ fn parse_git_status(status: &str) -> Option<GitSummary> {
         "(detached)" => format!("@{}", object_id?.chars().take(7).collect::<String>()),
         branch => branch.to_string(),
     };
-    Some(GitSummary { branch, dirty })
+    Some(GitSummary {
+        branch,
+        dirty,
+        untracked,
+        modified,
+        staged,
+        conflicted,
+        ahead,
+        behind,
+        stashed,
+    })
 }
 
 fn git_summary(project_path: &Path) -> Option<GitSummary> {
@@ -533,7 +573,7 @@ fn git_summary(project_path: &Path) -> Option<GitSummary> {
             "status",
             "--porcelain=v2",
             "--branch",
-            "--no-ahead-behind",
+            "--show-stash",
             "--untracked-files=normal",
         ])
         .output()
@@ -902,7 +942,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 3,
+            "protocol_version": 4,
             "projects": {
                 "api": { "labels": ["open"] },
                 "web": { "labels": ["current", "open"] }
@@ -941,7 +981,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 3,
+            "protocol_version": 4,
             "projects": {
                 "api": { "labels": ["open"] },
                 "web": { "labels": ["current", "open"] }
@@ -980,7 +1020,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 3,
+            "protocol_version": 4,
             "projects": {
                 "repos": { "labels": ["open"] },
                 "api": { "labels": ["new"] }
@@ -1003,16 +1043,32 @@ mod tests {
     }
 
     #[test]
-    fn porcelain_v2_status_reports_the_branch_and_dirty_state() {
+    fn porcelain_v2_status_counts_worktree_upstream_and_stash_states() {
         let status = parse_git_status(
             "# branch.oid 1cf82045403b6911084598a4487b373dc341638e\n\
              # branch.head main\n\
-             ? src/new.rs\n",
+             # branch.upstream origin/main\n\
+             # branch.ab +2 -1\n\
+             # stash 3\n\
+             1 .M N... 100644 100644 100644 abcdef0 abcdef0 src/modified.rs\n\
+             1 M. N... 100644 100644 100644 abcdef0 abcdef1 src/staged.rs\n\
+             1 MM N... 100644 100644 100644 abcdef0 abcdef1 src/both.rs\n\
+             2 R. N... 100644 100644 100644 abcdef0 abcdef1 R100 src/new.rs\tsrc/old.rs\n\
+             u UU N... 100644 100644 100644 100644 abcdef0 abcdef1 abcdef2 src/conflict.rs\n\
+             ? src/untracked.rs\n\
+             ? src/another.rs\n",
         )
         .unwrap();
 
         assert_eq!(status.branch, "main");
         assert!(status.dirty);
+        assert_eq!(status.untracked, 2);
+        assert_eq!(status.modified, 2);
+        assert_eq!(status.staged, 3);
+        assert_eq!(status.conflicted, 1);
+        assert_eq!(status.ahead, 2);
+        assert_eq!(status.behind, 1);
+        assert_eq!(status.stashed, 3);
     }
 
     #[test]
@@ -1025,6 +1081,13 @@ mod tests {
 
         assert_eq!(status.branch, "@1cf8204");
         assert!(!status.dirty);
+        assert_eq!(status.untracked, 0);
+        assert_eq!(status.modified, 0);
+        assert_eq!(status.staged, 0);
+        assert_eq!(status.conflicted, 0);
+        assert_eq!(status.ahead, 0);
+        assert_eq!(status.behind, 0);
+        assert_eq!(status.stashed, 0);
     }
 
     #[test]
@@ -1040,11 +1103,26 @@ mod tests {
         let clean = git_summary(repository.path()).unwrap();
         assert_eq!(clean.branch, "main");
         assert!(!clean.dirty);
+        assert_eq!(clean.untracked, 0);
 
         fs::write(repository.path().join("README.md"), "new\n").unwrap();
         let dirty = git_summary(repository.path()).unwrap();
         assert_eq!(dirty.branch, "main");
         assert!(dirty.dirty);
+        assert_eq!(dirty.untracked, 1);
+
+        let staged = ProcessCommand::new("git")
+            .arg("-C")
+            .arg(repository.path())
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        assert!(staged.success());
+        fs::write(repository.path().join("README.md"), "changed again\n").unwrap();
+        let both = git_summary(repository.path()).unwrap();
+        assert_eq!(both.staged, 1);
+        assert_eq!(both.modified, 1);
+        assert_eq!(both.untracked, 0);
     }
 
     #[test]
@@ -1122,7 +1200,7 @@ mod tests {
             }
         });
         let temporary = TempDir::new().unwrap();
-        let config = Config::parse("version = 3", temporary.path()).unwrap();
+        let config = Config::parse("version = 4", temporary.path()).unwrap();
         let cache =
             CacheStore::open(temporary.path().join("cache.json"), config.fingerprint()).unwrap();
         let mut catalog = Catalog::new(config, StdFileSystem, cache);

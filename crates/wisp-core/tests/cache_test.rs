@@ -174,17 +174,17 @@ fn current_version_cache_with_duplicate_directory_keys_is_rebuilt() {
 #[test]
 fn config_fingerprint_is_stable_and_changes_with_discovery_inputs() {
     let first = Config::parse(
-        "version = 3\n[[roots]]\npath = '/one'\n",
+        "version = 4\n[[roots]]\npath = '/one'\n",
         Path::new("/home/test"),
     )
     .unwrap();
     let same = Config::parse(
-        "version = 3\n[[roots]]\npath = '/one'\n",
+        "version = 4\n[[roots]]\npath = '/one'\n",
         Path::new("/different/home"),
     )
     .unwrap();
     let changed = Config::parse(
-        "version = 3\n[[roots]]\npath = '/two'\n",
+        "version = 4\n[[roots]]\npath = '/two'\n",
         Path::new("/home/test"),
     )
     .unwrap();

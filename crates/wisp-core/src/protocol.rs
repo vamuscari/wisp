@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::{model::Project, opencode::OpenCodeStatusCounts};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Deserialize)]
 struct VersionHeader {

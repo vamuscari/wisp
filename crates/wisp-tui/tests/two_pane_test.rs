@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend, style::Color};
 use wisp_core::{
-    config::Openers,
+    config::{Openers, VcsIcons},
     model::{DirectoryEntry, EntryKind, Project},
     opencode::{OpenCodeSession, OpenCodeSnapshot, SessionActivity, SessionWaiting},
     protocol::{HostContext, Selection},
@@ -45,7 +45,7 @@ fn projects() -> Vec<Project> {
 
 fn context() -> HostContext {
     serde_json::from_value(serde_json::json!({
-        "protocol_version": 3,
+        "protocol_version": 4,
         "projects": {
             "api": {
                 "labels": ["new"],
@@ -70,7 +70,7 @@ fn context() -> HostContext {
 
 fn host_workspace_context() -> HostContext {
     serde_json::from_value(serde_json::json!({
-        "protocol_version": 3,
+        "protocol_version": 4,
         "projects": {
             "api": { "labels": ["open"] },
             "web": { "labels": ["new"] },
@@ -164,7 +164,7 @@ fn sessions_command_loads_the_selected_project_and_groups_children() {
 #[test]
 fn selecting_a_session_uses_the_exact_host_mapping_and_attach_argv() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 3,
+        "protocol_version": 4,
         "projects": {
             "api": { "labels": ["new"] },
             "web": { "labels": ["open"] },
@@ -369,7 +369,7 @@ fn windows_initial_view_focuses_a_current_host_workspace() {
 #[test]
 fn windows_initial_view_falls_back_when_the_workspace_is_unmanaged() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 3,
+        "protocol_version": 4,
         "projects": {
             "api": { "labels": ["open"], "items": [] },
             "web": { "labels": ["new"], "items": [] },
@@ -862,6 +862,8 @@ fn active_project_file_and_git_status_render_inline_without_adding_a_window() {
         git: Some(GitSummary {
             branch: "main".into(),
             dirty: true,
+            modified: 1,
+            ..GitSummary::default()
         }),
     });
     let backend = TestBackend::new(160, 24);
@@ -869,21 +871,96 @@ fn active_project_file_and_git_status_render_inline_without_adding_a_window() {
 
     terminal.draw(|frame| render(frame, &app)).unwrap();
     let lines = rendered_lines(&terminal);
-    let project_row = lines
-        .iter()
-        .position(|line| line.contains("API Service"))
-        .unwrap() as u16;
     let rendered = lines.join("\n");
 
     assert_eq!(app.selected_project_id(), Some("api"));
     assert_eq!(app.visible_detail_labels(), vec!["api-shell"]);
-    assert!(
-        rendered.contains("◆ API Service  src/main.rs    main dirty"),
-        "active metadata should be part of the project row:\n{rendered}"
-    );
-    assert_eq!(terminal.backend().buffer()[(42, project_row)].symbol(), "y");
-    assert_eq!(terminal.backend().buffer()[(43, project_row)].symbol(), "│");
+    assert!(rendered.contains("◆ API Service  src/main.rs"));
+    assert!(rendered.contains("main ✗ !1"));
     assert!(!rendered.contains("src/main.rs  api-shell"));
+}
+
+#[test]
+fn vcs_icons_render_counts_and_combined_divergence_by_default() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.set_active_project_context(ActiveProjectContext {
+        project_id: "api".into(),
+        file: None,
+        git: Some(GitSummary {
+            branch: "main".into(),
+            dirty: true,
+            untracked: 2,
+            modified: 1,
+            staged: 3,
+            conflicted: 1,
+            ahead: 2,
+            behind: 1,
+            stashed: 4,
+        }),
+    });
+    let backend = TestBackend::new(200, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+
+    assert!(rendered.contains("◆ API Service"));
+    assert!(
+        rendered.contains("main ✗ ?2 !1 +3 ×1 ⇕2/1 *4"),
+        "every applicable VCS indicator should render in order:\n{rendered}"
+    );
+}
+
+#[test]
+fn vcs_icons_can_be_overridden_or_disabled() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    let icons = VcsIcons {
+        dirty: None,
+        untracked: Some("U".into()),
+        modified: None,
+        staged: Some("S".into()),
+        stashed: None,
+        ..VcsIcons::default()
+    };
+    app.set_vcs_icons(icons);
+    app.set_active_project_context(ActiveProjectContext {
+        project_id: "api".into(),
+        file: None,
+        git: Some(GitSummary {
+            branch: "main".into(),
+            dirty: true,
+            untracked: 2,
+            modified: 1,
+            staged: 3,
+            stashed: 4,
+            ..GitSummary::default()
+        }),
+    });
+    let backend = TestBackend::new(160, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+
+    assert!(
+        rendered.contains("main U2 S3"),
+        "custom icons should render:\n{rendered}"
+    );
+    assert!(!rendered.contains("✗"));
+    assert!(!rendered.contains("!1"));
+    assert!(!rendered.contains("*4"));
 }
 
 #[test]
@@ -936,6 +1013,7 @@ fn git_update_for_an_inactive_project_is_ignored() {
         GitSummary {
             branch: "wrong-branch".into(),
             dirty: true,
+            ..GitSummary::default()
         },
     );
 
@@ -963,6 +1041,7 @@ fn active_project_row_keeps_the_filename_and_clean_git_state_when_space_is_limit
         git: Some(GitSummary {
             branch: "main".into(),
             dirty: false,
+            ..GitSummary::default()
         }),
     });
     let backend = TestBackend::new(120, 24);
@@ -970,18 +1049,12 @@ fn active_project_row_keeps_the_filename_and_clean_git_state_when_space_is_limit
 
     terminal.draw(|frame| render(frame, &app)).unwrap();
     let lines = rendered_lines(&terminal);
-    let project_row = lines
-        .iter()
-        .position(|line| line.contains("API Service"))
-        .unwrap() as u16;
     let rendered = lines.join("\n");
 
     assert!(
-        rendered.contains("◆ API Service  …/main.rs  main clean"),
+        rendered.contains("◆ API Service  …/src/main.rs  main ✓"),
         "the file should truncate from the left without hiding Git state:\n{rendered}"
     );
-    assert_eq!(terminal.backend().buffer()[(38, project_row)].symbol(), "n");
-    assert_eq!(terminal.backend().buffer()[(39, project_row)].symbol(), "│");
 }
 
 #[test]
@@ -999,6 +1072,7 @@ fn long_git_branch_truncates_before_the_right_aligned_state() {
         git: Some(GitSummary {
             branch: "feature/an-excessively-long-branch-name".into(),
             dirty: true,
+            ..GitSummary::default()
         }),
     });
     let backend = TestBackend::new(100, 24);
@@ -1006,18 +1080,12 @@ fn long_git_branch_truncates_before_the_right_aligned_state() {
 
     terminal.draw(|frame| render(frame, &app)).unwrap();
     let lines = rendered_lines(&terminal);
-    let project_row = lines
-        .iter()
-        .position(|line| line.contains("API Service"))
-        .unwrap() as u16;
     let rendered = lines.join("\n");
 
     assert!(
-        rendered.contains("◆ API Service  feature… dirty"),
+        rendered.contains("◆ API Service  feature/an-… ✗"),
         "the branch should truncate before the state:\n{rendered}"
     );
-    assert_eq!(terminal.backend().buffer()[(31, project_row)].symbol(), "y");
-    assert_eq!(terminal.backend().buffer()[(32, project_row)].symbol(), "│");
 }
 
 #[test]
@@ -1037,6 +1105,7 @@ fn long_project_name_truncates_before_the_right_aligned_git_metadata() {
         git: Some(GitSummary {
             branch: "main".into(),
             dirty: true,
+            ..GitSummary::default()
         }),
     });
     let backend = TestBackend::new(100, 24);
@@ -1046,15 +1115,50 @@ fn long_project_name_truncates_before_the_right_aligned_git_metadata() {
     let rendered = rendered_lines(&terminal).join("\n");
 
     assert!(
-        rendered.contains("main dirty"),
+        rendered.contains("main ✗"),
         "Git metadata should remain visible after the project name truncates:\n{rendered}"
     );
     assert!(!rendered.contains("An extremely long project name"));
 }
 
 #[test]
+fn minimum_wide_layout_keeps_the_vcs_state_visible() {
+    let mut projects = projects();
+    projects[0].display_name = "An extremely long project name".into();
+    let mut app = App::new(
+        projects,
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.set_active_project_context(ActiveProjectContext {
+        project_id: "api".into(),
+        file: None,
+        git: Some(GitSummary {
+            branch: "feature/an-excessively-long-branch-name".into(),
+            dirty: true,
+            ..GitSummary::default()
+        }),
+    });
+    let backend = TestBackend::new(72, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let project_row = rendered_lines(&terminal)
+        .into_iter()
+        .find(|line| line.contains("An extremely"))
+        .expect("active project row should render");
+
+    assert!(
+        project_row.contains("✗"),
+        "the primary VCS state should survive the minimum pane width:\n{project_row}"
+    );
+}
+
+#[test]
 fn wide_renderer_uses_an_adaptive_capped_projects_width() {
-    for (terminal_width, detail_start) in [(100, 33), (160, 44)] {
+    for (terminal_width, detail_start) in [(100, 33), (160, 53), (200, 56)] {
         let app = App::new(
             projects(),
             Openers::default(),
@@ -1145,7 +1249,7 @@ fn narrow_renderer_stacks_projects_above_windows() {
 #[test]
 fn renderer_explains_when_an_open_project_has_no_windows() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 3,
+        "protocol_version": 4,
         "projects": {
             "docs": { "labels": ["current", "open"], "items": [] }
         },
@@ -1169,7 +1273,7 @@ fn renderer_explains_when_an_open_project_has_no_windows() {
 #[test]
 fn renderer_explains_when_the_selected_project_is_not_open() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 3,
+        "protocol_version": 4,
         "projects": {
             "api": { "labels": ["new"], "items": [] },
             "web": { "labels": ["open"], "items": [] },

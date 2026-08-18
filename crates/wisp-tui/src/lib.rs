@@ -20,7 +20,7 @@ use ratatui::{
 };
 use thiserror::Error;
 use wisp_core::{
-    config::Openers,
+    config::{Openers, VcsIcons},
     model::{DirectoryEntry, Project},
     navigation::{NavigationError, NavigationOutcome, Navigator, Screen},
     opencode::{OpenCodeSession, OpenCodeSnapshot, SessionDisplayState},
@@ -70,10 +70,17 @@ pub enum InitialView {
     Sessions,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitSummary {
     pub branch: String,
     pub dirty: bool,
+    pub untracked: usize,
+    pub modified: usize,
+    pub staged: usize,
+    pub conflicted: usize,
+    pub ahead: usize,
+    pub behind: usize,
+    pub stashed: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,6 +156,7 @@ pub struct App {
     status: Option<String>,
     startup_command: Option<Command>,
     active_project: Option<ActiveProjectContext>,
+    vcs_icons: VcsIcons,
 }
 
 impl App {
@@ -215,6 +223,7 @@ impl App {
             status: None,
             startup_command: None,
             active_project: None,
+            vcs_icons: VcsIcons::default(),
         };
         app.select_current_project();
         match initial_view {
@@ -321,6 +330,10 @@ impl App {
         {
             active.git = Some(git);
         }
+    }
+
+    pub fn set_vcs_icons(&mut self, icons: VcsIcons) {
+        self.vcs_icons = icons;
     }
 
     pub fn replace_projects(&mut self, projects: Vec<Project>) {
@@ -1286,37 +1299,177 @@ fn truncate_right(value: &str, width: usize) -> Option<String> {
     Some("…".into())
 }
 
+#[derive(Clone)]
+struct VcsToken {
+    text: String,
+    color: Color,
+}
+
+fn push_counted_vcs_token(
+    tokens: &mut Vec<VcsToken>,
+    icon: &Option<String>,
+    count: usize,
+    color: Color,
+) {
+    if count == 0 {
+        return;
+    }
+    if let Some(icon) = icon {
+        tokens.push(VcsToken {
+            text: format!("{icon}{count}"),
+            color,
+        });
+    }
+}
+
+fn vcs_tokens(summary: &GitSummary, icons: &VcsIcons) -> Vec<VcsToken> {
+    let mut tokens = Vec::new();
+    let state = if summary.dirty {
+        icons.dirty.as_ref().map(|icon| (icon, THEME.input))
+    } else {
+        icons.clean.as_ref().map(|icon| (icon, THEME.active))
+    };
+    if let Some((icon, color)) = state {
+        tokens.push(VcsToken {
+            text: icon.clone(),
+            color,
+        });
+    }
+
+    push_counted_vcs_token(
+        &mut tokens,
+        &icons.untracked,
+        summary.untracked,
+        THEME.input,
+    );
+    push_counted_vcs_token(&mut tokens, &icons.modified, summary.modified, THEME.input);
+    push_counted_vcs_token(&mut tokens, &icons.staged, summary.staged, THEME.input);
+    push_counted_vcs_token(
+        &mut tokens,
+        &icons.conflicted,
+        summary.conflicted,
+        THEME.error,
+    );
+    if summary.ahead > 0 && summary.behind > 0 {
+        if let Some(icon) = &icons.diverged {
+            tokens.push(VcsToken {
+                text: format!("{icon}{}/{}", summary.ahead, summary.behind),
+                color: THEME.accent,
+            });
+        } else {
+            push_counted_vcs_token(&mut tokens, &icons.ahead, summary.ahead, THEME.accent);
+            push_counted_vcs_token(&mut tokens, &icons.behind, summary.behind, THEME.accent);
+        }
+    } else {
+        push_counted_vcs_token(&mut tokens, &icons.ahead, summary.ahead, THEME.accent);
+        push_counted_vcs_token(&mut tokens, &icons.behind, summary.behind, THEME.accent);
+    }
+    push_counted_vcs_token(&mut tokens, &icons.stashed, summary.stashed, THEME.muted);
+    tokens
+}
+
+fn vcs_tokens_width(tokens: &[VcsToken]) -> usize {
+    tokens
+        .iter()
+        .map(|token| Span::raw(&token.text).width())
+        .sum::<usize>()
+        .saturating_add(tokens.len().saturating_sub(1))
+}
+
+fn full_vcs_width(summary: &GitSummary, icons: &VcsIcons) -> usize {
+    let tokens = vcs_tokens(summary, icons);
+    Span::raw(&summary.branch)
+        .width()
+        .saturating_add((!tokens.is_empty()) as usize)
+        .saturating_add(vcs_tokens_width(&tokens))
+}
+
+fn vcs_spans(summary: &GitSummary, icons: &VcsIcons, width: usize) -> (Vec<Span<'static>>, usize) {
+    if width == 0 {
+        return (Vec::new(), 0);
+    }
+
+    let tokens = vcs_tokens(summary, icons);
+    let primary_token_reservation = tokens
+        .first()
+        .map_or(0, |token| Span::raw(&token.text).width().saturating_add(1));
+    let branch_preference = Span::raw(&summary.branch)
+        .width()
+        .min(8)
+        .min(width.saturating_sub(primary_token_reservation));
+    let token_budget = width.saturating_sub(branch_preference.saturating_add(1));
+    let mut selected = Vec::new();
+    let mut selected_width: usize = 0;
+    let mut omitted = false;
+    for token in tokens {
+        let token_width = Span::raw(&token.text).width();
+        let additional = token_width.saturating_add((!selected.is_empty()) as usize);
+        if selected_width.saturating_add(additional) <= token_budget {
+            selected_width = selected_width.saturating_add(additional);
+            selected.push(token);
+        } else {
+            omitted = true;
+        }
+    }
+    if omitted {
+        let additional = 1_usize.saturating_add((!selected.is_empty()) as usize);
+        while selected_width.saturating_add(additional) > token_budget && selected.len() > 1 {
+            selected.pop();
+            selected_width = vcs_tokens_width(&selected);
+        }
+        if selected_width.saturating_add(additional) <= token_budget {
+            selected.push(VcsToken {
+                text: "…".into(),
+                color: THEME.muted,
+            });
+            selected_width = vcs_tokens_width(&selected);
+        }
+    }
+
+    let separator_width = (!selected.is_empty()) as usize;
+    let branch_width = width
+        .saturating_sub(selected_width)
+        .saturating_sub(separator_width);
+    let branch = truncate_right(&summary.branch, branch_width);
+    let mut spans = Vec::new();
+    if let Some(branch) = branch {
+        spans.push(Span::styled(branch, Style::default().fg(THEME.accent)));
+    }
+    if !spans.is_empty() && !selected.is_empty() {
+        spans.push(Span::raw(" "));
+    }
+    for (index, token) in selected.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(token.text, Style::default().fg(token.color)));
+    }
+    let rendered_width = Line::from(spans.clone()).width();
+    (spans, rendered_width)
+}
+
 fn project_row(
     item: ProjectItem,
     active: Option<&ActiveProjectContext>,
+    vcs_icons: &VcsIcons,
     width: usize,
 ) -> ListItem<'static> {
     const GIT_GAP: usize = 2;
     const COMPACT_PROJECT_NAME_WIDTH: usize = 15;
 
     let display_name = item.target.display_name();
-    let git = active.and_then(|active| active.git.as_ref()).map(|git| {
-        (
-            git.branch.as_str(),
-            if git.dirty { "dirty" } else { "clean" },
-            git.dirty,
-        )
-    });
+    let git = active.and_then(|active| active.git.as_ref());
     let status_width = Span::raw(item.status.icon()).width().saturating_add(1);
     let full_name_width = Span::raw(display_name).width();
     let name_width = git.map_or_else(
         || width.saturating_sub(status_width),
-        |(branch, state, _)| {
-            let state_width = Span::raw(state).width();
-            let full_git_width = Span::raw(branch)
-                .width()
-                .saturating_add(1)
-                .saturating_add(state_width);
+        |git| {
+            let full_git_width = full_vcs_width(git, vcs_icons);
             let preferred_name_width = full_name_width.min(COMPACT_PROJECT_NAME_WIDTH).min(
                 width
                     .saturating_sub(status_width)
                     .saturating_sub(GIT_GAP)
-                    .saturating_sub(state_width),
+                    .saturating_sub(1),
             );
             let available_git_width = width
                 .saturating_sub(status_width)
@@ -1342,17 +1495,11 @@ fn project_row(
     ];
     let base_width = Line::from(spans.clone()).width();
 
-    let git = git.map(|(branch, state, dirty)| {
-        let state_width = Span::raw(state).width();
+    let git = git.map(|git| {
         let available = width.saturating_sub(base_width).saturating_sub(GIT_GAP);
-        let branch_width = available.saturating_sub(state_width).saturating_sub(1);
-        let branch = truncate_right(branch, branch_width);
-        let width = branch.as_ref().map_or(state_width, |branch| {
-            Span::raw(branch).width() + 1 + state_width
-        });
-        (branch, state, dirty, width)
+        vcs_spans(git, vcs_icons, available)
     });
-    let git_width = git.as_ref().map_or(0, |(_, _, _, width)| *width);
+    let git_width = git.as_ref().map_or(0, |(_, width)| *width);
     let file_width = width
         .saturating_sub(base_width)
         .saturating_sub(git_width)
@@ -1367,19 +1514,12 @@ fn project_row(
             Style::default().fg(THEME.muted),
         ));
     }
-    if let Some((branch, state, dirty, _)) = git {
+    if let Some((git_spans, _)) = git {
         let padding = width
             .saturating_sub(Line::from(spans.clone()).width())
             .saturating_sub(git_width);
         spans.push(Span::raw(" ".repeat(padding)));
-        if let Some(branch) = branch {
-            spans.push(Span::styled(branch, Style::default().fg(THEME.accent)));
-            spans.push(Span::raw(" "));
-        }
-        spans.push(Span::styled(
-            state,
-            Style::default().fg(if dirty { THEME.input } else { THEME.active }),
-        ));
+        spans.extend(git_spans);
     }
     ListItem::new(Line::from(spans))
 }
@@ -1431,7 +1571,7 @@ pub fn render(frame: &mut Frame, app: &App) {
                 .areas(content);
         (projects_area, detail_area)
     } else {
-        let projects_width = (content.width / 3).clamp(32, 44);
+        let projects_width = (content.width / 3).clamp(32, 56);
         let [projects_area, detail_area] =
             Layout::horizontal([Constraint::Length(projects_width), Constraint::Min(0)])
                 .areas(content);
@@ -1448,7 +1588,12 @@ pub fn render(frame: &mut Frame, app: &App) {
                     .filter(|active| active.project_id == project.id),
                 ProjectTarget::Workspace { .. } => None,
             };
-            project_row(item, active, projects_area.width.saturating_sub(4).into())
+            project_row(
+                item,
+                active,
+                &app.vcs_icons,
+                projects_area.width.saturating_sub(4).into(),
+            )
         })
         .collect::<Vec<_>>();
     let mut project_state = ListState::default()

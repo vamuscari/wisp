@@ -80,7 +80,7 @@ Set `WISP_CONFIG_FILE` or pass the global `--config <path>` option to use a
 different file.
 
 ```toml
-version = 3
+version = 4
 cache_ttl_seconds = 60
 follow_symlinks = false
 
@@ -122,6 +122,26 @@ Openers are argv arrays, never shell strings. Supported placeholders are:
 
 `openers.file` is included in file selections. An optional `openers.project`
 is included in project selections. The picker itself never executes either.
+
+The optional `[vcs.icons]` table customizes the current project's Git markers.
+Omitted keys use these defaults:
+
+```toml
+[vcs.icons]
+clean = "✓"
+dirty = "✗"
+untracked = "?"
+modified = "!"
+staged = "+"
+conflicted = "×"
+ahead = "⇡"
+behind = "⇣"
+diverged = "⇕"
+stashed = "*"
+```
+
+Each value must be a non-empty string or `false`; `false` disables that marker.
+When `diverged` is disabled, Wisp renders separate `ahead` and `behind` markers.
 
 The optional `opencode` table enables session mode. `server_url` must be a
 loopback HTTP URL. `command` is an argv prefix and defaults to `["opencode"]`;
@@ -207,12 +227,14 @@ indicators use green, cyan, and muted ANSI colors from the active terminal theme
 rather than fixed RGB values.
 
 The current project row includes the active Neovim file as a project-relative
-path when the current buffer is a normal file. It also includes the Git branch
-and `clean` or `dirty` state when `git` can inspect the project. This metadata
-stays inline in Projects; the Git summary is anchored to the right edge while
-the file path uses the remaining space and truncates from the left when needed.
-Git inspection runs after the picker opens and updates the row when it finishes.
-The Projects pane uses a capped adaptive width so most horizontal space remains
+path when the current buffer is a normal file. It also includes the Git branch,
+clean or dirty state, and nonzero counts for untracked, modified, staged,
+conflicted, upstream, and stashed states when `git` can inspect the project.
+Combined upstream divergence renders as `ahead/behind`. This metadata stays
+inline in Projects; the Git summary is anchored to the right edge while the file
+path uses the remaining space and truncates from the left when needed. Git
+inspection runs after the picker opens and updates the row when it finishes. The
+Projects pane uses a capped adaptive width so most horizontal space remains
 available to the detail pane.
 
 Projects and live host-only workspaces remain in the left pane. The right pane
@@ -426,7 +448,7 @@ executables reject mismatched schemas:
 
 ```json
 {
-  "protocol_version": 3,
+  "protocol_version": 4,
   "projects": [
     {
       "id": "api",
@@ -439,11 +461,11 @@ executables reject mismatched schemas:
 }
 ```
 
-Selection protocol version 3 embeds the owning project and resolved opener:
+Selection protocol version 4 embeds the owning project and resolved opener:
 
 ```json
 {
-  "protocol_version": 3,
+  "protocol_version": 4,
   "status": "selected",
   "selection": {
     "kind": "file",
@@ -465,7 +487,7 @@ renderer:
 
 ```json
 {
-  "protocol_version": 3,
+  "protocol_version": 4,
   "sessions": {
     "waiting": 1,
     "running": 2,
@@ -495,7 +517,7 @@ labels control status and both entry types can describe host-owned windows:
 
 ```json
 {
-  "protocol_version": 3,
+  "protocol_version": 4,
   "projects": {
     "api": {
       "labels": ["current", "open"],
@@ -532,7 +554,7 @@ labels control status and both entry types can describe host-owned windows:
 The `workspaces` map is required; each key exists only while that workspace is
 open, and `current` selects the current row. Omitted `items` and `session_items`
 fields are empty. Host item IDs are opaque to the Rust picker. Adapters reject
-protocol versions other than 3 rather than attempting compatibility. Canonical
+protocol versions other than 4 rather than attempting compatibility. Canonical
 examples live in [`tests/fixtures`](tests/fixtures).
 
 ## Cache And Limits
