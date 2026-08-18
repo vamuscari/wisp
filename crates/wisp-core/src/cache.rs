@@ -170,12 +170,12 @@ impl CacheStore {
 
     fn save_locked(&mut self, parent: &Path) -> Result<(), CacheError> {
         let on_disk = self.read_current()?;
-        if let OnDisk::UnsupportedVersion(hash) = &on_disk
-            && self.base_unsupported_hash != Some(*hash)
-        {
-            self.dirty_directories.clear();
-            self.stale = true;
-            return Ok(());
+        if let OnDisk::UnsupportedVersion(hash) = &on_disk {
+            if self.base_unsupported_hash != Some(*hash) {
+                self.dirty_directories.clear();
+                self.stale = true;
+                return Ok(());
+            }
         }
         let current_generation = match &on_disk {
             OnDisk::Document(document) => document.generation,

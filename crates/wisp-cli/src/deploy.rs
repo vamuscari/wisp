@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
 };
@@ -22,6 +24,7 @@ const WEZTERM_STATUS: &[u8] = include_bytes!("../../../wezterm/status.lua");
 const NVIM_ADAPTER: &[u8] = include_bytes!("../../../nvim/lua/wisp/init.lua");
 const NVIM_HELP: &[u8] = include_bytes!("../../../nvim/doc/wisp.txt");
 const OPENCODE_PLUGIN: &[u8] = include_bytes!("../../../opencode/wisp.js");
+const PRUNE_TOMBSTONE_PREFIX: &str = ".prune-";
 
 #[derive(Debug, Error)]
 pub enum DeployError {
@@ -33,6 +36,10 @@ pub enum DeployError {
     Io(#[from] io::Error),
     #[error("deployment JSON failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error(
+        "unsupported active deployment version in {path}; rerun wisp deploy --replace-incompatible to discard incompatible deployment state"
+    )]
+    IncompatibleActive { path: PathBuf },
     #[error("invalid deployment: {0}")]
     Invalid(String),
 }
@@ -99,7 +106,7 @@ impl Drop for DeploymentLock {
     }
 }
 
-pub fn deploy() -> Result<PathBuf, DeployError> {
+pub fn deploy(replace_incompatible: bool) -> Result<PathBuf, DeployError> {
     let root = deployment_root()?;
     let _lock = DeploymentLock::acquire(&root)?;
     let wezterm_config = wezterm_config_dir()?;
@@ -154,7 +161,12 @@ pub fn deploy() -> Result<PathBuf, DeployError> {
         fs::rename(staged, &destination)?;
     }
 
-    let previous = read_active(&root)?.and_then(|active| {
+    let active = match read_active(&root) {
+        Ok(active) => active,
+        Err(DeployError::IncompatibleActive { .. }) if replace_incompatible => None,
+        Err(error) => return Err(error),
+    };
+    let previous = active.and_then(|active| {
         if active.current_bundle_id == bundle_id {
             active.previous_bundle_id
         } else {
@@ -235,19 +247,71 @@ pub fn prune() -> Result<(), DeployError> {
     }
     let deployments = root.join("deployments");
     let mut removed = 0;
-    for entry in fs::read_dir(&deployments)? {
-        let entry = entry?;
+    let mut retained = 0;
+    let mut entries = fs::read_dir(&deployments)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        (!name.starts_with(PRUNE_TOMBSTONE_PREFIX), name)
+    });
+    for entry in entries {
         if !entry.file_type()?.is_dir() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         if !keep.contains(&name) {
-            fs::remove_dir_all(entry.path())?;
-            removed += 1;
+            match prune_deployment_directory(&deployments, &entry.path(), &name)? {
+                PruneOutcome::Removed => removed += 1,
+                PruneOutcome::Retained => retained += 1,
+            }
         }
     }
-    println!("pruned {removed} Wisp deployment(s)");
+    if retained == 0 {
+        println!("pruned {removed} Wisp deployment(s)");
+    } else {
+        println!("pruned {removed} Wisp deployment(s); retained {retained} in-use deployment(s)");
+    }
     Ok(())
+}
+
+enum PruneOutcome {
+    Removed,
+    Retained,
+}
+
+fn prune_deployment_directory(
+    deployments: &Path,
+    path: &Path,
+    name: &str,
+) -> Result<PruneOutcome, DeployError> {
+    let tombstone = if name.starts_with(PRUNE_TOMBSTONE_PREFIX) {
+        path.to_path_buf()
+    } else {
+        let tombstone = deployments.join(format!("{PRUNE_TOMBSTONE_PREFIX}{name}"));
+        if tombstone.exists() {
+            return Ok(PruneOutcome::Retained);
+        }
+        match fs::rename(path, &tombstone) {
+            Ok(()) => tombstone,
+            Err(error) if is_in_use_error(&error) => return Ok(PruneOutcome::Retained),
+            Err(error) => return Err(error.into()),
+        }
+    };
+
+    match fs::remove_dir_all(tombstone) {
+        Ok(()) => Ok(PruneOutcome::Removed),
+        Err(error) if is_in_use_error(&error) => Ok(PruneOutcome::Retained),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(windows)]
+fn is_in_use_error(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+#[cfg(not(windows))]
+fn is_in_use_error(_error: &io::Error) -> bool {
+    false
 }
 
 pub fn check_bundle(root: &Path, bundle_id: &str) -> Result<(), DeployError> {
@@ -287,18 +351,49 @@ fn deployment_root() -> Result<PathBuf, DeployError> {
 }
 
 fn wezterm_config_dir() -> Result<PathBuf, DeployError> {
-    if let Some(path) = env::var_os("WISP_WEZTERM_CONFIG_DIR").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(path));
+    let override_dir = env::var_os("WISP_WEZTERM_CONFIG_DIR").filter(|value| !value.is_empty());
+    let config_file = env::var_os("WEZTERM_CONFIG_FILE").filter(|value| !value.is_empty());
+    let xdg_config = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty());
+    let base = BaseDirs::new();
+    resolve_wezterm_config_dir(
+        override_dir.as_deref(),
+        config_file.as_deref(),
+        xdg_config.as_deref(),
+        base.as_ref().map(BaseDirs::home_dir),
+    )
+    .ok_or(DeployError::MissingConfigDirectory)
+}
+
+fn resolve_wezterm_config_dir(
+    override_dir: Option<&OsStr>,
+    config_file: Option<&OsStr>,
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(path) = override_dir {
+        return Some(PathBuf::from(path));
     }
-    if let Some(path) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(path).join("wezterm"));
+    if let Some(path) = config_file {
+        let path = Path::new(path);
+        return Some(
+            path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+        );
     }
-    let base = BaseDirs::new().ok_or(DeployError::MissingConfigDirectory)?;
-    let dot_config = base.home_dir().join(".config/wezterm");
-    if dot_config.is_dir() {
-        return Ok(dot_config);
+    let home = home?;
+    if home.join(".wezterm.lua").is_file() {
+        return Some(home.to_path_buf());
     }
-    Ok(base.config_dir().join("wezterm"))
+    if let Some(path) = xdg_config_home {
+        return Some(PathBuf::from(path).join("wezterm"));
+    }
+    let dot_config = home.join(".config/wezterm");
+    if dot_config.join("wezterm.lua").is_file() {
+        return Some(dot_config);
+    }
+    Some(home.to_path_buf())
 }
 
 fn opencode_config_dir() -> Result<PathBuf, DeployError> {
@@ -425,10 +520,7 @@ fn read_active(root: &Path) -> Result<Option<ActiveDeployment>, DeployError> {
         .and_then(serde_json::Value::as_u64)
         != Some(DEPLOYMENT_SCHEMA_VERSION.into())
     {
-        return Err(DeployError::Invalid(format!(
-            "unsupported active deployment version in {}",
-            path.display()
-        )));
+        return Err(DeployError::IncompatibleActive { path });
     }
     let active: ActiveDeployment = serde_json::from_slice(&encoded)?;
     validate_bundle_id(&active.current_bundle_id)?;
@@ -663,4 +755,77 @@ fn make_executable(_path: &Path) -> Result<(), DeployError> {
 #[cfg(not(unix))]
 fn verify_executable_permissions(_path: PathBuf) -> Result<(), DeployError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{ffi::OsStr, fs};
+
+    use tempfile::TempDir;
+
+    use super::resolve_wezterm_config_dir;
+
+    #[test]
+    fn wezterm_config_resolution_follows_explicit_environment_precedence() {
+        let temporary = TempDir::new().unwrap();
+        let home = temporary.path().join("home");
+        let xdg = temporary.path().join("xdg");
+        let configured = temporary.path().join("custom/wezterm.lua");
+        let override_dir = temporary.path().join("override");
+
+        assert_eq!(
+            resolve_wezterm_config_dir(
+                Some(override_dir.as_os_str()),
+                Some(configured.as_os_str()),
+                Some(xdg.as_os_str()),
+                Some(&home),
+            ),
+            Some(override_dir)
+        );
+        assert_eq!(
+            resolve_wezterm_config_dir(
+                None,
+                Some(configured.as_os_str()),
+                Some(xdg.as_os_str()),
+                Some(&home),
+            ),
+            Some(temporary.path().join("custom"))
+        );
+        assert_eq!(
+            resolve_wezterm_config_dir(None, None, Some(xdg.as_os_str()), Some(&home)),
+            Some(xdg.join("wezterm"))
+        );
+    }
+
+    #[test]
+    fn wezterm_config_resolution_uses_the_config_file_that_wezterm_will_load() {
+        let temporary = TempDir::new().unwrap();
+        let home = temporary.path().join("home");
+        let dot_config = home.join(".config/wezterm");
+        fs::create_dir_all(&dot_config).unwrap();
+
+        assert_eq!(
+            resolve_wezterm_config_dir(None, None, None, Some(&home)),
+            Some(home.clone()),
+            "an unused .config directory must not override a home .wezterm.lua"
+        );
+
+        fs::write(dot_config.join("wezterm.lua"), "return {}\n").unwrap();
+        fs::write(home.join(".wezterm.lua"), "return {}\n").unwrap();
+        assert_eq!(
+            resolve_wezterm_config_dir(None, None, None, Some(&home)),
+            Some(home.clone()),
+            "WezTerm prefers its home config when both default files exist"
+        );
+
+        fs::remove_file(home.join(".wezterm.lua")).unwrap();
+        assert_eq!(
+            resolve_wezterm_config_dir(None, None, None, Some(&home)),
+            Some(dot_config)
+        );
+        assert_eq!(
+            resolve_wezterm_config_dir(None, Some(OsStr::new("wezterm.lua")), None, Some(&home)),
+            Some(".".into())
+        );
+    }
 }

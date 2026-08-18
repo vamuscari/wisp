@@ -40,16 +40,22 @@ end
 
 function Picker:project_relative_cwd(project, pane)
   local cwd = pane and pane:get_current_working_dir()
-  if not cwd or cwd.scheme ~= "file" or type(cwd.file_path) ~= "string" then
+  local cwd_path = self.workspace:path_from_file_url(cwd)
+  if not cwd_path then
     return nil
   end
-  local root = project.path:gsub("[/\\]+$", "")
-  local path = cwd.file_path:gsub("[/\\]+$", "")
-  if path == root then
+  local root, root_identity = self.workspace:normalize_path(project.path)
+  local path, path_identity = self.workspace:normalize_path(cwd_path)
+  if path_identity == root_identity then
     return "."
   end
-  local prefix = root .. "/"
-  if path:sub(1, #prefix) == prefix then
+  local separator = type(self.wezterm.target_triple) == "string" and self.wezterm.target_triple:match "windows" and "\\"
+    or "/"
+  local prefix = root_identity
+  if prefix:sub(-1) ~= separator then
+    prefix = prefix .. separator
+  end
+  if path_identity:sub(1, #prefix) == prefix then
     return path:sub(#prefix + 1)
   end
   return nil

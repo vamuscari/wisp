@@ -58,6 +58,19 @@ jobs:
       - run: node --check opencode/wisp.js
       - run: node --test tests/opencode_plugin_test.mjs
 
+  opencode-plugin-windows:
+    name: OpenCode plugin process (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: cargo build --locked --package wisp-cli
+      - run: node --test tests/opencode_plugin_process_test.mjs
+
   lua-test:
     name: Lua (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -143,3 +156,45 @@ jobs:
           -c "lua assert(type(vim.base64.encode) == 'function')"
           -c "lua require('wisp').setup()"
           -c "qa"
+
+  wezterm-windows:
+    name: Minimum WezTerm (Windows)
+    runs-on: windows-latest
+    env:
+      WEZTERM_ASSET: WezTerm-windows-20240127-113634-bbcac864.zip
+      WEZTERM_VERSION: 20240127-113634-bbcac864
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and deploy Wisp
+        shell: pwsh
+        run: |
+          cargo build --workspace --locked
+          $env:WISP_DEPLOY_ROOT = Join-Path $env:RUNNER_TEMP "wisp"
+          $env:XDG_CONFIG_HOME = Join-Path $env:RUNNER_TEMP "config"
+          & .\target\debug\wisp.exe deploy
+          if ($LASTEXITCODE -ne 0) { throw "wisp deploy failed" }
+          & .\target\debug\wisp.exe deploy verify
+          if ($LASTEXITCODE -ne 0) { throw "wisp deploy verify failed" }
+      - name: Download WezTerm
+        shell: pwsh
+        run: |
+          $url = "https://github.com/wezterm/wezterm/releases/download/$env:WEZTERM_VERSION/$env:WEZTERM_ASSET"
+          curl.exe --fail --location --retry 3 --remote-name $url
+          curl.exe --fail --location --retry 3 --remote-name "$url.sha256"
+          if ($LASTEXITCODE -ne 0) { throw "WezTerm download failed" }
+          $expected = ((Get-Content "$env:WEZTERM_ASSET.sha256") -split "\s+")[0].ToLowerInvariant()
+          $actual = (Get-FileHash $env:WEZTERM_ASSET -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "WezTerm checksum mismatch" }
+          7z x $env:WEZTERM_ASSET -owezterm | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "WezTerm extraction failed" }
+      - name: Parse plugin configuration
+        shell: pwsh
+        run: |
+          $env:WISP_DEPLOY_ROOT = Join-Path $env:RUNNER_TEMP "wisp"
+          $env:XDG_CONFIG_HOME = Join-Path $env:RUNNER_TEMP "config"
+          $wezterm = (Get-ChildItem wezterm -Recurse -Filter wezterm.exe | Select-Object -First 1).FullName
+          if (-not $wezterm) { throw "wezterm.exe was not extracted" }
+          & $wezterm --config-file "$PWD\tests\deployed_wezterm_config.lua" ls-fonts --text test | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "WezTerm configuration parse failed" }

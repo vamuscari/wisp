@@ -49,6 +49,7 @@ local function fixture(result, mux_overrides)
     end
   )
   local wezterm = helper.fake_wezterm {
+    target_triple = mux_overrides.target_triple,
     mux = {
       get_workspace_names = mux_overrides.get_workspace_names or function()
         return { "wisp:Repos/api" }
@@ -187,6 +188,108 @@ helper.test("project picker launches wisp with a v4 host context", function()
   helper.assert_equal(test.window.performed[2].action.kind, "SwitchToWorkspace", "project action")
   helper.assert_equal(test.window.performed[2].pane, test.pane, "project original pane")
   helper.assert_equal(test.window.performed[2].action.value.name, "wisp:Repos/api", "project workspace")
+end)
+
+helper.test("Windows host context derives project-relative details across case and separators", function()
+  local windows_project = {
+    id = "api",
+    path = "C:\\Users\\Test\\Repos\\Api\\",
+    group = "Repos",
+    name = "api",
+    display_name = "API",
+  }
+  local active_pane = {
+    get_current_working_dir = function()
+      return { scheme = "file", file_path = "/c:/users/TEST/Repos/API/src\\Handlers/" }
+    end,
+    get_foreground_process_name = function()
+      return "C:\\Program Files\\Neovim\\bin\\nvim.exe"
+    end,
+    get_title = function()
+      return "nvim"
+    end,
+  }
+  local active_tab = {
+    active_pane = function()
+      return active_pane
+    end,
+    get_title = function()
+      return "editor"
+    end,
+    tab_id = function()
+      return 17
+    end,
+  }
+  local project_window = {
+    get_workspace = function()
+      return "wisp:Repos/api"
+    end,
+    tabs_with_info = function()
+      return { { index = 0, is_active = true, tab = active_tab } }
+    end,
+  }
+  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+    target_triple = "x86_64-pc-windows-msvc",
+    projects_result = { protocol_version = 4, projects = { windows_project } },
+    all_windows = function()
+      return { project_window }
+    end,
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(test.annotations().projects.api.items[1].detail, "src\\Handlers", "project-relative cwd")
+end)
+
+helper.test("Windows host context derives project-relative details from UNC file URLs", function()
+  local windows_project = {
+    id = "api",
+    path = "\\\\SERVER\\Share\\",
+    group = "Repos",
+    name = "api",
+    display_name = "API",
+  }
+  local active_pane = {
+    get_current_working_dir = function()
+      return { scheme = "file", host = "server", file_path = "/share/src/" }
+    end,
+    get_foreground_process_name = function()
+      return "C:\\Windows\\System32\\cmd.exe"
+    end,
+    get_title = function()
+      return "server"
+    end,
+  }
+  local active_tab = {
+    active_pane = function()
+      return active_pane
+    end,
+    get_title = function()
+      return "server"
+    end,
+    tab_id = function()
+      return 18
+    end,
+  }
+  local project_window = {
+    get_workspace = function()
+      return "wisp:Repos/api"
+    end,
+    tabs_with_info = function()
+      return { { index = 0, is_active = true, tab = active_tab } }
+    end,
+  }
+  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+    target_triple = "x86_64-pc-windows-msvc",
+    projects_result = { protocol_version = 4, projects = { windows_project } },
+    all_windows = function()
+      return { project_window }
+    end,
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(test.annotations().projects.api.items[1].detail, "src", "UNC project-relative cwd")
 end)
 
 helper.test("project picker forwards the active Neovim file from an unmanaged workspace", function()

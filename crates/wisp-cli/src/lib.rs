@@ -60,6 +60,8 @@ enum WispCommand {
         command: ConfigCommand,
     },
     Deploy {
+        #[arg(long)]
+        replace_incompatible: bool,
         #[command(subcommand)]
         command: Option<DeployCommand>,
     },
@@ -170,6 +172,8 @@ pub enum CliError {
     MissingConfigDirectory,
     #[error("could not determine the platform cache directory")]
     MissingCacheDirectory,
+    #[error("--replace-incompatible can only be used with wisp deploy")]
+    InvalidDeployReplacement,
     #[error("failed to read {path}: {source}")]
     Read { path: PathBuf, source: io::Error },
     #[error("invalid configuration in {path}: {source}")]
@@ -290,19 +294,32 @@ fn run_noninteractive(
             println!("configuration is valid: {}", path.display());
             Ok(())
         }
-        WispCommand::Deploy { command: None } => deploy::deploy().map(|_| ()).map_err(Into::into),
         WispCommand::Deploy {
+            replace_incompatible,
+            command: None,
+        } => deploy::deploy(replace_incompatible)
+            .map(|_| ())
+            .map_err(Into::into),
+        WispCommand::Deploy {
+            replace_incompatible: false,
             command: Some(DeployCommand::Verify),
         } => deploy::verify().map_err(Into::into),
         WispCommand::Deploy {
+            replace_incompatible: false,
             command: Some(DeployCommand::Status { json }),
         } => deploy::status(json).map_err(Into::into),
         WispCommand::Deploy {
+            replace_incompatible: false,
             command: Some(DeployCommand::Prune),
         } => deploy::prune().map_err(Into::into),
         WispCommand::Deploy {
+            replace_incompatible: false,
             command: Some(DeployCommand::CheckBundle { root, bundle_id }),
         } => deploy::check_bundle(&root, &bundle_id).map_err(Into::into),
+        WispCommand::Deploy {
+            replace_incompatible: true,
+            command: Some(_),
+        } => Err(CliError::InvalidDeployReplacement),
         WispCommand::Open { selection_json } => open_selection(&selection_json),
         WispCommand::Opencode {
             command: OpenCodeCommand::Install,

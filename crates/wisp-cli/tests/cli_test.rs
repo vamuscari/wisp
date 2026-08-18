@@ -63,6 +63,8 @@ name = "Artifacts"
         let mut command = Command::new(env!("CARGO_BIN_EXE_wisp"));
         command
             .env_remove("WISP_CONFIG_FILE")
+            .env_remove("WISP_WEZTERM_CONFIG_DIR")
+            .env_remove("WEZTERM_CONFIG_FILE")
             .env("HOME", &self.home)
             .env(
                 "XDG_CONFIG_HOME",
@@ -307,7 +309,7 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
         serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["deployment_schema_version"], 4);
     assert_eq!(manifest["bundle_id"], bundle_id);
-    assert_eq!(manifest["package_version"], "0.5.0");
+    assert_eq!(manifest["package_version"], "0.6.0");
     assert_eq!(manifest["protocol_version"], 4);
     assert!(manifest["files"][executable].is_string());
     assert!(manifest["files"]["wezterm/status.lua"].is_string());
@@ -319,6 +321,77 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
     assert!(wezterm_loader.contains("wisp-deployment-v4"));
     let nvim_loader = fs::read_to_string(deployment_root.join("nvim/lua/wisp/init.lua")).unwrap();
     assert!(nvim_loader.contains("vim.system"));
+}
+
+#[test]
+fn deploy_replaces_an_incompatible_active_schema_only_when_explicitly_requested() {
+    let fixture = Fixture::new();
+    let deployment_root = fixture.home.join("wisp-data");
+    success(
+        fixture
+            .bare_command()
+            .env("WISP_DEPLOY_ROOT", &deployment_root)
+            .arg("deploy")
+            .output()
+            .unwrap(),
+    );
+    fs::write(
+        deployment_root.join("active.json"),
+        r#"{"deployment_schema_version":3,"future_active_shape":true}"#,
+    )
+    .unwrap();
+
+    let output = fixture
+        .bare_command()
+        .env("WISP_DEPLOY_ROOT", &deployment_root)
+        .arg("deploy")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--replace-incompatible"));
+
+    success(
+        fixture
+            .bare_command()
+            .env("WISP_DEPLOY_ROOT", &deployment_root)
+            .args(["deploy", "--replace-incompatible"])
+            .output()
+            .unwrap(),
+    );
+    let active: serde_json::Value =
+        serde_json::from_slice(&fs::read(deployment_root.join("active.json")).unwrap()).unwrap();
+    assert_eq!(active["deployment_schema_version"], 4);
+    assert!(active["current_bundle_id"].is_string());
+    assert!(active["previous_bundle_id"].is_null());
+}
+
+#[test]
+fn deploy_replacement_does_not_discard_invalid_current_schema_state() {
+    let fixture = Fixture::new();
+    let deployment_root = fixture.home.join("wisp-data");
+    success(
+        fixture
+            .bare_command()
+            .env("WISP_DEPLOY_ROOT", &deployment_root)
+            .arg("deploy")
+            .output()
+            .unwrap(),
+    );
+    fs::write(
+        deployment_root.join("active.json"),
+        r#"{"deployment_schema_version":4,"future_active_shape":true}"#,
+    )
+    .unwrap();
+
+    let output = fixture
+        .bare_command()
+        .env("WISP_DEPLOY_ROOT", &deployment_root)
+        .args(["deploy", "--replace-incompatible"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("future_active_shape"));
 }
 
 #[test]
@@ -428,6 +501,67 @@ fn deploy_prune_keeps_the_current_bundle() {
 
     assert!(deployment_root.join("deployments").join(current).is_dir());
     assert!(!deployment_root.join("deployments").join(stale).exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn deploy_prune_retains_a_stale_bundle_while_windows_has_a_file_locked() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let fixture = Fixture::new();
+    let deployment_root = fixture.home.join("wisp-data");
+    success(
+        fixture
+            .bare_command()
+            .env("WISP_DEPLOY_ROOT", &deployment_root)
+            .arg("deploy")
+            .output()
+            .unwrap(),
+    );
+    let stale = "b".repeat(64);
+    let stale_bundle = deployment_root.join("deployments").join(&stale);
+    fs::create_dir_all(stale_bundle.join("bin")).unwrap();
+    let executable = stale_bundle.join("bin/wisp.exe");
+    fs::write(&executable, b"locked").unwrap();
+    let locked = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&executable)
+        .unwrap();
+
+    let output = success(
+        fixture
+            .bare_command()
+            .env("WISP_DEPLOY_ROOT", &deployment_root)
+            .args(["deploy", "prune"])
+            .output()
+            .unwrap(),
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("retained 1 in-use"));
+    assert!(
+        stale_bundle.exists()
+            || deployment_root
+                .join("deployments")
+                .join(format!(".prune-{stale}"))
+                .exists()
+    );
+
+    drop(locked);
+    success(
+        fixture
+            .bare_command()
+            .env("WISP_DEPLOY_ROOT", &deployment_root)
+            .args(["deploy", "prune"])
+            .output()
+            .unwrap(),
+    );
+    assert!(!stale_bundle.exists());
+    assert!(
+        !deployment_root
+            .join("deployments")
+            .join(format!(".prune-{stale}"))
+            .exists()
+    );
 }
 
 #[test]

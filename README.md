@@ -52,6 +52,17 @@ From a local checkout:
 cargo run --release --locked -p wisp-cli -- deploy
 ```
 
+Deployment schemas are strict and are never migrated. If an installed Wisp
+rejects an older `active.json`, explicitly discard only that incompatible
+pointer while deploying the new bundle:
+
+```sh
+wisp deploy --replace-incompatible
+```
+
+The replacement starts a new deployment history with no previous bundle. It
+does not bypass malformed state that already claims the current schema.
+
 `wisp deploy` copies the running executable, `wezterm/`, `nvim/`, and the
 OpenCode plugin into one content-addressed deployment and atomically switches
 `active.json`. Host
@@ -65,9 +76,11 @@ wisp deploy verify
 wisp deploy prune
 ```
 
-Pruning retains the active and previous bundles. Set `WISP_DEPLOY_ROOT` to
-override the platform data directory and `WISP_WEZTERM_CONFIG_DIR` to override
-the WezTerm configuration directory.
+Pruning retains the active and previous bundles. On Windows, stale bundles
+locked by running processes are retained and retried by a later prune instead
+of failing the whole operation. Set `WISP_DEPLOY_ROOT` to override the platform
+data directory and `WISP_WEZTERM_CONFIG_DIR` to override the WezTerm
+configuration directory.
 
 ## Configuration
 
@@ -257,8 +270,13 @@ visible until that session starts running or retrying again.
 
 ## WezTerm
 
-`wisp deploy` installs the stable WezTerm bootstrap as
-`wisp/init.lua` under `wezterm.config_dir`.
+`wisp deploy` installs the stable WezTerm bootstrap as `wisp/init.lua` beside
+the active WezTerm configuration. Resolution prefers
+`WISP_WEZTERM_CONFIG_DIR`, then the parent of `WEZTERM_CONFIG_FILE`, an existing
+`$HOME/.wezterm.lua`, `$XDG_CONFIG_HOME/wezterm` when set, an existing
+`$HOME/.config/wezterm/wezterm.lua`, and finally `$HOME` for the recommended
+`.wezterm.lua` layout. Portable mode and `--config-file` launches should set
+`WISP_WEZTERM_CONFIG_DIR` explicitly.
 
 ```lua
 local wezterm = require "wezterm"
@@ -354,13 +372,14 @@ wisp.split_pane_action("Right", false)
 ```
 
 Project workspaces and project-aware tabs/splits set `WISP_PROJECT_DIR` and
-`WISP_PROJECT_NAME`. File selections launch `wisp open` as the initial process
-in a new workspace or a new tab in an existing workspace; the adapter never
-executes opener argv itself. Window selections activate the exact tab captured
-when the picker launched. Host-only workspace selections use WezTerm's
-existing-workspace API, so a stale selection cannot recreate a closed
-workspace. Closing a project or host-only workspace terminates all panes in the
-selected workspace through `wezterm cli kill-pane`.
+`WISP_PROJECT_NAME`. Tabs and splits preserve pane directories after converting
+WezTerm file URLs to native drive or UNC paths on Windows. File selections
+launch `wisp open` as the initial process in a new workspace or a new tab in an
+existing workspace; the adapter never executes opener argv itself. Window
+selections activate the exact tab captured when the picker launched. Host-only
+workspace selections use WezTerm's existing-workspace API, so a stale selection
+cannot recreate a closed workspace. Closing a project or host-only workspace
+terminates all panes in the selected workspace through `wezterm cli kill-pane`.
 
 ## OpenCode
 

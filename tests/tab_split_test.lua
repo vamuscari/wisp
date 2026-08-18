@@ -10,8 +10,9 @@ local project = {
   display_name = "api",
 }
 
-local function configured(projects)
+local function configured(projects, target_triple)
   local wezterm = helper.fake_wezterm {
+    target_triple = target_triple,
     run_child_process = function()
       return true, "PROJECTS", ""
     end,
@@ -45,6 +46,48 @@ helper.test("project-aware tabs and splits preserve cwd and metadata", function(
   helper.assert_equal(split.value.direction, "Right", "split direction")
   helper.assert_equal(split.value.top_level, true, "split top-level flag")
   helper.assert_equal(split.value.command.cwd, "/Users/test/Repos/api/src", "split cwd")
+end)
+
+helper.test("Windows project-aware spawns convert drive file URLs to native cwd paths", function()
+  local windows_project = {
+    id = "api",
+    path = "C:\\Users\\Test\\Repos\\Api",
+    group = "Repos",
+    name = "api",
+    display_name = "api",
+  }
+  local wisp = configured({ windows_project }, "x86_64-pc-windows-msvc")
+  local window = helper.fake_window "wisp:Repos/api"
+  local pane = helper.fake_pane {
+    cwd = { scheme = "file", host = "desktop", file_path = "/C:/Users/Test/Repos/Api/src/" },
+    domain = "local",
+  }
+
+  helper.run_callback(wisp.new_tab_action(), window, pane)
+  helper.run_callback(wisp.split_pane_action("Right", true), window, pane)
+
+  helper.assert_equal(window.performed[1].action.value.cwd, "C:\\Users\\Test\\Repos\\Api\\src", "new tab cwd")
+  helper.assert_equal(window.performed[2].action.value.command.cwd, "C:\\Users\\Test\\Repos\\Api\\src", "split cwd")
+end)
+
+helper.test("Windows project-aware spawns convert UNC file URLs to native cwd paths", function()
+  local windows_project = {
+    id = "api",
+    path = "\\\\Server\\Share\\Api",
+    group = "Repos",
+    name = "api",
+    display_name = "api",
+  }
+  local wisp = configured({ windows_project }, "x86_64-pc-windows-msvc")
+  local window = helper.fake_window "wisp:Repos/api"
+  local pane = helper.fake_pane {
+    cwd = { scheme = "file", host = "Server", file_path = "/Share/Api/src/" },
+    domain = "local",
+  }
+
+  helper.run_callback(wisp.new_tab_action(), window, pane)
+
+  helper.assert_equal(window.performed[1].action.value.cwd, "\\\\Server\\Share\\Api\\src", "UNC cwd")
 end)
 
 helper.test("project-aware spawns use the mux window workspace when client state is stale", function()

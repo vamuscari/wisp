@@ -14,6 +14,51 @@ function Workspace:workspace_for(project)
   return self.options:workspace_for(project)
 end
 
+function Workspace:normalize_path(path)
+  if type(path) ~= "string" then
+    return nil, nil
+  end
+  if not (type(self.wezterm.target_triple) == "string" and self.wezterm.target_triple:match "windows") then
+    local normalized = path:gsub("[/\\]+$", "")
+    return normalized, normalized
+  end
+
+  local normalized = path:gsub("/", "\\")
+  local unc = normalized:sub(1, 2) == "\\\\"
+  if normalized:match "^\\%a:" then
+    normalized = normalized:sub(2)
+    unc = false
+  end
+  if unc then
+    normalized = "\\\\" .. normalized:sub(3):gsub("\\+", "\\")
+  else
+    normalized = normalized:gsub("\\+", "\\")
+  end
+  if not normalized:match "^%a:\\$" and not normalized:match "^\\\\[^\\]+\\[^\\]+\\$" then
+    normalized = normalized:gsub("\\+$", "")
+  end
+  local identity = normalized:gsub("[A-Z]", function(character)
+    return string.char(character:byte() + 32)
+  end)
+  return normalized, identity
+end
+
+function Workspace:path_from_file_url(url)
+  if not url or url.scheme ~= "file" or type(url.file_path) ~= "string" then
+    return nil
+  end
+  if not (type(self.wezterm.target_triple) == "string" and self.wezterm.target_triple:match "windows") then
+    return url.file_path
+  end
+
+  local path = url.file_path
+  local drive_path = path:match "^[/\\]%a:[/\\]"
+  if not drive_path and type(url.host) == "string" and url.host ~= "" then
+    path = "\\\\" .. url.host .. "\\" .. path:gsub("^[/\\]+", "")
+  end
+  return self:normalize_path(path)
+end
+
 function Workspace:spawn_command(project, args)
   local command = {
     cwd = project.path,
@@ -248,10 +293,10 @@ function Workspace:current_spawn_command(window, pane)
   end
 
   local command = project and self:spawn_command(project) or { domain = "CurrentPaneDomain" }
-  local cwd = pane:get_current_working_dir()
+  local cwd = self:path_from_file_url(pane:get_current_working_dir())
   local same_domain = not project or command.domain.DomainName == pane:get_domain_name()
-  if same_domain and cwd and cwd.scheme == "file" then
-    command.cwd = cwd.file_path
+  if same_domain and cwd then
+    command.cwd = cwd
   end
   return command
 end

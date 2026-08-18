@@ -70,6 +70,23 @@ jobs:
           else
             tar -C package -czf "dist/$package.tar.gz" "$package"
           fi
+      - name: Smoke test Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $package = "wisp-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path smoke | Out-Null
+          7z x "dist/$package.zip" -osmoke | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "release archive extraction failed" }
+          $binary = Join-Path $PWD "smoke/$package/wisp.exe"
+          & $binary --version
+          if ($LASTEXITCODE -ne 0) { throw "packaged wisp.exe failed" }
+          $env:WISP_DEPLOY_ROOT = Join-Path $env:RUNNER_TEMP "wisp-release-smoke"
+          $env:WISP_WEZTERM_CONFIG_DIR = Join-Path $env:RUNNER_TEMP "wezterm-release-smoke"
+          & $binary deploy
+          if ($LASTEXITCODE -ne 0) { throw "packaged wisp.exe deploy failed" }
+          & $binary deploy verify
+          if ($LASTEXITCODE -ne 0) { throw "packaged wisp.exe deploy verify failed" }
       - uses: actions/upload-artifact@v4
         with:
           name: wisp-${{ matrix.target }}
