@@ -19,8 +19,10 @@ const WEZTERM_ADAPTER: &[u8] = include_bytes!("../../../wezterm/init.lua");
 const WEZTERM_OPTIONS: &[u8] = include_bytes!("../../../wezterm/options.lua");
 const WEZTERM_CLIENT: &[u8] = include_bytes!("../../../wezterm/client.lua");
 const WEZTERM_WORKSPACE: &[u8] = include_bytes!("../../../wezterm/workspace.lua");
+const WEZTERM_POPUP: &[u8] = include_bytes!("../../../wezterm/popup.lua");
 const WEZTERM_PICKER: &[u8] = include_bytes!("../../../wezterm/picker.lua");
 const WEZTERM_STATUS: &[u8] = include_bytes!("../../../wezterm/status.lua");
+const WEZTERM_STATUS_ITEMS: &[u8] = include_bytes!("../../../wezterm/status_items.lua");
 const NVIM_ADAPTER: &[u8] = include_bytes!("../../../nvim/lua/wisp/init.lua");
 const NVIM_HELP: &[u8] = include_bytes!("../../../nvim/doc/wisp.txt");
 const OPENCODE_PLUGIN: &[u8] = include_bytes!("../../../opencode/wisp.js");
@@ -120,8 +122,10 @@ pub fn deploy(replace_incompatible: bool) -> Result<PathBuf, DeployError> {
         ("wezterm/options.lua", WEZTERM_OPTIONS),
         ("wezterm/client.lua", WEZTERM_CLIENT),
         ("wezterm/workspace.lua", WEZTERM_WORKSPACE),
+        ("wezterm/popup.lua", WEZTERM_POPUP),
         ("wezterm/picker.lua", WEZTERM_PICKER),
         ("wezterm/status.lua", WEZTERM_STATUS),
+        ("wezterm/status_items.lua", WEZTERM_STATUS_ITEMS),
         ("nvim/lua/wisp/init.lua", NVIM_ADAPTER),
         ("nvim/doc/wisp.txt", NVIM_HELP),
         ("opencode/wisp.js", OPENCODE_PLUGIN),
@@ -453,8 +457,10 @@ fn verify_bundle(path: &Path, expected_id: &str) -> Result<Manifest, DeployError
         "wezterm/options.lua",
         "wezterm/client.lua",
         "wezterm/workspace.lua",
+        "wezterm/popup.lua",
         "wezterm/picker.lua",
         "wezterm/status.lua",
+        "wezterm/status_items.lua",
         "nvim/lua/wisp/init.lua",
         "nvim/doc/wisp.txt",
         "opencode/wisp.js",

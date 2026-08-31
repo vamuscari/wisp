@@ -27,6 +27,15 @@ local function argument_after(args, flag)
   end
 end
 
+local function has_argument(args, expected)
+  for _, value in ipairs(args) do
+    if value == expected then
+      return true
+    end
+  end
+  return false
+end
+
 local function fixture(result, mux_overrides)
   mux_overrides = mux_overrides or {}
   local encoded_annotations
@@ -39,6 +48,11 @@ local function fixture(result, mux_overrides)
     function(command, tab, pane)
       picker_tab = tab
       picker_pane = pane
+      if mux_overrides.picker_activate_error then
+        function tab:activate()
+          error(mux_overrides.picker_activate_error)
+        end
+      end
       if mux_overrides.skip_result then
         return
       end
@@ -49,6 +63,8 @@ local function fixture(result, mux_overrides)
     end
   )
   local wezterm = helper.fake_wezterm {
+    call_after = mux_overrides.call_after,
+    executable_dir = mux_overrides.executable_dir,
     target_triple = mux_overrides.target_triple,
     mux = {
       get_workspace_names = mux_overrides.get_workspace_names or function()
@@ -82,7 +98,7 @@ local function fixture(result, mux_overrides)
     end,
     json_parse = function(value)
       if value == "PROJECTS" then
-        return mux_overrides.projects_result or { protocol_version = 4, projects = projects }
+        return mux_overrides.projects_result or { protocol_version = 6, projects = projects }
       end
       if value == "RESULT" then
         return result
@@ -94,6 +110,8 @@ local function fixture(result, mux_overrides)
   wisp.apply_to_config({}, {
     config_file = "/Users/test/.config/wisp/config.toml",
     picker_domain = { DomainName = "unix" },
+    single_pane_behavior = mux_overrides.single_pane_behavior,
+    window_preview = mux_overrides.window_preview,
   })
   local window = helper.fake_window(mux_overrides.active_workspace or "wisp:Repos/api", picker_mux)
   local pane = helper.fake_pane(mux_overrides.pane)
@@ -120,7 +138,7 @@ local function fixture(result, mux_overrides)
 end
 
 helper.test("project query rejects unsupported versions before reading the payload", function()
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
     projects_result = { protocol_version = 1, projects = "future schema" },
   })
 
@@ -134,8 +152,8 @@ helper.test("project query rejects unsupported versions before reading the paylo
 end)
 
 helper.test("project query rejects unknown envelope fields", function()
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
-    projects_result = { protocol_version = 4, projects = projects, future_field = true },
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
+    projects_result = { protocol_version = 6, projects = projects, future_field = true },
   })
 
   helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
@@ -145,8 +163,8 @@ helper.test("project query rejects unknown envelope fields", function()
 end)
 
 helper.test("project query requires a JSON array", function()
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
-    projects_result = { protocol_version = 4, projects = { api = projects[1] } },
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
+    projects_result = { protocol_version = 6, projects = { api = projects[1] } },
   })
 
   helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
@@ -155,9 +173,9 @@ helper.test("project query requires a JSON array", function()
   assert(test.wezterm.logs[#test.wezterm.logs].message:match "project list", "object project list message")
 end)
 
-helper.test("project picker launches wisp with a v4 host context", function()
+helper.test("project picker launches wisp with a v6 host context", function()
   local test = fixture {
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = { kind = "project", project = projects[1] },
   }
@@ -175,11 +193,11 @@ helper.test("project picker launches wisp with a v4 host context", function()
   helper.assert_equal(argument_after(spawn.args, "--result-file") ~= nil, true, "result argument")
   helper.assert_equal(argument_after(spawn.args, "--host-context-file") ~= nil, true, "host context argument")
   helper.assert_equal(argument_after(spawn.args, "--initial-view"), "projects", "initial view")
-  helper.assert_equal(test.annotations().protocol_version, 4, "host context protocol")
+  helper.assert_equal(test.annotations().protocol_version, 6, "host context protocol")
   helper.assert_table_equal(test.annotations().projects.api.labels, { "current", "open" }, "current labels")
-  helper.assert_equal(test.annotations().projects.api.items, nil, "empty current items are omitted")
+  helper.assert_equal(test.annotations().projects.api.windows, nil, "empty current windows are omitted")
   helper.assert_table_equal(test.annotations().projects.artifacts.labels, { "new" }, "new labels")
-  helper.assert_equal(test.annotations().projects.artifacts.items, nil, "empty new items are omitted")
+  helper.assert_equal(test.annotations().projects.artifacts.windows, nil, "empty new windows are omitted")
   helper.assert_equal(next(test.annotations().workspaces), nil, "empty host workspace map")
   helper.assert_equal(test.picker_tab().activated, true, "picker tab activation")
 
@@ -199,6 +217,9 @@ helper.test("Windows host context derives project-relative details across case a
     display_name = "API",
   }
   local active_pane = {
+    pane_id = function()
+      return 41
+    end,
     get_current_working_dir = function()
       return { scheme = "file", file_path = "/c:/users/TEST/Repos/API/src\\Handlers/" }
     end,
@@ -228,9 +249,9 @@ helper.test("Windows host context derives project-relative details across case a
       return { { index = 0, is_active = true, tab = active_tab } }
     end,
   }
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
     target_triple = "x86_64-pc-windows-msvc",
-    projects_result = { protocol_version = 4, projects = { windows_project } },
+    projects_result = { protocol_version = 6, projects = { windows_project } },
     all_windows = function()
       return { project_window }
     end,
@@ -238,7 +259,7 @@ helper.test("Windows host context derives project-relative details across case a
 
   helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
 
-  helper.assert_equal(test.annotations().projects.api.items[1].detail, "src\\Handlers", "project-relative cwd")
+  helper.assert_equal(test.annotations().projects.api.windows[1].detail, "src\\Handlers", "project-relative cwd")
 end)
 
 helper.test("Windows host context derives project-relative details from UNC file URLs", function()
@@ -250,6 +271,9 @@ helper.test("Windows host context derives project-relative details from UNC file
     display_name = "API",
   }
   local active_pane = {
+    pane_id = function()
+      return 42
+    end,
     get_current_working_dir = function()
       return { scheme = "file", host = "server", file_path = "/share/src/" }
     end,
@@ -279,9 +303,9 @@ helper.test("Windows host context derives project-relative details from UNC file
       return { { index = 0, is_active = true, tab = active_tab } }
     end,
   }
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
     target_triple = "x86_64-pc-windows-msvc",
-    projects_result = { protocol_version = 4, projects = { windows_project } },
+    projects_result = { protocol_version = 6, projects = { windows_project } },
     all_windows = function()
       return { project_window }
     end,
@@ -289,11 +313,11 @@ helper.test("Windows host context derives project-relative details from UNC file
 
   helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
 
-  helper.assert_equal(test.annotations().projects.api.items[1].detail, "src", "UNC project-relative cwd")
+  helper.assert_equal(test.annotations().projects.api.windows[1].detail, "src", "UNC project-relative cwd")
 end)
 
 helper.test("project picker forwards the active Neovim file from an unmanaged workspace", function()
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
     active_workspace = "default",
     window_workspace = "default",
     get_workspace_names = function()
@@ -317,7 +341,7 @@ helper.test("project picker forwards the active Neovim file from an unmanaged wo
 end)
 
 helper.test("project picker ignores a stale Neovim file when a shell is active", function()
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
     pane = {
       process_name = "/bin/zsh",
       user_vars = { WISP_NVIM_FILE = "/Users/test/Repos/api/src/stale.rs" },
@@ -330,7 +354,7 @@ helper.test("project picker ignores a stale Neovim file when a shell is active",
 end)
 
 helper.test("project picker accepts Neovim pane context when mux process inspection is unavailable", function()
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
     pane = {
       user_vars = { WISP_NVIM_FILE = "/Users/test/Repos/api/src/mux.rs" },
     },
@@ -346,7 +370,7 @@ helper.test("project picker accepts Neovim pane context when mux process inspect
 end)
 
 helper.test("host context uses the displayed mux window workspace when client state is stale", function()
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
     active_workspace = "default",
     window_workspace = "wisp:Repos/api",
   })
@@ -357,7 +381,7 @@ helper.test("host context uses the displayed mux window workspace when client st
 end)
 
 helper.test("host context describes the selected project's WezTerm tabs", function()
-  local function pane(title, cwd, process)
+  local function pane(id, title, cwd, process)
     return {
       get_current_working_dir = function()
         return { scheme = "file", file_path = cwd }
@@ -368,16 +392,26 @@ helper.test("host context describes the selected project's WezTerm tabs", functi
       get_title = function()
         return title
       end,
+      pane_id = function()
+        return id
+      end,
     }
   end
 
-  local function tab(id, title, active_pane)
+  local function tab(id, title, panes, active_index)
     return {
       active_pane = function()
-        return active_pane
+        return panes[active_index]
       end,
       get_title = function()
         return title
+      end,
+      panes_with_info = function()
+        local items = {}
+        for index, item in ipairs(panes) do
+          table.insert(items, { index = index - 1, is_active = index == active_index, pane = item })
+        end
+        return items
       end,
       tab_id = function()
         return id
@@ -385,8 +419,11 @@ helper.test("host context describes the selected project's WezTerm tabs", functi
     }
   end
 
-  local editor = tab(17, "editor", pane("nvim", "/Users/test/Repos/api/src", "/opt/bin/nvim"))
-  local server = tab(18, "", pane("server", "/Users/test/Repos/api", "/usr/bin/node"))
+  local editor = tab(17, "editor", {
+    pane(41, "nvim", "/Users/test/Repos/api/src", "/opt/bin/nvim"),
+    pane(44, "tests", "/Users/test/Repos/api/tests", "/bin/zsh"),
+  }, 1)
+  local server = tab(18, "", { pane(42, "server", "/Users/test/Repos/api", "/usr/bin/node") }, 1)
   local project_window = {
     get_workspace = function()
       return "wisp:Repos/api"
@@ -398,7 +435,8 @@ helper.test("host context describes the selected project's WezTerm tabs", functi
       }
     end,
   }
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
+    window_preview = true,
     all_windows = function()
       return { project_window }
     end,
@@ -406,17 +444,35 @@ helper.test("host context describes the selected project's WezTerm tabs", functi
 
   helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
 
-  local items = test.annotations().projects.api.items
-  helper.assert_equal(#items, 2, "host item count")
-  helper.assert_equal(items[1].id, "17", "first tab ID")
-  helper.assert_equal(items[1].label, "editor", "explicit tab title")
-  helper.assert_equal(items[1].detail, "src", "project-relative cwd")
-  helper.assert_equal(items[1].active, true, "active tab")
-  helper.assert_equal(items[2].id, "18", "second tab ID")
-  helper.assert_equal(items[2].label, "server", "pane title fallback")
-  helper.assert_equal(items[2].detail, ".", "project root cwd")
-  helper.assert_equal(items[2].active, false, "inactive tab")
-  helper.assert_equal(test.annotations().projects.artifacts.items, nil, "closed project items are omitted")
+  local windows = test.annotations().projects.api.windows
+  helper.assert_equal(#windows, 2, "host window count")
+  helper.assert_equal(windows[1].id, "17", "first tab ID")
+  helper.assert_equal(windows[1].label, "editor", "explicit tab title")
+  helper.assert_equal(windows[1].detail, "src", "project-relative cwd")
+  helper.assert_equal(windows[1].active, true, "active tab")
+  helper.assert_equal(#windows[1].panes, 2, "first tab pane count")
+  helper.assert_equal(windows[1].panes[1].id, "41", "active pane ID")
+  helper.assert_equal(windows[1].panes[1].label, "nvim", "active pane label")
+  helper.assert_equal(windows[1].panes[1].detail, "src", "active pane detail")
+  helper.assert_equal(windows[1].panes[1].active, true, "active pane state")
+  helper.assert_equal(windows[1].panes[2].id, "44", "split pane ID")
+  helper.assert_equal(windows[1].panes[2].detail, "tests", "split pane detail")
+  helper.assert_equal(windows[2].id, "18", "second tab ID")
+  helper.assert_equal(windows[2].label, "server", "pane title fallback")
+  helper.assert_equal(windows[2].detail, ".", "project root cwd")
+  helper.assert_equal(windows[2].panes[1].id, "42", "second tab pane ID")
+  helper.assert_equal(windows[2].active, false, "inactive tab")
+  helper.assert_equal(test.annotations().projects.artifacts.windows, nil, "closed project windows are omitted")
+  helper.assert_equal(
+    argument_after(test.picker_mux.spawned[1].args, "--wezterm-executable"),
+    "/Applications/WezTerm.app/Contents/MacOS/wezterm",
+    "WezTerm executable argument"
+  )
+  helper.assert_equal(
+    has_argument(test.picker_mux.spawned[1].args, "--window-preview"),
+    true,
+    "always-visible preview argument"
+  )
 end)
 
 helper.test("host context includes only live workspaces not owned by projects", function()
@@ -429,6 +485,9 @@ helper.test("host context includes only live workspaces not owned by projects", 
     end,
     get_title = function()
       return "shell"
+    end,
+    pane_id = function()
+      return 43
     end,
   }
   local active_tab = {
@@ -450,7 +509,7 @@ helper.test("host context includes only live workspaces not owned by projects", 
       return { { index = 0, is_active = true, tab = active_tab } }
     end,
   }
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
     active_workspace = "default",
     window_workspace = "default",
     get_workspace_names = function()
@@ -468,24 +527,174 @@ helper.test("host context includes only live workspaces not owned by projects", 
   local workspace = test.annotations().workspaces.default
   assert(workspace, "live host workspace should be keyed by name")
   helper.assert_equal(workspace.current, true, "current host workspace")
-  helper.assert_equal(#workspace.items, 1, "host workspace item count")
-  helper.assert_equal(workspace.items[1].id, "29", "host workspace tab ID")
-  helper.assert_equal(workspace.items[1].label, "default-shell", "host workspace tab label")
-  helper.assert_equal(workspace.items[1].active, true, "active host workspace tab")
+  helper.assert_equal(#workspace.windows, 1, "host workspace window count")
+  helper.assert_equal(workspace.windows[1].id, "29", "host workspace tab ID")
+  helper.assert_equal(workspace.windows[1].label, "default-shell", "host workspace tab label")
+  helper.assert_equal(workspace.windows[1].panes[1].id, "43", "host workspace pane ID")
+  helper.assert_equal(workspace.windows[1].active, true, "active host workspace tab")
+  helper.assert_equal(
+    argument_after(test.picker_mux.spawned[1].args, "--wezterm-executable"),
+    "/Applications/WezTerm.app/Contents/MacOS/wezterm",
+    "on-demand preview executable"
+  )
+  helper.assert_equal(
+    has_argument(test.picker_mux.spawned[1].args, "--window-preview"),
+    false,
+    "on-demand preview starts hidden"
+  )
 end)
 
 helper.test("window picker requests the windows initial view", function()
-  local test = fixture { protocol_version = 4, status = "cancelled" }
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
+    single_pane_behavior = "activate",
+  })
 
   helper.run_callback(test.wisp.window_picker_action(), test.window, test.pane)
 
   local spawn = test.picker_mux.spawned[1]
   helper.assert_equal(argument_after(spawn.args, "--initial-view"), "windows", "window initial view")
   helper.assert_equal(argument_after(spawn.args, "--host-context-file") ~= nil, true, "host context argument")
+  helper.assert_equal(argument_after(spawn.args, "--single-pane-behavior"), "activate", "single-pane behavior")
+end)
+
+helper.test("directory status click opens the project picker in a popup split", function()
+  local split_calls = {}
+  local popup_pane = {
+    pane_id = function()
+      return 99
+    end,
+  }
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
+    pane = {
+      pane_id = 41,
+      split = function(command)
+        table.insert(split_calls, command)
+        local result_path = assert(argument_after(command.args, "--result-file"))
+        local file = assert(io.open(result_path, "wb"))
+        file:write "RESULT"
+        file:close()
+        return popup_pane
+      end,
+    },
+  })
+
+  local handled = test.wezterm.events["open-uri"](test.window, test.pane, "wisp://status/directory")
+
+  helper.assert_equal(handled, false, "status URI result")
+  helper.assert_equal(#split_calls, 1, "popup split count")
+  helper.assert_equal(split_calls[1].top_level, true, "popup top-level split")
+  helper.assert_equal(argument_after(split_calls[1].args, "--initial-view"), "projects", "popup initial view")
+  helper.assert_equal(#test.picker_mux.spawned, 0, "popup temporary tab count")
+  helper.assert_equal(#test.window.performed, 0, "popup pane action count")
+  helper.assert_table_equal(test.child_calls[2], {
+    "/Applications/WezTerm.app/Contents/MacOS/wezterm",
+    "cli",
+    "kill-pane",
+    "--pane-id",
+    "99",
+  }, "exact popup close command")
+end)
+
+helper.test("popup result waits for exact pane closure to succeed", function()
+  local kill_attempts = 0
+  local popup_pane = {
+    pane_id = function()
+      return 99
+    end,
+  }
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
+    get_pane = function(pane_id)
+      if pane_id == 99 then
+        return popup_pane
+      end
+    end,
+    pane = {
+      pane_id = 41,
+      split = function(command)
+        local result_path = assert(argument_after(command.args, "--result-file"))
+        local file = assert(io.open(result_path, "wb"))
+        file:write "RESULT"
+        file:close()
+        return popup_pane
+      end,
+    },
+    run_child_process = function(args)
+      if args[2] ~= "cli" then
+        return true, "PROJECTS", ""
+      end
+      kill_attempts = kill_attempts + 1
+      if kill_attempts == 1 then
+        return false, "", "busy"
+      end
+      return true, "", ""
+    end,
+  })
+
+  test.wezterm.events["open-uri"](test.window, test.pane, "wisp://status/directory")
+
+  helper.assert_equal(kill_attempts, 2, "popup close retry count")
+  helper.assert_equal(#test.window.performed, 0, "cancelled popup host action count")
+end)
+
+helper.test("superseded popup discards its stale result", function()
+  local scheduled = {}
+  local popup_panes = {}
+  local result_paths = {}
+  local kill_fails = true
+  local next_pane_id = 90
+  local test = fixture({
+    protocol_version = 6,
+    status = "selected",
+    selection = { kind = "project", project = projects[1] },
+  }, {
+    call_after = function(_, callback)
+      table.insert(scheduled, callback)
+    end,
+    get_pane = function(pane_id)
+      return popup_panes[pane_id]
+    end,
+    pane = {
+      pane_id = 41,
+      split = function(command)
+        next_pane_id = next_pane_id + 1
+        local pane_id = next_pane_id
+        local popup_pane = {
+          pane_id = function()
+            return pane_id
+          end,
+        }
+        popup_panes[pane_id] = popup_pane
+        table.insert(result_paths, assert(argument_after(command.args, "--result-file")))
+        return popup_pane
+      end,
+    },
+    run_child_process = function(args)
+      if args[2] ~= "cli" then
+        return true, "PROJECTS", ""
+      end
+      if kill_fails then
+        return false, "", "busy"
+      end
+      popup_panes[tonumber(args[5])] = nil
+      return true, "", ""
+    end,
+  })
+
+  test.wezterm.events["open-uri"](test.window, test.pane, "wisp://status/directory")
+  test.wezterm.events["open-uri"](test.window, test.pane, "wisp://status/directory")
+  kill_fails = false
+  local stale_result = assert(io.open(result_paths[1], "wb"))
+  stale_result:write "RESULT"
+  stale_result:close()
+
+  scheduled[1]()
+
+  helper.assert_equal(#test.window.performed, 0, "superseded popup host action count")
+  helper.assert_equal(popup_panes[91], nil, "superseded popup pane cleanup")
 end)
 
 helper.test("cancelled picker closes its temporary tab without a host action", function()
-  local test = fixture { protocol_version = 4, status = "cancelled" }
+  local test = fixture { protocol_version = 6, status = "cancelled" }
 
   helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
 
@@ -493,9 +702,25 @@ helper.test("cancelled picker closes its temporary tab without a host action", f
   helper.assert_equal(test.window.performed[1].action.kind, "CloseCurrentTab", "cancel closes picker")
 end)
 
-helper.test("result projects require every protocol v4 field", function()
+helper.test("picker cleanup accepts a temporary tab that already exited", function()
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
+    picker_activate_error = "tab id 1 not found in mux",
+    get_tab = function()
+      return nil
+    end,
+  })
+
+  helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
+
+  helper.assert_equal(#test.window.performed, 0, "exited picker close action count")
+  for _, log in ipairs(test.wezterm.logs) do
+    assert(not log.message:match "could not close", "exited picker cleanup should not report a close failure")
+  end
+end)
+
+helper.test("result projects require every protocol v6 field", function()
   local test = fixture {
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = {
       kind = "project",
@@ -524,7 +749,7 @@ helper.test("result projects reject unknown protocol fields", function()
     future_field = true,
   }
   local test = fixture {
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = { kind = "project", project = project },
   }
@@ -537,7 +762,7 @@ end)
 
 helper.test("selections reject unknown protocol fields", function()
   local test = fixture {
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = { kind = "project", project = projects[1], future_field = true },
   }
@@ -550,7 +775,7 @@ end)
 
 helper.test("selections reject malformed opener fields", function()
   local test = fixture {
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = { kind = "project", project = projects[1], opener = "nvim" },
   }
@@ -564,7 +789,7 @@ end)
 helper.test("selected file delegates its resolved opener to wisp open in an existing workspace", function()
   local project_window = helper.fake_mux_window "wisp:Repos/api"
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = {
       kind = "file",
@@ -593,7 +818,7 @@ end)
 
 helper.test("wisp open becomes the initial process for a selected file in a new workspace", function()
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = {
       kind = "file",
@@ -626,7 +851,7 @@ end)
 helper.test("selected host workspace activates the exact existing workspace", function()
   local activated_workspace
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = { kind = "workspace", workspace = "default" },
   }, {
@@ -647,7 +872,7 @@ end)
 
 helper.test("stale host workspace selection does not recreate the workspace", function()
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = { kind = "workspace", workspace = "default" },
   }, {
@@ -663,7 +888,7 @@ helper.test("stale host workspace selection does not recreate the workspace", fu
   assert(test.wezterm.logs[#test.wezterm.logs].message:match "could not activate", "stale workspace error")
 end)
 
-helper.test("selected host workspace item activates its tab in the exact workspace", function()
+helper.test("selected host workspace pane activates in the exact window and workspace", function()
   local activated = false
   local activated_workspace
   local workspace_window = {
@@ -672,21 +897,29 @@ helper.test("selected host workspace item activates its tab in the exact workspa
     end,
   }
   local target_tab = {
+    tab_id = function()
+      return 29
+    end,
+  }
+  local target_pane = {
     activate = function()
       activated = true
+    end,
+    tab = function()
+      return target_tab
     end,
     window = function()
       return workspace_window
     end,
   }
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
-    selection = { kind = "workspace_item", workspace = "default", id = "29" },
+    selection = { kind = "workspace_pane", workspace = "default", window_id = "29", pane_id = "43" },
   }, {
-    get_tab = function(id)
-      helper.assert_equal(id, 29, "numeric host workspace tab ID")
-      return target_tab
+    get_pane = function(id)
+      helper.assert_equal(id, 43, "numeric host workspace pane ID")
+      return target_pane
     end,
     set_active_workspace = function(workspace)
       activated_workspace = workspace
@@ -695,16 +928,23 @@ helper.test("selected host workspace item activates its tab in the exact workspa
 
   helper.run_callback(test.wisp.window_picker_action(), test.window, test.pane)
 
-  helper.assert_equal(activated, true, "host workspace tab activation")
-  helper.assert_equal(activated_workspace, "default", "host workspace tab workspace")
-  helper.assert_equal(#test.window.performed, 1, "host workspace tab action count")
+  helper.assert_equal(activated, true, "host workspace pane activation")
+  helper.assert_equal(activated_workspace, "default", "host workspace pane workspace")
+  helper.assert_equal(#test.window.performed, 1, "host workspace pane action count")
 end)
 
-helper.test("host workspace items moved to another workspace are rejected", function()
+helper.test("host workspace panes moved to another workspace are rejected", function()
   local activated = false
-  local target_tab = {
+  local target_pane = {
     activate = function()
       activated = true
+    end,
+    tab = function()
+      return {
+        tab_id = function()
+          return 29
+        end,
+      }
     end,
     window = function()
       return {
@@ -715,23 +955,23 @@ helper.test("host workspace items moved to another workspace are rejected", func
     end,
   }
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
-    selection = { kind = "workspace_item", workspace = "default", id = "29" },
+    selection = { kind = "workspace_pane", workspace = "default", window_id = "29", pane_id = "43" },
   }, {
-    get_tab = function()
-      return target_tab
+    get_pane = function()
+      return target_pane
     end,
   })
 
   helper.run_callback(test.wisp.window_picker_action(), test.window, test.pane)
 
-  helper.assert_equal(activated, false, "moved host workspace tab activation")
-  helper.assert_equal(#test.window.performed, 1, "moved host workspace tab action count")
-  assert(test.wezterm.logs[#test.wezterm.logs].message:match "no longer belongs", "moved host workspace tab error")
+  helper.assert_equal(activated, false, "moved host workspace pane activation")
+  helper.assert_equal(#test.window.performed, 1, "moved host workspace pane action count")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "no longer belongs", "moved host workspace pane error")
 end)
 
-helper.test("selected host item activates its tab in the project workspace", function()
+helper.test("selected host pane activates in its captured project window", function()
   local activated = false
   local project_window = {
     get_workspace = function()
@@ -739,55 +979,70 @@ helper.test("selected host item activates its tab in the project workspace", fun
     end,
   }
   local target_tab = {
+    tab_id = function()
+      return 17
+    end,
+  }
+  local target_pane = {
     activate = function()
       activated = true
+    end,
+    tab = function()
+      return target_tab
     end,
     window = function()
       return project_window
     end,
   }
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
-    selection = { kind = "host_item", project = projects[1], id = "17" },
+    selection = { kind = "host_pane", project = projects[1], window_id = "17", pane_id = "42" },
   }, {
-    get_tab = function(id)
-      helper.assert_equal(id, 17, "numeric mux tab ID")
-      return target_tab
+    get_pane = function(id)
+      helper.assert_equal(id, 42, "numeric mux pane ID")
+      return target_pane
     end,
   })
 
   helper.run_callback(test.wisp.window_picker_action(), test.window, test.pane)
 
-  helper.assert_equal(activated, true, "target tab activation")
+  helper.assert_equal(activated, true, "target pane activation")
   helper.assert_equal(test.window.performed[2].action.kind, "SwitchToWorkspace", "workspace switch action")
   helper.assert_equal(test.window.performed[2].action.value.name, "wisp:Repos/api", "target workspace")
   helper.assert_equal(test.window.performed[2].pane, test.pane, "original pane")
 end)
 
-helper.test("stale host item IDs perform no workspace action", function()
+helper.test("stale host pane IDs perform no workspace action", function()
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
-    selection = { kind = "host_item", project = projects[1], id = "17" },
+    selection = { kind = "host_pane", project = projects[1], window_id = "17", pane_id = "42" },
   }, {
-    get_tab = function()
+    get_pane = function()
       return nil
     end,
   })
 
   helper.run_callback(test.wisp.window_picker_action(), test.window, test.pane)
 
-  helper.assert_equal(#test.window.performed, 1, "stale tab action count")
-  helper.assert_equal(test.wezterm.logs[#test.wezterm.logs].level, "error", "stale tab log level")
-  assert(test.wezterm.logs[#test.wezterm.logs].message:match "no longer exists", "stale tab error")
+  helper.assert_equal(#test.window.performed, 1, "stale pane action count")
+  helper.assert_equal(test.wezterm.logs[#test.wezterm.logs].level, "error", "stale pane log level")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "no longer exists", "stale pane error")
 end)
 
-helper.test("host items moved to another workspace are rejected", function()
+helper.test("host panes moved to another workspace are rejected", function()
   local activated = false
-  local target_tab = {
+  local target_pane = {
     activate = function()
       activated = true
+    end,
+    tab = function()
+      return {
+        tab_id = function()
+          return 17
+        end,
+      }
     end,
     window = function()
       return {
@@ -798,21 +1053,21 @@ helper.test("host items moved to another workspace are rejected", function()
     end,
   }
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
-    selection = { kind = "host_item", project = projects[1], id = "17" },
+    selection = { kind = "host_pane", project = projects[1], window_id = "17", pane_id = "42" },
   }, {
-    get_tab = function()
-      return target_tab
+    get_pane = function()
+      return target_pane
     end,
   })
 
   helper.run_callback(test.wisp.window_picker_action(), test.window, test.pane)
 
-  helper.assert_equal(activated, false, "moved tab activation")
-  helper.assert_equal(#test.window.performed, 1, "moved tab action count")
-  helper.assert_equal(test.wezterm.logs[#test.wezterm.logs].level, "error", "moved tab log level")
-  assert(test.wezterm.logs[#test.wezterm.logs].message:match "no longer belongs", "moved tab error")
+  helper.assert_equal(activated, false, "moved pane activation")
+  helper.assert_equal(#test.window.performed, 1, "moved pane action count")
+  helper.assert_equal(test.wezterm.logs[#test.wezterm.logs].level, "error", "moved pane log level")
+  assert(test.wezterm.logs[#test.wezterm.logs].message:match "no longer belongs", "moved pane error")
 end)
 
 helper.test("close project terminates every pane in only that workspace", function()
@@ -854,7 +1109,7 @@ helper.test("close project terminates every pane in only that workspace", functi
     end,
   }
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = { kind = "close_project", project = projects[1] },
   }, {
@@ -929,7 +1184,7 @@ helper.test("close host workspace terminates panes in only the exact workspace",
     end,
   }
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = { kind = "close_workspace", workspace = "default" },
   }, {
@@ -962,7 +1217,7 @@ end)
 
 helper.test("selected file without an opener reports an actionable error", function()
   local test = fixture {
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = {
       kind = "file",
@@ -989,7 +1244,7 @@ helper.test("invalid result protocol closes the picker and reports an error", fu
 end)
 
 helper.test("result envelopes reject unknown protocol fields", function()
-  local test = fixture { protocol_version = 4, status = "cancelled", future_field = true }
+  local test = fixture { protocol_version = 6, status = "cancelled", future_field = true }
 
   helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
 
@@ -999,7 +1254,7 @@ end)
 
 helper.test("result envelopes reject fields that do not match their status", function()
   local test = fixture {
-    protocol_version = 4,
+    protocol_version = 6,
     status = "cancelled",
     selection = { kind = "project", project = projects[1] },
   }
@@ -1011,7 +1266,7 @@ helper.test("result envelopes reject fields that do not match their status", fun
 end)
 
 helper.test("picker pane disappearance fails immediately without waiting for timeout", function()
-  local test = fixture({ protocol_version = 4, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 6, status = "cancelled" }, {
     get_pane = function()
       return nil
     end,
@@ -1027,7 +1282,7 @@ helper.test("picker pane disappearance fails immediately without waiting for tim
 end)
 
 helper.test("OpenCode picker starts in the sessions view", function()
-  local test = fixture { protocol_version = 4, status = "cancelled" }
+  local test = fixture { protocol_version = 6, status = "cancelled" }
 
   helper.run_callback(test.wisp.opencode_picker_action(), test.window, test.pane)
 
@@ -1050,7 +1305,7 @@ helper.test("OpenCode selection focuses an exact registered pane", function()
     end,
   }
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = {
       kind = "open_code_session",
@@ -1076,7 +1331,7 @@ end)
 helper.test("stale OpenCode host targets attach in a new project tab", function()
   local project_window = helper.fake_mux_window "wisp:Repos/api"
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = {
       kind = "open_code_session",
@@ -1133,7 +1388,7 @@ helper.test("OpenCode sessions spawned in new workspaces are remembered", functi
     end,
   }
   local test = fixture({
-    protocol_version = 4,
+    protocol_version = 6,
     status = "selected",
     selection = {
       kind = "open_code_session",

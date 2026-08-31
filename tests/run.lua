@@ -4,8 +4,10 @@ local tests = {
   "tests/options_test.lua",
   "tests/refresh_test.lua",
   "tests/process_adapter_test.lua",
+  "tests/popup_test.lua",
   "tests/workspace_action_test.lua",
   "tests/tab_split_test.lua",
+  "tests/wezterm_example_test.lua",
   "tests/nvim_adapter_test.lua",
 }
 

@@ -10,7 +10,7 @@ helper.test("adapter requires its deployed module directory", function()
   end
 
   local loaded, load_error = pcall(function()
-    return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v4")
+    return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v6")
   end)
 
   assert(not loaded, "adapter should reject a missing module directory")
@@ -44,4 +44,15 @@ helper.test("apply_to_config appends a configured picker binding", function()
   helper.assert_equal(config.keys[2].key, "f", "picker key")
   helper.assert_equal(config.keys[2].mods, "LEADER", "picker modifiers")
   helper.assert_equal(config.keys[2].action.kind, "Callback", "picker action")
+end)
+
+helper.test("popup actions accept only picker initial views", function()
+  local wisp = helper.load_wezterm_adapter(helper.fake_wezterm())
+
+  for _, view in ipairs { "projects", "windows", "sessions" } do
+    helper.assert_equal(wisp.popup_action(view).kind, "Callback", view .. " popup action")
+  end
+  local accepted, popup_error = pcall(wisp.popup_action, "files")
+  assert(not accepted, "unsupported popup view should fail")
+  assert(tostring(popup_error):match "projects, windows, or sessions", "popup action error")
 end)

@@ -1,5 +1,6 @@
 local Picker = {}
 Picker.__index = Picker
+local CLOSE_RETRY_ATTEMPTS = 3
 
 local function basename(path)
   return type(path) == "string" and path:match "([^/\\]+)$" or nil
@@ -27,12 +28,13 @@ local function write_file(path, contents)
   return true
 end
 
-function Picker.new(wezterm, options, client, workspace, report_error)
+function Picker.new(wezterm, options, client, workspace, popup, report_error)
   return setmetatable({
     wezterm = wezterm,
     options = options,
     client = client,
     workspace = workspace,
+    popup = popup,
     report_error = report_error,
     opencode_session_tabs = {},
   }, Picker)
@@ -77,24 +79,64 @@ function Picker:active_nvim_file(pane)
   return type(file) == "string" and file ~= "" and file or nil
 end
 
-function Picker:host_item(project, workspace, tab_info, current_workspace)
+function Picker:host_pane(project, pane_info)
+  local pane = pane_info.pane
+  local identified, pane_id = pcall(function()
+    return pane:pane_id()
+  end)
+  if not identified or pane_id == nil then
+    return nil
+  end
+  local label = pane:get_title()
+  if type(label) ~= "string" or label == "" then
+    label = basename(pane:get_foreground_process_name())
+  end
+  if type(label) ~= "string" or label == "" then
+    label = "Pane " .. tostring(pane_info.index)
+  end
+  return {
+    active = pane_info.is_active == true,
+    detail = project and self:project_relative_cwd(project, pane) or nil,
+    id = tostring(pane_id),
+    label = label,
+  }
+end
+
+function Picker:host_window(project, workspace, tab_info, current_workspace)
   local tab = tab_info.tab
-  local pane = tab:active_pane()
+  local active_pane = tab:active_pane()
   local label = tab:get_title()
   if type(label) ~= "string" or label == "" then
-    label = pane and pane:get_title() or nil
+    label = active_pane and active_pane:get_title() or nil
   end
   if type(label) ~= "string" or label == "" then
-    label = pane and basename(pane:get_foreground_process_name()) or nil
+    label = active_pane and basename(active_pane:get_foreground_process_name()) or nil
   end
   if type(label) ~= "string" or label == "" then
-    label = "Tab " .. tostring(tab_info.index)
+    label = "Window " .. tostring(tab_info.index)
+  end
+  local inspected, pane_infos = pcall(function()
+    return tab:panes_with_info()
+  end)
+  if not inspected or type(pane_infos) ~= "table" then
+    pane_infos = active_pane and { { index = 0, is_active = true, pane = active_pane } } or {}
+  end
+  local panes = {}
+  for _, pane_info in ipairs(pane_infos) do
+    local pane = self:host_pane(project, pane_info)
+    if pane then
+      table.insert(panes, pane)
+    end
+  end
+  if #panes == 0 then
+    return nil
   end
   return {
     active = current_workspace == workspace and tab_info.is_active == true,
-    detail = project and self:project_relative_cwd(project, pane) or nil,
+    detail = project and self:project_relative_cwd(project, active_pane) or nil,
     id = tostring(tab:tab_id()),
     label = label,
+    panes = panes,
   }
 end
 
@@ -133,15 +175,21 @@ function Picker:host_context(window, projects)
     if project then
       for _, tab_info in ipairs(mux_window:tabs_with_info()) do
         local project_context = context.projects[project.id]
-        project_context.items = project_context.items or {}
-        table.insert(project_context.items, self:host_item(project, workspace, tab_info, current))
+        local host_window = self:host_window(project, workspace, tab_info, current)
+        if host_window then
+          project_context.windows = project_context.windows or {}
+          table.insert(project_context.windows, host_window)
+        end
       end
     else
       local workspace_context = context_by_workspace[workspace]
       if workspace_context then
         for _, tab_info in ipairs(mux_window:tabs_with_info()) do
-          workspace_context.items = workspace_context.items or {}
-          table.insert(workspace_context.items, self:host_item(nil, workspace, tab_info, current))
+          local host_window = self:host_window(nil, workspace, tab_info, current)
+          if host_window then
+            workspace_context.windows = workspace_context.windows or {}
+            table.insert(workspace_context.windows, host_window)
+          end
         end
       end
     end
@@ -166,13 +214,24 @@ function Picker:host_context(window, projects)
 end
 
 function Picker:close(window, tab, pane)
+  local identified, tab_id = pcall(function()
+    return tab:tab_id()
+  end)
   local closed, close_error = pcall(function()
     tab:activate()
     window:perform_action(self.wezterm.action.CloseCurrentTab { confirm = false }, pane)
   end)
   if not closed then
+    if identified then
+      local inspected, live_tab = pcall(self.wezterm.mux.get_tab, tab_id)
+      if inspected and not live_tab then
+        return true
+      end
+    end
     self.wezterm.log_warn("wisp could not close picker tab: " .. tostring(close_error))
+    return nil, close_error
   end
+  return true
 end
 
 function Picker:remember_active_opencode_tab(session_id, workspace)
@@ -259,14 +318,14 @@ function Picker:apply_result(window, pane, result, picker_pane_id)
   if selection.kind == "close_project" then
     return self.workspace:close_project(selection.project, picker_pane_id)
   end
-  if selection.kind == "host_item" then
-    return self.workspace:activate_host_item(window, pane, selection.project, selection.id)
+  if selection.kind == "host_pane" then
+    return self.workspace:activate_host_pane(window, pane, selection.project, selection.window_id, selection.pane_id)
   end
   if selection.kind == "workspace" then
     return self.workspace:activate_workspace(selection.workspace)
   end
-  if selection.kind == "workspace_item" then
-    return self.workspace:activate_workspace_item(selection.workspace, selection.id)
+  if selection.kind == "workspace_pane" then
+    return self.workspace:activate_workspace_pane(selection.workspace, selection.window_id, selection.pane_id)
   end
   if selection.kind == "close_workspace" then
     return self.workspace:close_workspace(selection.workspace, picker_pane_id)
@@ -277,12 +336,35 @@ function Picker:apply_result(window, pane, result, picker_pane_id)
   return nil, "wisp result contains an unknown selection kind"
 end
 
-function Picker:poll_result(window, original_pane, picker_tab, picker_pane, result_path, host_context_path)
+function Picker:poll_result(window, original_pane, owner, result_path, host_context_path)
   local attempts = 0
   local values = self.options:get()
   local maximum_attempts = math.ceil(values.picker_timeout_seconds / values.poll_interval_seconds)
+  local picker_pane = owner.pane
   local picker_pane_id = picker_pane:pane_id()
   local observed_process = false
+
+  local function after_close(callback)
+    local close_attempts = 0
+    local function attempt_close()
+      close_attempts = close_attempts + 1
+      local called, closed, close_error = pcall(owner.close, owner)
+      if not called then
+        close_error = closed
+        closed = false
+      end
+      if closed then
+        callback()
+        return
+      end
+      if close_attempts >= CLOSE_RETRY_ATTEMPTS then
+        self.report_error(window, "wisp could not close picker: " .. tostring(close_error))
+        return
+      end
+      self.wezterm.time.call_after(values.poll_interval_seconds, attempt_close)
+    end
+    attempt_close()
+  end
 
   local function picker_is_alive()
     local found, live_pane = pcall(self.wezterm.mux.get_pane, picker_pane_id)
@@ -302,18 +384,31 @@ function Picker:poll_result(window, original_pane, picker_tab, picker_pane, resu
 
   local function poll()
     attempts = attempts + 1
+    if owner.closed then
+      os.remove(result_path)
+      os.remove(host_context_path)
+      return
+    end
+    if owner.is_current and not owner:is_current() then
+      os.remove(result_path)
+      os.remove(host_context_path)
+      after_close(function() end)
+      return
+    end
     local file = io.open(result_path, "rb")
     if not file then
       if not picker_is_alive() then
         os.remove(host_context_path)
-        self:close(window, picker_tab, picker_pane)
-        self.report_error(window, "wisp picker exited before producing a result")
+        after_close(function()
+          self.report_error(window, "wisp picker exited before producing a result")
+        end)
         return
       end
       if attempts >= maximum_attempts then
         os.remove(host_context_path)
-        self:close(window, picker_tab, picker_pane)
-        self.report_error(window, "wisp picker timed out before producing a result")
+        after_close(function()
+          self.report_error(window, "wisp picker timed out before producing a result")
+        end)
         return
       end
       self.wezterm.time.call_after(values.poll_interval_seconds, poll)
@@ -325,20 +420,21 @@ function Picker:poll_result(window, original_pane, picker_tab, picker_pane, resu
     os.remove(result_path)
     os.remove(host_context_path)
     local parsed, result = pcall(self.wezterm.json_parse, encoded)
-    self:close(window, picker_tab, picker_pane)
-    if not parsed then
-      self.report_error(window, "wisp picker returned invalid JSON: " .. tostring(result))
-      return
-    end
-    local applied, result_error = self:apply_result(window, original_pane, result, picker_pane_id)
-    if not applied then
-      self.report_error(window, result_error)
-    end
+    after_close(function()
+      if not parsed then
+        self.report_error(window, "wisp picker returned invalid JSON: " .. tostring(result))
+        return
+      end
+      local applied, result_error = self:apply_result(window, original_pane, result, picker_pane_id)
+      if not applied then
+        self.report_error(window, result_error)
+      end
+    end)
   end
   self.wezterm.time.call_after(values.poll_interval_seconds, poll)
 end
 
-function Picker:launch(window, pane, initial_view)
+function Picker:launch(window, pane, initial_view, surface)
   local projects, project_error = self.client:query_projects()
   if not projects then
     self.report_error(window, project_error)
@@ -363,24 +459,67 @@ function Picker:launch(window, pane, initial_view)
     "--initial-view",
     initial_view
   )
+  table.insert(picker_args, "--single-pane-behavior")
+  table.insert(picker_args, self.options:get().single_pane_behavior)
+  table.insert(picker_args, "--wezterm-executable")
+  table.insert(picker_args, self.workspace:wezterm_executable())
+  if self.options:get().window_preview then
+    table.insert(picker_args, "--window-preview")
+  end
   local active_file = self:active_nvim_file(pane)
   if active_file then
     table.insert(picker_args, "--active-file")
     table.insert(picker_args, active_file)
   end
 
-  local spawned, picker_tab, picker_pane = pcall(function()
-    return window:mux_window():spawn_tab {
+  local owner
+  local launch_error
+  if surface == "popup" then
+    owner, launch_error = self.popup:open(window, pane, {
+      id = initial_view,
       args = picker_args,
       domain = self.options:get().picker_domain,
-    }
-  end)
-  if not spawned then
+    })
+  else
+    local spawned, picker_tab, picker_pane = pcall(function()
+      return window:mux_window():spawn_tab {
+        args = picker_args,
+        domain = self.options:get().picker_domain,
+      }
+    end)
+    if spawned then
+      owner = { pane = picker_pane, closed = false }
+      function owner:close()
+        if self.closed then
+          return true
+        end
+        local closed, close_error = Picker.close(self.picker, self.window, self.tab, self.pane)
+        if not closed then
+          return nil, close_error
+        end
+        self.closed = true
+        return true
+      end
+      owner.picker = self
+      owner.window = window
+      owner.tab = picker_tab
+    else
+      launch_error = picker_tab
+    end
+  end
+  if not owner then
     os.remove(host_context_path)
-    self.report_error(window, "wisp could not launch picker: " .. tostring(picker_tab))
+    self.report_error(window, "wisp could not launch picker: " .. tostring(launch_error))
     return
   end
-  self:poll_result(window, pane, picker_tab, picker_pane, result_path, host_context_path)
+  self:poll_result(window, pane, owner, result_path, host_context_path)
+end
+
+function Picker:launch_popup(window, pane, initial_view)
+  if initial_view ~= "projects" and initial_view ~= "windows" and initial_view ~= "sessions" then
+    error("wisp has no popup action " .. tostring(initial_view))
+  end
+  self:launch(window, pane, initial_view, "popup")
 end
 
 return Picker

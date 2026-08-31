@@ -91,15 +91,17 @@ impl Navigator {
         })
     }
 
-    pub fn select_host_item(
+    pub fn select_host_pane(
         &self,
         project_id: &str,
-        id: &str,
+        window_id: &str,
+        pane_id: &str,
     ) -> Result<NavigationOutcome, NavigationError> {
         let project = self.project(project_id)?.clone();
-        Ok(NavigationOutcome::Selected(Selection::HostItem {
+        Ok(NavigationOutcome::Selected(Selection::HostPane {
             project,
-            id: id.to_string(),
+            window_id: window_id.to_string(),
+            pane_id: pane_id.to_string(),
         }))
     }
 

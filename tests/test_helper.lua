@@ -1,4 +1,5 @@
 local helper = {}
+local next_window_id = 0
 
 function helper.assert_equal(actual, expected, message)
   assert(actual == expected, string.format("%s: expected %s, got %s", message, tostring(expected), tostring(actual)))
@@ -98,12 +99,14 @@ function helper.load_wezterm_adapter(wezterm)
     return wezterm
   end
 
-  return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v4", "wezterm")
+  return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v6", "wezterm")
 end
 
-function helper.fake_window(workspace, mux_window)
+function helper.fake_window(workspace, mux_window, window_id)
   local performed = {}
   local window = { performed = performed, right_status = nil, toasts = {} }
+  next_window_id = next_window_id + 1
+  window_id = window_id or next_window_id
   mux_window = mux_window or {
     get_workspace = function()
       return workspace or "default"
@@ -112,6 +115,10 @@ function helper.fake_window(workspace, mux_window)
 
   function window:perform_action(action, pane)
     table.insert(performed, { action = action, pane = pane })
+  end
+
+  function window:window_id()
+    return window_id
   end
 
   function window:active_workspace()
@@ -158,6 +165,17 @@ function helper.fake_pane(options)
 
   function pane:get_user_vars()
     return options.user_vars or {}
+  end
+
+  function pane:pane_id()
+    return options.pane_id or 1
+  end
+
+  function pane:split(spec)
+    if not options.split then
+      error "pane split is not configured in this test"
+    end
+    return options.split(spec)
   end
 
   function pane:window()

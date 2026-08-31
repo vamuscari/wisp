@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{Terminal, backend::TestBackend, style::Color};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Color};
 use wisp_core::{
     config::{Openers, VcsIcons},
     model::{DirectoryEntry, EntryKind, Project},
@@ -9,8 +9,8 @@ use wisp_core::{
     protocol::{HostContext, Selection},
 };
 use wisp_tui::{
-    ActiveProjectContext, App, Command, Focus, GitSummary, InitialView, InputMode, RightMode,
-    render,
+    ActiveProjectContext, App, AuxiliaryPane, Command, Focus, GitSummary, InitialView, InputMode,
+    RightMode, SinglePaneBehavior, render,
 };
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -45,21 +45,42 @@ fn projects() -> Vec<Project> {
 
 fn context() -> HostContext {
     serde_json::from_value(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {
             "api": {
                 "labels": ["new"],
-                "items": [{ "id": "11", "label": "api-shell" }]
+                "windows": [{
+                    "id": "11",
+                    "label": "api-shell",
+                    "panes": [{ "id": "61", "label": "api-shell" }]
+                }]
             },
             "web": {
                 "labels": ["open"],
-                "items": [{ "id": "12", "label": "web-server" }]
+                "windows": [{
+                    "id": "12",
+                    "label": "web-server",
+                    "panes": [{ "id": "62", "label": "web-server" }]
+                }]
             },
             "docs": {
                 "labels": ["current", "open"],
-                "items": [
-                    { "id": "17", "label": "editor" },
-                    { "id": "18", "label": "docs-shell", "detail": "docs/", "active": true }
+                "windows": [
+                    {
+                        "id": "17",
+                        "label": "editor",
+                        "panes": [{ "id": "71", "label": "editor" }]
+                    },
+                    {
+                        "id": "18",
+                        "label": "docs-shell",
+                        "detail": "docs/",
+                        "active": true,
+                        "panes": [
+                            { "id": "72", "label": "shell", "active": true },
+                            { "id": "73", "label": "logs" }
+                        ]
+                    }
                 ]
             }
         },
@@ -70,7 +91,7 @@ fn context() -> HostContext {
 
 fn host_workspace_context() -> HostContext {
     serde_json::from_value(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {
             "api": { "labels": ["open"] },
             "web": { "labels": ["new"] },
@@ -79,8 +100,13 @@ fn host_workspace_context() -> HostContext {
         "workspaces": {
             "default": {
                 "current": true,
-                "items": [
-                    { "id": "29", "label": "shell", "active": true }
+                "windows": [
+                    {
+                        "id": "29",
+                        "label": "shell",
+                        "active": true,
+                        "panes": [{ "id": "43", "label": "shell", "active": true }]
+                    }
                 ]
             }
         }
@@ -164,7 +190,7 @@ fn sessions_command_loads_the_selected_project_and_groups_children() {
 #[test]
 fn selecting_a_session_uses_the_exact_host_mapping_and_attach_argv() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {
             "api": { "labels": ["new"] },
             "web": { "labels": ["open"] },
@@ -369,11 +395,11 @@ fn windows_initial_view_focuses_a_current_host_workspace() {
 #[test]
 fn windows_initial_view_falls_back_when_the_workspace_is_unmanaged() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {
-            "api": { "labels": ["open"], "items": [] },
-            "web": { "labels": ["new"], "items": [] },
-            "docs": { "labels": ["new"], "items": [] }
+            "api": { "labels": ["open"], "windows": [] },
+            "web": { "labels": ["new"], "windows": [] },
+            "docs": { "labels": ["new"], "windows": [] }
         },
         "workspaces": {}
     }))
@@ -394,7 +420,7 @@ fn windows_initial_view_falls_back_when_the_workspace_is_unmanaged() {
 }
 
 #[test]
-fn arrows_and_tab_change_two_pane_focus() {
+fn arrows_and_tab_change_hierarchical_focus() {
     let mut app = App::new(
         projects(),
         Openers::default(),
@@ -407,6 +433,8 @@ fn arrows_and_tab_change_two_pane_focus() {
     assert_eq!(app.focus(), Focus::Detail);
     app.handle_key(key(KeyCode::Left)).unwrap();
     assert_eq!(app.focus(), Focus::Projects);
+    app.handle_key(key(KeyCode::Tab)).unwrap();
+    assert_eq!(app.focus(), Focus::Detail);
     app.handle_key(key(KeyCode::Tab)).unwrap();
     assert_eq!(app.focus(), Focus::Detail);
     app.handle_key(key(KeyCode::Tab)).unwrap();
@@ -436,7 +464,7 @@ fn moving_projects_immediately_scopes_the_windows_pane() {
 }
 
 #[test]
-fn enter_on_the_project_pane_returns_the_selected_project() {
+fn o_on_the_project_pane_returns_the_selected_project() {
     let mut app = App::new(
         projects(),
         Openers::default(),
@@ -446,16 +474,16 @@ fn enter_on_the_project_pane_returns_the_selected_project() {
     );
 
     let Command::Finish(Selection::Project { project, opener }) =
-        app.handle_key(key(KeyCode::Enter)).unwrap()
+        app.handle_key(key(KeyCode::Char('o'))).unwrap()
     else {
-        panic!("project enter should finish with a project selection");
+        panic!("project open should finish with a project selection");
     };
     assert_eq!(project.id, "docs");
     assert_eq!(opener, None);
 }
 
 #[test]
-fn enter_on_a_host_workspace_returns_the_exact_workspace() {
+fn o_on_a_host_workspace_returns_the_exact_workspace() {
     let mut app = App::new(
         projects(),
         Openers::default(),
@@ -465,15 +493,15 @@ fn enter_on_a_host_workspace_returns_the_exact_workspace() {
     );
 
     let Command::Finish(Selection::Workspace { workspace }) =
-        app.handle_key(key(KeyCode::Enter)).unwrap()
+        app.handle_key(key(KeyCode::Char('o'))).unwrap()
     else {
-        panic!("workspace enter should finish with a workspace selection");
+        panic!("workspace open should finish with a workspace selection");
     };
     assert_eq!(workspace, "default");
 }
 
 #[test]
-fn enter_on_the_windows_pane_returns_the_selected_host_item() {
+fn enter_descends_from_windows_and_returns_the_selected_host_pane() {
     let mut app = App::new(
         projects(),
         Openers::default(),
@@ -482,17 +510,22 @@ fn enter_on_the_windows_pane_returns_the_selected_host_item() {
         InitialView::Windows,
     );
 
-    let Command::Finish(Selection::HostItem { project, id }) =
-        app.handle_key(key(KeyCode::Enter)).unwrap()
+    assert_eq!(app.handle_key(key(KeyCode::Enter)).unwrap(), Command::None);
+    let Command::Finish(Selection::HostPane {
+        project,
+        window_id,
+        pane_id,
+    }) = app.handle_key(key(KeyCode::Enter)).unwrap()
     else {
-        panic!("window enter should finish with a host-item selection");
+        panic!("pane enter should finish with a host-pane selection");
     };
     assert_eq!(project.id, "docs");
-    assert_eq!(id, "18");
+    assert_eq!(window_id, "18");
+    assert_eq!(pane_id, "72");
 }
 
 #[test]
-fn enter_on_a_host_workspaces_window_returns_the_exact_target() {
+fn enter_on_a_host_workspace_descends_to_the_exact_pane() {
     let mut app = App::new(
         projects(),
         Openers::default(),
@@ -501,13 +534,63 @@ fn enter_on_a_host_workspaces_window_returns_the_exact_target() {
         InitialView::Windows,
     );
 
-    let Command::Finish(Selection::WorkspaceItem { workspace, id }) =
-        app.handle_key(key(KeyCode::Enter)).unwrap()
+    assert_eq!(app.handle_key(key(KeyCode::Enter)).unwrap(), Command::None);
+    let Command::Finish(Selection::WorkspacePane {
+        workspace,
+        window_id,
+        pane_id,
+    }) = app.handle_key(key(KeyCode::Enter)).unwrap()
     else {
-        panic!("workspace window enter should finish with an exact host target");
+        panic!("workspace pane enter should finish with an exact host target");
     };
     assert_eq!(workspace, "default");
-    assert_eq!(id, "29");
+    assert_eq!(window_id, "29");
+    assert_eq!(pane_id, "43");
+}
+
+#[test]
+fn configured_single_pane_activation_skips_the_pane_column() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(host_workspace_context()),
+        InitialView::Windows,
+    );
+    app.configure_single_pane_behavior(SinglePaneBehavior::Activate);
+
+    let Command::Finish(Selection::WorkspacePane {
+        workspace,
+        window_id,
+        pane_id,
+    }) = app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("single-pane window should activate directly");
+    };
+    assert_eq!(workspace, "default");
+    assert_eq!(window_id, "29");
+    assert_eq!(pane_id, "43");
+}
+
+#[test]
+fn pane_search_cannot_make_a_multi_pane_window_activate_directly() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    app.configure_single_pane_behavior(SinglePaneBehavior::Activate);
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    app.handle_key(key(KeyCode::Char('/'))).unwrap();
+    for character in "logs".chars() {
+        app.handle_key(key(KeyCode::Char(character))).unwrap();
+    }
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    app.handle_key(key(KeyCode::Left)).unwrap();
+
+    assert_eq!(app.handle_key(key(KeyCode::Enter)).unwrap(), Command::None);
 }
 
 #[test]
@@ -610,15 +693,110 @@ fn entering_a_directory_loads_it_lazily() {
     ]);
 
     assert_eq!(app.visible_detail_labels(), vec!["README.md", "src/"]);
-    app.handle_key(key(KeyCode::Down)).unwrap();
     assert_eq!(
-        app.handle_key(key(KeyCode::Enter)).unwrap(),
+        app.handle_key(key(KeyCode::Down)).unwrap(),
         Command::LoadDirectory(PathBuf::from("/repos/docs/src"))
     );
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src/lib.rs"),
+        EntryKind::File,
+    )]);
+    assert_eq!(app.handle_key(key(KeyCode::Enter)).unwrap(), Command::None);
     assert_eq!(
         app.current_directory(),
         Some(PathBuf::from("/repos/docs/src").as_path())
     );
+    assert_eq!(app.visible_detail_labels(), vec!["lib.rs"]);
+}
+
+#[test]
+fn file_search_ranks_the_closest_match_first() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![
+        DirectoryEntry::new(PathBuf::from("/repos/docs/a---b"), EntryKind::File),
+        DirectoryEntry::new(PathBuf::from("/repos/docs/ab"), EntryKind::File),
+    ]);
+    app.handle_key(key(KeyCode::Char('/'))).unwrap();
+    app.handle_key(key(KeyCode::Char('a'))).unwrap();
+    app.handle_key(key(KeyCode::Char('b'))).unwrap();
+
+    assert_eq!(app.visible_detail_labels(), vec!["ab", "a---b"]);
+}
+
+fn deeply_browsed_files_app() -> App {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src"),
+        EntryKind::Directory,
+    )]);
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)).unwrap(),
+        Command::LoadDirectory(PathBuf::from("/repos/docs/src"))
+    );
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src/components"),
+        EntryKind::Directory,
+    )]);
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)).unwrap(),
+        Command::LoadDirectory(PathBuf::from("/repos/docs/src/components"))
+    );
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src/components/button.rs"),
+        EntryKind::File,
+    )]);
+    app
+}
+
+#[test]
+fn file_columns_adapt_from_four_levels_to_a_recycled_narrow_view() {
+    let app = deeply_browsed_files_app();
+
+    let backend = TestBackend::new(180, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let wide_title = &rendered_lines(&terminal)[0];
+    assert!(wide_title.contains(" Projects "));
+    assert!(wide_title.contains(" docs "));
+    assert!(wide_title.contains(" src "));
+    assert!(wide_title.contains(" components "));
+    assert!(
+        rendered_lines(&terminal)
+            .join("\n")
+            .contains("NORMAL  Projects > docs > src > components")
+    );
+
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let medium_title = &rendered_lines(&terminal)[0];
+    assert!(medium_title.contains(" Projects "));
+    assert!(!medium_title.contains(" docs "));
+    assert!(medium_title.contains(" src "));
+    assert!(medium_title.contains(" components "));
+
+    let backend = TestBackend::new(60, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let narrow_lines = rendered_lines(&terminal);
+    let narrow = narrow_lines[..21].join("\n");
+    assert!(narrow.contains(" Projects "));
+    assert!(!narrow.contains(" src "));
+    assert!(narrow.contains(" components "));
 }
 
 #[test]
@@ -640,7 +818,7 @@ fn backspace_moves_to_the_parent_then_focuses_projects_at_the_root() {
 
     assert_eq!(
         app.handle_key(key(KeyCode::Backspace)).unwrap(),
-        Command::LoadDirectory(PathBuf::from("/repos/docs"))
+        Command::None
     );
     assert_eq!(
         app.current_directory(),
@@ -654,6 +832,41 @@ fn backspace_moves_to_the_parent_then_focuses_projects_at_the_root() {
     );
     assert_eq!(app.focus(), Focus::Projects);
     assert_eq!(app.current_directory(), None);
+}
+
+#[test]
+fn backspace_cancels_a_pending_deep_descent_without_skipping_its_parent() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src"),
+        EntryKind::Directory,
+    )]);
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src/components"),
+        EntryKind::Directory,
+    )]);
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)).unwrap(),
+        Command::LoadDirectory(PathBuf::from("/repos/docs/src/components"))
+    );
+
+    assert_eq!(
+        app.handle_key(key(KeyCode::Backspace)).unwrap(),
+        Command::None
+    );
+    assert_eq!(app.focus(), Focus::Detail);
+    assert_eq!(
+        app.current_directory(),
+        Some(PathBuf::from("/repos/docs/src").as_path())
+    );
 }
 
 #[test]
@@ -718,6 +931,182 @@ fn windows_command_selects_the_active_host_item() {
     app.handle_key(key(KeyCode::Char('w'))).unwrap();
 
     assert_eq!(app.detail_cursor(), 1);
+}
+
+#[test]
+fn window_preview_target_follows_the_highlighted_window_when_enabled() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+
+    assert_eq!(app.window_preview_target(), None);
+    app.configure_window_preview(true, true);
+    assert_eq!(app.window_preview_target(), Some("72".into()));
+
+    app.handle_key(key(KeyCode::Up)).unwrap();
+    assert_eq!(app.window_preview_target(), Some("71".into()));
+}
+
+#[test]
+fn preview_is_hidden_by_default_and_toggled_with_p() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    app.configure_window_preview(true, false);
+
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Hidden);
+    assert_eq!(app.window_preview_target(), None);
+
+    app.handle_key(key(KeyCode::Char('p'))).unwrap();
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Preview);
+    assert_eq!(app.window_preview_target(), Some("72".into()));
+
+    app.handle_key(key(KeyCode::Char('p'))).unwrap();
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Hidden);
+    assert_eq!(app.window_preview_target(), None);
+}
+
+#[test]
+fn commands_restore_the_previous_auxiliary_pane() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    app.configure_window_preview(true, true);
+
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Commands);
+    assert_eq!(app.window_preview_target(), None);
+
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Preview);
+    assert_eq!(app.window_preview_target(), Some("72".into()));
+
+    app.handle_key(key(KeyCode::Char('p'))).unwrap();
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Hidden);
+}
+
+#[test]
+fn preview_and_commands_keys_are_search_text_in_search_mode() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.configure_window_preview(true, false);
+
+    app.handle_key(key(KeyCode::Char('/'))).unwrap();
+    app.handle_key(key(KeyCode::Char('p'))).unwrap();
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+
+    assert_eq!(app.project_query(), "p?");
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Hidden);
+}
+
+#[test]
+fn mouse_hover_changes_only_the_window_preview_target() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    app.configure_window_preview(true, true);
+    assert_eq!(app.detail_cursor(), 1);
+
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 42,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        },
+        Rect::new(0, 0, 120, 24),
+    );
+
+    assert_eq!(
+        app.detail_cursor(),
+        1,
+        "hover must not move keyboard selection"
+    );
+    assert_eq!(app.window_preview_target(), Some("71".into()));
+
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 90,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        },
+        Rect::new(0, 0, 200, 24),
+    );
+    assert_eq!(
+        app.window_preview_target(),
+        Some("72".into()),
+        "hovering the Pane column must keep the keyboard-selected window target"
+    );
+
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 42,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        },
+        Rect::new(0, 0, 120, 24),
+    );
+    assert_eq!(
+        app.detail_cursor(),
+        1,
+        "clicks must not activate or select windows"
+    );
+
+    app.handle_key(key(KeyCode::Down)).unwrap();
+    assert_eq!(app.window_preview_target(), Some("72".into()));
+}
+
+#[test]
+fn moving_up_to_another_window_clears_the_previous_pane_search() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    app.handle_key(key(KeyCode::Char('/'))).unwrap();
+    for character in "logs".chars() {
+        app.handle_key(key(KeyCode::Char(character))).unwrap();
+    }
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    app.handle_key(key(KeyCode::Left)).unwrap();
+    app.handle_key(key(KeyCode::Up)).unwrap();
+
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    assert!(
+        !rendered_lines(&terminal)
+            .join("\n")
+            .contains("No matching panes")
+    );
 }
 
 #[test]
@@ -826,7 +1215,7 @@ fn wide_renderer_shows_projects_and_window_metadata_side_by_side() {
     let lines = rendered_lines(&terminal);
     let rendered = lines.join("\n");
 
-    assert!(rendered.contains("WISP"));
+    assert!(!rendered.contains("WISP"));
     assert!(rendered.contains("◆ Documentation"));
     assert!(rendered.contains("◆ docs-shell"));
     assert!(rendered.contains("docs/"));
@@ -835,8 +1224,10 @@ fn wide_renderer_shows_projects_and_window_metadata_side_by_side() {
             .iter()
             .any(|line| line.contains("Projects") && line.contains("Windows"))
     );
-    assert!(rendered.contains("/ search"));
-    assert!(rendered.contains("x close"));
+    assert!(rendered.contains("NORMAL  Projects > Windows"));
+    assert!(!rendered.contains("/ search"));
+    assert!(!rendered.contains("x close"));
+    assert_eq!(terminal.backend().buffer()[(0, 21)].fg, Color::White);
     assert!(
         terminal
             .backend()
@@ -844,6 +1235,141 @@ fn wide_renderer_shows_projects_and_window_metadata_side_by_side() {
             .content()
             .iter()
             .any(|cell| cell.symbol() == "◆" && cell.fg == Color::Green)
+    );
+}
+
+#[test]
+fn wide_windows_view_renders_a_separate_panes_column() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+
+    assert!(rendered.contains("Panes"));
+    assert!(rendered.contains("shell"));
+    assert!(rendered.contains("logs"));
+    assert!(rendered.contains("Projects > Windows > Panes"));
+}
+
+#[test]
+fn bottom_utility_bar_becomes_the_focused_search_input() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('/'))).unwrap();
+    app.handle_key(key(KeyCode::Char('a'))).unwrap();
+    app.handle_key(key(KeyCode::Char('p'))).unwrap();
+    app.handle_key(key(KeyCode::Char('i'))).unwrap();
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+
+    assert!(rendered.contains("SEARCH  Projects  / api"));
+    assert!(!rendered.contains("NORMAL  Projects > Windows"));
+}
+
+#[test]
+fn commands_render_in_the_preview_slot() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    app.configure_window_preview(true, false);
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+
+    assert!(rendered.contains("Commands"));
+    assert!(rendered.contains("p Preview"));
+    assert!(rendered.contains("Ctrl-R Refresh"));
+    assert!(!rendered.contains("Preview unavailable"));
+}
+
+#[test]
+fn commands_replace_the_detail_pane_when_height_is_constrained() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    app.configure_window_preview(true, false);
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    let backend = TestBackend::new(60, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal);
+    let rendered = lines.join("\n");
+
+    assert!(rendered.contains("Projects"));
+    assert!(rendered.contains("Commands"));
+    assert!(!lines[..7].iter().any(|line| line.contains("Windows")));
+}
+
+#[test]
+fn commands_keep_the_detail_pane_at_the_wide_layout_boundary() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    app.configure_window_preview(true, false);
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    let backend = TestBackend::new(72, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let content = rendered_lines(&terminal)[..21].join("\n");
+
+    assert!(content.contains("Projects"));
+    assert!(content.contains("Windows"));
+    assert!(content.contains("Commands"));
+}
+
+#[test]
+fn utility_bar_shows_status_when_not_searching() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.set_status("directory unavailable");
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+
+    assert!(
+        rendered_lines(&terminal)
+            .join("\n")
+            .contains("ERROR  directory unavailable")
     );
 }
 
@@ -994,24 +1520,24 @@ fn editor_active_project_is_not_treated_as_host_open() {
 }
 
 #[test]
-fn git_update_for_an_inactive_project_is_ignored() {
+fn git_update_for_an_open_inactive_project_renders_on_its_row() {
     let mut app = App::new(
         projects(),
         Openers::default(),
         false,
-        None,
+        Some(context()),
         InitialView::Projects,
     );
     app.set_active_project_context(ActiveProjectContext {
-        project_id: "web".into(),
+        project_id: "docs".into(),
         file: None,
         git: None,
     });
 
     app.set_active_project_git(
-        "api",
+        "web",
         GitSummary {
-            branch: "wrong-branch".into(),
+            branch: "feature/web".into(),
             dirty: true,
             ..GitSummary::default()
         },
@@ -1022,8 +1548,35 @@ fn git_update_for_an_inactive_project_is_ignored() {
     terminal.draw(|frame| render(frame, &app)).unwrap();
     let rendered = rendered_lines(&terminal).join("\n");
 
-    assert!(rendered.contains("◆ Web Client"));
-    assert!(!rendered.contains("wrong-branch"));
+    assert!(rendered.contains("● Web Client"));
+    assert!(rendered.contains("feature/web ✗"));
+}
+
+#[test]
+fn replacing_projects_clears_stale_git_summaries() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.set_active_project_git(
+        "web",
+        GitSummary {
+            branch: "stale-branch".into(),
+            dirty: true,
+            ..GitSummary::default()
+        },
+    );
+
+    app.replace_projects(projects());
+
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+    assert!(!rendered.contains("stale-branch"));
 }
 
 #[test]
@@ -1249,9 +1802,9 @@ fn narrow_renderer_stacks_projects_above_windows() {
 #[test]
 fn renderer_explains_when_an_open_project_has_no_windows() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {
-            "docs": { "labels": ["current", "open"], "items": [] }
+            "docs": { "labels": ["current", "open"], "windows": [] }
         },
         "workspaces": {}
     }))
@@ -1273,11 +1826,11 @@ fn renderer_explains_when_an_open_project_has_no_windows() {
 #[test]
 fn renderer_explains_when_the_selected_project_is_not_open() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {
-            "api": { "labels": ["new"], "items": [] },
-            "web": { "labels": ["open"], "items": [] },
-            "docs": { "labels": ["current", "open"], "items": [] }
+            "api": { "labels": ["new"], "windows": [] },
+            "web": { "labels": ["open"], "windows": [] },
+            "docs": { "labels": ["current", "open"], "windows": [] }
         },
         "workspaces": {}
     }))

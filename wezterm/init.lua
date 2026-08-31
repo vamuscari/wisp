@@ -1,6 +1,6 @@
 local wezterm = require "wezterm"
 local deployed_wisp_path, deployment_token, module_directory = ...
-local WISP_VERSION = 4
+local WISP_VERSION = 6
 
 if
   type(deployed_wisp_path) ~= "string"
@@ -20,8 +20,10 @@ end
 local Options = load_module "options"
 local Client = load_module "client"
 local Workspace = load_module "workspace"
+local Popup = load_module "popup"
 local Picker = load_module "picker"
 local Status = load_module "status"
+local StatusItems = load_module "status_items"
 
 local function report_error(window, message)
   wezterm.log_error(message)
@@ -40,8 +42,11 @@ end
 local options = Options.new(deployed_wisp_path)
 local client = Client.new(wezterm, options, WISP_VERSION)
 local workspace = Workspace.new(wezterm, options, client, report_error)
-local picker = Picker.new(wezterm, options, client, workspace, report_error)
-local status = Status.new(wezterm, options, client)
+local popup = Popup.new(wezterm, options, workspace)
+local picker = Picker.new(wezterm, options, client, workspace, popup, report_error)
+local status = Status.new(wezterm, options, client, StatusItems.new(), function(window, pane, action)
+  picker:launch_popup(window, pane, action)
+end)
 local wisp = {}
 
 function wisp.project_picker_action()
@@ -64,6 +69,17 @@ function wisp.opencode_picker_action()
   return wezterm.action_callback(function(window, pane)
     safely(function()
       picker:launch(window, pane, "sessions")
+    end)
+  end)
+end
+
+function wisp.popup_action(initial_view)
+  if initial_view ~= "projects" and initial_view ~= "windows" and initial_view ~= "sessions" then
+    error "wisp popup action must be projects, windows, or sessions"
+  end
+  return wezterm.action_callback(function(window, pane)
+    safely(function()
+      picker:launch_popup(window, pane, initial_view)
     end)
   end)
 end

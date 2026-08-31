@@ -112,14 +112,15 @@ fn selecting_project_returns_project_selection_and_opener() {
 }
 
 #[test]
-fn host_item_and_project_close_are_direct_navigation_selections() {
+fn host_pane_and_project_close_are_direct_navigation_selections() {
     let navigator = Navigator::new(vec![project()], false);
 
     assert_eq!(
-        navigator.select_host_item("api", "17").unwrap(),
-        NavigationOutcome::Selected(Selection::HostItem {
+        navigator.select_host_pane("api", "17", "42").unwrap(),
+        NavigationOutcome::Selected(Selection::HostPane {
             project: project(),
-            id: "17".into(),
+            window_id: "17".into(),
+            pane_id: "42".into(),
         })
     );
     assert_eq!(
@@ -146,7 +147,7 @@ fn opencode_session_selection_carries_resolved_attach_argv_and_optional_host_ite
     };
 
     let encoded = serde_json::to_value(SelectionEnvelope::selected(selection.clone())).unwrap();
-    assert_eq!(encoded["protocol_version"], 4);
+    assert_eq!(encoded["protocol_version"], 6);
     assert_eq!(encoded["selection"]["kind"], "open_code_session");
     assert_eq!(encoded["selection"]["session_id"], "ses_123");
     assert_eq!(encoded["selection"]["host_item_id"], "17");
@@ -199,7 +200,7 @@ fn navigator_builds_an_opencode_attach_selection_without_a_shell() {
 #[test]
 fn host_context_maps_opencode_sessions_to_exact_host_items() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -245,42 +246,49 @@ fn selection_envelope_round_trips_as_versioned_json() {
 }
 
 #[test]
-fn host_context_contains_labels_and_items_keyed_by_project_id() {
+fn host_context_contains_nested_windows_and_panes_keyed_by_project_id() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
-                "items": [
+                "windows": [
                     {
                         "id": "17",
                         "label": "nvim",
                         "detail": "src/main.rs",
-                        "active": true
+                        "active": true,
+                        "panes": [
+                            { "id": "42", "label": "editor", "active": true },
+                            { "id": "43", "label": "terminal" }
+                        ]
                     },
                     {
                         "id": "18",
-                        "label": "server"
+                        "label": "server",
+                        "panes": [{ "id": "44", "label": "server" }]
                     }
                 ]
             },
-            "web": { "labels": ["new"], "items": [] }
+            "web": { "labels": ["new"], "windows": [] }
         },
         "workspaces": {}
     }))
     .unwrap();
 
     assert_eq!(context.labels("api"), &["current", "open"]);
-    assert_eq!(context.items("api")[0].id, "17");
-    assert_eq!(context.items("api")[0].label, "nvim");
+    assert_eq!(context.windows("api")[0].id, "17");
+    assert_eq!(context.windows("api")[0].label, "nvim");
     assert_eq!(
-        context.items("api")[0].detail.as_deref(),
+        context.windows("api")[0].detail.as_deref(),
         Some("src/main.rs")
     );
-    assert!(context.items("api")[0].active);
-    assert!(!context.items("api")[1].active);
+    assert_eq!(context.windows("api")[0].panes[0].id, "42");
+    assert!(context.windows("api")[0].panes[0].active);
+    assert!(context.windows("api")[0].active);
+    assert!(!context.windows("api")[1].active);
     assert!(context.labels("missing").is_empty());
-    assert!(context.items("missing").is_empty());
+    assert!(context.windows("missing").is_empty());
     assert_eq!(
         serde_json::to_value(context).unwrap()["protocol_version"],
         PROTOCOL_VERSION
@@ -290,16 +298,17 @@ fn host_context_contains_labels_and_items_keyed_by_project_id() {
 #[test]
 fn host_context_contains_open_host_workspaces() {
     let context = serde_json::from_value::<HostContext>(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {},
         "workspaces": {
             "default": {
                 "current": true,
-                "items": [
+                "windows": [
                     {
                         "id": "17",
                         "label": "shell",
-                        "active": true
+                        "active": true,
+                        "panes": [{ "id": "42", "label": "shell", "active": true }]
                     }
                 ]
             }
@@ -312,23 +321,23 @@ fn host_context_contains_open_host_workspaces() {
     );
     let encoded = serde_json::to_value(context.unwrap()).unwrap();
     assert_eq!(encoded["workspaces"]["default"]["current"], true);
-    assert_eq!(encoded["workspaces"]["default"]["items"][0]["id"], "17");
+    assert_eq!(encoded["workspaces"]["default"]["windows"][0]["id"], "17");
 }
 
 #[test]
-fn host_context_requires_the_v4_workspace_collection() {
+fn host_context_requires_the_v6_workspace_collection() {
     let context = serde_json::from_value::<HostContext>(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {}
     }));
 
-    assert!(context.is_err(), "v4 host context must include workspaces");
+    assert!(context.is_err(), "v6 host context must include workspaces");
 }
 
 #[test]
-fn host_context_defaults_omitted_items_to_empty() {
+fn host_context_defaults_omitted_windows_to_empty() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {
             "api": { "labels": ["new"] }
         },
@@ -336,11 +345,11 @@ fn host_context_defaults_omitted_items_to_empty() {
     }))
     .unwrap();
 
-    assert!(context.items("api").is_empty());
+    assert!(context.windows("api").is_empty());
 }
 
 #[test]
-fn host_context_rejects_unsupported_versions_and_invalid_items() {
+fn host_context_rejects_unsupported_versions_and_invalid_hierarchy() {
     let unsupported = serde_json::from_value::<HostContext>(serde_json::json!({
         "protocol_version": 1,
         "projects": [],
@@ -355,11 +364,15 @@ fn host_context_rejects_unsupported_versions_and_invalid_items() {
     );
 
     let empty = serde_json::from_value::<HostContext>(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {
             "api": {
                 "labels": ["open"],
-                "items": [{ "id": "", "label": "nvim" }]
+                "windows": [{
+                    "id": "",
+                    "label": "nvim",
+                    "panes": [{ "id": "42", "label": "editor" }]
+                }]
             }
         },
         "workspaces": {}
@@ -367,13 +380,13 @@ fn host_context_rejects_unsupported_versions_and_invalid_items() {
     assert!(empty.is_err());
 
     let duplicate = serde_json::from_value::<HostContext>(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": {
             "api": {
                 "labels": ["open"],
-                "items": [
-                    { "id": "17", "label": "nvim" },
-                    { "id": "17", "label": "shell" }
+                "windows": [
+                    { "id": "17", "label": "nvim", "panes": [{ "id": "42", "label": "editor" }] },
+                    { "id": "17", "label": "shell", "panes": [{ "id": "43", "label": "shell" }] }
                 ]
             }
         },
@@ -381,13 +394,29 @@ fn host_context_rejects_unsupported_versions_and_invalid_items() {
     }));
     assert!(duplicate.is_err());
 
+    let empty_pane = serde_json::from_value::<HostContext>(serde_json::json!({
+        "protocol_version": 6,
+        "projects": {
+            "api": {
+                "labels": ["open"],
+                "windows": [{
+                    "id": "17",
+                    "label": "nvim",
+                    "panes": [{ "id": "", "label": "editor" }]
+                }]
+            }
+        },
+        "workspaces": {}
+    }));
+    assert!(empty_pane.is_err());
+
     let duplicate_project = serde_json::from_str::<HostContext>(
-        r#"{"protocol_version":4,"projects":{"api":{"labels":["new"]},"api":{"labels":["open"]}},"workspaces":{}}"#,
+        r#"{"protocol_version":6,"projects":{"api":{"labels":["new"]},"api":{"labels":["open"]}},"workspaces":{}}"#,
     );
     assert!(duplicate_project.is_err());
 
     let duplicate_workspace = serde_json::from_str::<HostContext>(
-        r#"{"protocol_version":4,"projects":{},"workspaces":{"default":{"current":true},"default":{"current":false}}}"#,
+        r#"{"protocol_version":6,"projects":{},"workspaces":{"default":{"current":true},"default":{"current":false}}}"#,
     );
     assert!(duplicate_workspace.is_err());
 }
@@ -395,24 +424,24 @@ fn host_context_rejects_unsupported_versions_and_invalid_items() {
 #[test]
 fn public_protocol_fixtures_decode_with_the_current_models() {
     let selection: SelectionEnvelope = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/selection-file-v4.json"
+        "../../../tests/fixtures/selection-file-v6.json"
     ))
     .unwrap();
     assert_eq!(selection.protocol_version, PROTOCOL_VERSION);
     assert_eq!(selection.status, SelectionStatus::Selected);
 
     let context: HostContext =
-        serde_json::from_str(include_str!("../../../tests/fixtures/host-context-v4.json")).unwrap();
+        serde_json::from_str(include_str!("../../../tests/fixtures/host-context-v6.json")).unwrap();
     assert_eq!(context.labels("api"), &["current", "open"]);
-    assert_eq!(context.items("api")[0].id, "17");
+    assert_eq!(context.windows("api")[0].id, "17");
     assert!(context.workspaces().contains_key("default"));
 
     let projects: ProjectsEnvelope =
-        serde_json::from_str(include_str!("../../../tests/fixtures/projects-v4.json")).unwrap();
+        serde_json::from_str(include_str!("../../../tests/fixtures/projects-v6.json")).unwrap();
     assert_eq!(projects.projects[0].id, "api");
 
     let session: SelectionEnvelope = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/selection-open-code-session-v4.json"
+        "../../../tests/fixtures/selection-open-code-session-v6.json"
     ))
     .unwrap();
     assert!(matches!(
@@ -421,7 +450,7 @@ fn public_protocol_fixtures_decode_with_the_current_models() {
     ));
 
     let status: OpenCodeStatusEnvelope = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/opencode-status-v4.json"
+        "../../../tests/fixtures/opencode-status-v6.json"
     ))
     .unwrap();
     assert_eq!(status.sessions.waiting, 1);
@@ -443,7 +472,7 @@ fn opencode_status_envelope_is_strict_and_checks_version_first() {
     );
 
     let unknown = serde_json::from_value::<OpenCodeStatusEnvelope>(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "sessions": {
             "waiting": 0,
             "running": 0,
@@ -472,7 +501,7 @@ fn projects_envelope_checks_version_before_the_project_schema() {
     );
 
     let current = serde_json::from_value::<ProjectsEnvelope>(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "projects": [project()]
     }))
     .unwrap();
@@ -482,7 +511,7 @@ fn projects_envelope_checks_version_before_the_project_schema() {
 #[test]
 fn selection_protocol_rejects_unknown_project_fields() {
     let selection = serde_json::from_value::<SelectionEnvelope>(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "status": "selected",
         "selection": {
             "kind": "project",
@@ -503,7 +532,7 @@ fn selection_protocol_rejects_unknown_project_fields() {
 #[test]
 fn selection_protocol_rejects_unknown_selection_fields() {
     let selection = serde_json::from_value::<SelectionEnvelope>(serde_json::json!({
-        "protocol_version": 4,
+        "protocol_version": 6,
         "status": "selected",
         "selection": {
             "kind": "project",
@@ -518,7 +547,7 @@ fn selection_protocol_rejects_unknown_selection_fields() {
 #[test]
 fn selection_protocol_rejects_duplicate_envelope_fields() {
     let duplicate = serde_json::from_str::<SelectionEnvelope>(
-        r#"{"protocol_version":4,"protocol_version":4,"status":"cancelled"}"#,
+        r#"{"protocol_version":6,"protocol_version":6,"status":"cancelled"}"#,
     )
     .unwrap_err();
 
@@ -531,9 +560,9 @@ fn selection_protocol_rejects_duplicate_envelope_fields() {
 #[test]
 fn selection_protocol_rejects_inconsistent_status_fields() {
     for json in [
-        r#"{"protocol_version":4,"status":"selected"}"#,
-        r#"{"protocol_version":4,"status":"cancelled","selection":{"kind":"project","project":{"id":"api","path":"/repos/api","group":"Repos","name":"api","display_name":"API"}}}"#,
-        r#"{"protocol_version":4,"status":"error"}"#,
+        r#"{"protocol_version":6,"status":"selected"}"#,
+        r#"{"protocol_version":6,"status":"cancelled","selection":{"kind":"project","project":{"id":"api","path":"/repos/api","group":"Repos","name":"api","display_name":"API"}}}"#,
+        r#"{"protocol_version":6,"status":"error"}"#,
     ] {
         assert!(
             serde_json::from_str::<SelectionEnvelope>(json).is_err(),
@@ -551,23 +580,25 @@ fn close_project_is_a_versioned_host_action_selection() {
 
     assert!(
         decoded.is_ok(),
-        "close_project should be part of protocol v4"
+        "close_project should be part of protocol v6"
     );
     let encoded = serde_json::to_value(SelectionEnvelope::selected(decoded.unwrap())).unwrap();
     assert_eq!(encoded["selection"]["kind"], "close_project");
 }
 
 #[test]
-fn host_item_is_a_versioned_selection_with_an_opaque_id() {
-    let selection = Selection::HostItem {
+fn host_pane_is_a_versioned_selection_with_opaque_ids() {
+    let selection = Selection::HostPane {
         project: project(),
-        id: "17".into(),
+        window_id: "17".into(),
+        pane_id: "42".into(),
     };
 
     let encoded = serde_json::to_value(SelectionEnvelope::selected(selection.clone())).unwrap();
-    assert_eq!(encoded["protocol_version"], 4);
-    assert_eq!(encoded["selection"]["kind"], "host_item");
-    assert_eq!(encoded["selection"]["id"], "17");
+    assert_eq!(encoded["protocol_version"], 6);
+    assert_eq!(encoded["selection"]["kind"], "host_pane");
+    assert_eq!(encoded["selection"]["window_id"], "17");
+    assert_eq!(encoded["selection"]["pane_id"], "42");
 
     let decoded: SelectionEnvelope = serde_json::from_value(encoded).unwrap();
     assert_eq!(decoded.selection, Some(selection));
@@ -581,9 +612,10 @@ fn host_workspace_actions_are_versioned_selections() {
             "workspace": "default"
         }),
         serde_json::json!({
-            "kind": "workspace_item",
+            "kind": "workspace_pane",
             "workspace": "default",
-            "id": "17"
+            "window_id": "17",
+            "pane_id": "42"
         }),
         serde_json::json!({
             "kind": "close_workspace",

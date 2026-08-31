@@ -29,9 +29,9 @@ local function selection_has_only_fields(selection)
     project = { kind = true, project = true, opener = true },
     file = { kind = true, project = true, path = true, opener = true },
     close_project = { kind = true, project = true },
-    host_item = { kind = true, project = true, id = true },
+    host_pane = { kind = true, project = true, window_id = true, pane_id = true },
     workspace = { kind = true, workspace = true },
-    workspace_item = { kind = true, workspace = true, id = true },
+    workspace_pane = { kind = true, workspace = true, window_id = true, pane_id = true },
     close_workspace = { kind = true, workspace = true },
     open_code_session = {
       kind = true,
@@ -188,7 +188,7 @@ function Client:validate_result(result)
   local uses_project = selection.kind == "project"
     or selection.kind == "file"
     or selection.kind == "close_project"
-    or selection.kind == "host_item"
+    or selection.kind == "host_pane"
     or selection.kind == "open_code_session"
   if uses_project then
     if not self:valid_project(selection.project) then
@@ -197,8 +197,15 @@ function Client:validate_result(result)
   elseif type(selection.workspace) ~= "string" or selection.workspace == "" then
     return nil, "wisp result contains an invalid workspace"
   end
-  if selection.kind == "workspace_item" and (type(selection.id) ~= "string" or selection.id == "") then
-    return nil, "wisp result contains an invalid workspace item"
+  if selection.kind == "host_pane" or selection.kind == "workspace_pane" then
+    if
+      type(selection.window_id) ~= "string"
+      or selection.window_id == ""
+      or type(selection.pane_id) ~= "string"
+      or selection.pane_id == ""
+    then
+      return nil, "wisp result contains an invalid host pane"
+    end
   end
   if selection.kind == "open_code_session" then
     if

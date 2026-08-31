@@ -1,0 +1,47 @@
+{
+  "protocol_version": 6,
+  "projects": {
+    "api": {
+      "labels": ["current", "open"],
+      "windows": [
+        {
+          "id": "17",
+          "label": "editor",
+          "detail": "src/main.rs",
+          "active": true,
+          "panes": [
+            {
+              "id": "42",
+              "label": "nvim",
+              "detail": "src/main.rs",
+              "active": true
+            }
+          ]
+        }
+      ],
+      "session_items": {
+        "ses_123": "pane:42"
+      }
+    },
+    "artifacts": {
+      "labels": ["new"]
+    }
+  },
+  "workspaces": {
+    "default": {
+      "current": false,
+      "windows": [
+        {
+          "id": "29",
+          "label": "shell",
+          "panes": [
+            {
+              "id": "43",
+              "label": "zsh"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

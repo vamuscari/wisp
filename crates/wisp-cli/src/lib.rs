@@ -1,10 +1,15 @@
 use std::{
+    collections::{BTreeSet, VecDeque},
     env,
     fs::{self, File},
-    io::{self, BufWriter, Write},
+    io::{self, BufWriter, Read, Write},
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
-    sync::mpsc::{self, Receiver, TryRecvError},
+    process::{Command as ProcessCommand, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, TryRecvError},
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -25,7 +30,10 @@ use wisp_core::{
         SelectionStatus,
     },
 };
-use wisp_tui::{ActiveProjectContext, App, DataSource, GitSummary, TuiError};
+use wisp_tui::{
+    ActiveProjectContext, App, DataSource, DirectoryRequest, DirectoryUpdate, GitSummary, TuiError,
+    WindowPreviewContent, WindowPreviewRequest, WindowPreviewUpdate,
+};
 
 mod deploy;
 pub mod opencode;
@@ -86,6 +94,12 @@ struct PickArgs {
     active_project_path: Option<PathBuf>,
     #[arg(long, value_name = "PATH")]
     active_file: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    wezterm_executable: Option<PathBuf>,
+    #[arg(long)]
+    window_preview: bool,
+    #[arg(long, value_enum, default_value_t = PickSinglePaneBehavior::Show)]
+    single_pane_behavior: PickSinglePaneBehavior,
     #[arg(long, value_enum, default_value_t = InitialView::Projects)]
     initial_view: InitialView,
     #[arg(long)]
@@ -98,6 +112,13 @@ enum InitialView {
     Projects,
     Windows,
     Sessions,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum PickSinglePaneBehavior {
+    #[default]
+    Show,
+    Activate,
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]
@@ -229,14 +250,7 @@ pub fn run() -> i32 {
 }
 
 fn run_pick_command(config_override: Option<&Path>, args: PickArgs) -> i32 {
-    let result = pick(
-        config_override,
-        args.host_context_file.as_deref(),
-        args.active_project_path.as_deref(),
-        args.active_file.as_deref(),
-        args.initial_view,
-        !args.disable_sessions,
-    );
+    let result = pick(config_override, &args);
     let (envelope, exit_code) = match result {
         Ok(Some(selection)) => (SelectionEnvelope::selected(selection), 0),
         Ok(None) => (SelectionEnvelope::cancelled(), 0),
@@ -396,32 +410,38 @@ fn run_noninteractive(
     }
 }
 
-fn pick(
-    config_override: Option<&Path>,
-    host_context_path: Option<&Path>,
-    active_project_path: Option<&Path>,
-    active_file: Option<&Path>,
-    initial_view: InitialView,
-    sessions_enabled: bool,
-) -> Result<Option<Selection>, CliError> {
+fn pick(config_override: Option<&Path>, args: &PickArgs) -> Result<Option<Selection>, CliError> {
     let (config, mut catalog) = load_catalog(config_override)?;
+    let directory_loader = DirectoryLoader::new(config.clone(), cache_path()?);
     let projects = catalog.projects(now())?;
-    let context = host_context_path.map(read_host_context).transpose()?;
+    let context = args
+        .host_context_file
+        .as_deref()
+        .map(read_host_context)
+        .transpose()?;
     let active_project = build_active_project_context(
         &projects,
         context.as_ref(),
-        active_project_path,
-        active_file,
+        args.active_project_path.as_deref(),
+        args.active_file.as_deref(),
     );
-    let active_project_git = active_project.as_ref().and_then(|active| {
-        projects
-            .iter()
-            .find(|project| project.id == active.project_id)
-            .map(|project| spawn_git_summary(project.id.clone(), project.path.clone()))
-    });
-    let opencode_config = sessions_enabled.then(|| config.opencode.clone()).flatten();
+    let git_targets = git_summary_targets(
+        &projects,
+        context.as_ref(),
+        active_project
+            .as_ref()
+            .map(|active| active.project_id.as_str()),
+    );
+    let git_project_ids = git_targets
+        .iter()
+        .map(|(project_id, _)| project_id.clone())
+        .collect();
+    let project_git = GitSummaryScheduler::new(git_targets);
+    let opencode_config = (!args.disable_sessions)
+        .then(|| config.opencode.clone())
+        .flatten();
     let vcs_icons = config.vcs.icons;
-    let tui_initial_view = match initial_view {
+    let tui_initial_view = match args.initial_view {
         InitialView::Projects => wisp_tui::InitialView::Projects,
         InitialView::Windows => wisp_tui::InitialView::Windows,
         InitialView::Sessions => wisp_tui::InitialView::Sessions,
@@ -446,6 +466,11 @@ fn pick(
     if let Some(active_project) = active_project {
         app.set_active_project_context(active_project);
     }
+    app.configure_window_preview(args.wezterm_executable.is_some(), args.window_preview);
+    app.configure_single_pane_behavior(match args.single_pane_behavior {
+        PickSinglePaneBehavior::Show => wisp_tui::SinglePaneBehavior::Show,
+        PickSinglePaneBehavior::Activate => wisp_tui::SinglePaneBehavior::Activate,
+    });
     app.set_vcs_icons(vcs_icons);
     let opencode = opencode_config
         .map(opencode::OpenCodeClient::new)
@@ -456,9 +481,16 @@ fn pick(
             last_poll: Instant::now(),
         });
     let mut data = CatalogDataSource {
-        catalog: &mut catalog,
-        active_project_git,
+        catalog,
+        directory_loader,
+        git_project_ids,
+        project_git,
         opencode,
+        window_preview: args
+            .wezterm_executable
+            .as_deref()
+            .map(Path::to_path_buf)
+            .map(WindowPreviewLoader::new),
     };
     Ok(wisp_tui::run(app, &mut data)?)
 }
@@ -521,6 +553,26 @@ fn relative_project_file(project: &Project, file: &Path) -> Option<String> {
     normalized_file
         .get(normalized_file.len().checked_sub(relative.len())?..)
         .map(str::to_owned)
+}
+
+fn git_summary_targets(
+    projects: &[Project],
+    context: Option<&HostContext>,
+    active_project_id: Option<&str>,
+) -> Vec<(String, PathBuf)> {
+    projects
+        .iter()
+        .filter(|project| {
+            active_project_id == Some(project.id.as_str())
+                || context.is_some_and(|context| {
+                    context
+                        .labels(&project.id)
+                        .iter()
+                        .any(|label| label == "current" || label == "open")
+                })
+        })
+        .map(|project| (project.id.clone(), project.path.clone()))
+        .collect()
 }
 
 fn parse_git_status(status: &str) -> Option<GitSummary> {
@@ -611,6 +663,321 @@ fn spawn_git_summary(project_id: String, project_path: PathBuf) -> Receiver<(Str
     receiver
 }
 
+const MAX_GIT_WORKERS: usize = 4;
+const DIRECTORY_DEBOUNCE: Duration = Duration::from_millis(50);
+const MAX_WINDOW_PREVIEW_LINES: usize = 200;
+const MAX_WINDOW_PREVIEW_BYTES: usize = 256 * 1024;
+const WINDOW_PREVIEW_DEBOUNCE: Duration = Duration::from_millis(100);
+const WINDOW_PREVIEW_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn window_preview_args(pane_id: &str) -> [&str; 4] {
+    ["cli", "get-text", "--pane-id", pane_id]
+}
+
+fn window_preview_command(executable: &Path, pane_id: &str) -> ProcessCommand {
+    let mut command = ProcessCommand::new(executable);
+    command
+        .args(window_preview_args(pane_id))
+        // Adapter pane IDs belong to the GUI mux, not the picker's domain server.
+        .env_remove("WEZTERM_UNIX_SOCKET")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+fn sanitize_window_preview(text: &str) -> Option<String> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized.lines().count() > MAX_WINDOW_PREVIEW_LINES {
+        return None;
+    }
+    let filtered = normalized
+        .chars()
+        .filter(|character| *character == '\n' || *character == '\t' || !character.is_control())
+        .collect::<String>();
+    if filtered.trim().is_empty() {
+        Some(String::new())
+    } else {
+        Some(filtered)
+    }
+}
+
+fn read_window_preview(mut output: impl Read) -> io::Result<(Vec<u8>, bool)> {
+    let mut retained = Vec::new();
+    let mut overflow = false;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = output.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_WINDOW_PREVIEW_BYTES.saturating_sub(retained.len());
+        let keep = remaining.min(read);
+        retained.extend_from_slice(&buffer[..keep]);
+        overflow |= keep < read;
+    }
+    Ok((retained, overflow))
+}
+
+fn load_window_preview(
+    executable: &Path,
+    pane_id: &str,
+    cancelled: &AtomicBool,
+) -> WindowPreviewContent {
+    if cancelled.load(Ordering::Relaxed) {
+        return WindowPreviewContent::Unavailable;
+    }
+    let mut child = match window_preview_command(executable, pane_id).spawn() {
+        Ok(child) => child,
+        Err(_) => return WindowPreviewContent::Unavailable,
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return WindowPreviewContent::Unavailable;
+    };
+    let reader = thread::spawn(move || read_window_preview(stdout));
+    let deadline = Instant::now() + WINDOW_PREVIEW_TIMEOUT;
+    let status = loop {
+        if cancelled.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let Ok(Ok((encoded, overflow))) = reader.join() else {
+        return WindowPreviewContent::Unavailable;
+    };
+    if cancelled.load(Ordering::Relaxed)
+        || !status.is_some_and(|status| status.success())
+        || overflow
+    {
+        return WindowPreviewContent::Unavailable;
+    }
+    sanitize_window_preview(&String::from_utf8_lossy(&encoded)).map_or(
+        WindowPreviewContent::Unavailable,
+        WindowPreviewContent::Text,
+    )
+}
+
+struct PendingWindowPreview {
+    request: WindowPreviewRequest,
+    changed_at: Instant,
+}
+
+struct WindowPreviewWorker {
+    receiver: Receiver<WindowPreviewUpdate>,
+    cancelled: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl WindowPreviewWorker {
+    fn cancel(mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        self.join();
+    }
+
+    fn join(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct WindowPreviewLoader {
+    executable: PathBuf,
+    pending: Option<PendingWindowPreview>,
+    in_flight: Option<WindowPreviewWorker>,
+}
+
+impl WindowPreviewLoader {
+    fn new(executable: PathBuf) -> Self {
+        Self {
+            executable,
+            pending: None,
+            in_flight: None,
+        }
+    }
+
+    fn request(&mut self, request: WindowPreviewRequest) {
+        self.cancel_in_flight();
+        self.pending = Some(PendingWindowPreview {
+            request,
+            changed_at: Instant::now(),
+        });
+    }
+
+    fn cancel(&mut self) {
+        self.pending = None;
+        self.cancel_in_flight();
+    }
+
+    fn cancel_in_flight(&mut self) {
+        if let Some(worker) = self.in_flight.take() {
+            worker.cancel();
+        }
+    }
+
+    fn finish_in_flight(&mut self) {
+        if let Some(mut worker) = self.in_flight.take() {
+            worker.join();
+        }
+    }
+
+    fn update(&mut self) -> Option<WindowPreviewUpdate> {
+        let update = match self
+            .in_flight
+            .as_ref()
+            .map(|worker| worker.receiver.try_recv())
+        {
+            Some(Ok(update)) => {
+                self.finish_in_flight();
+                Some(update)
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.finish_in_flight();
+                None
+            }
+            Some(Err(TryRecvError::Empty)) | None => None,
+        };
+        if self.in_flight.is_none()
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.changed_at.elapsed() >= WINDOW_PREVIEW_DEBOUNCE)
+        {
+            self.start_pending();
+        }
+        update
+    }
+
+    fn start_pending(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        let executable = self.executable.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let thread = thread::spawn(move || {
+            let content =
+                load_window_preview(&executable, &pending.request.pane_id, &worker_cancelled);
+            let _ = sender.send(WindowPreviewUpdate {
+                request_id: pending.request.request_id,
+                pane_id: pending.request.pane_id,
+                content,
+            });
+        });
+        self.in_flight = Some(WindowPreviewWorker {
+            receiver,
+            cancelled,
+            thread: Some(thread),
+        });
+    }
+
+    #[cfg(test)]
+    fn has_in_flight(&self) -> bool {
+        self.in_flight.is_some()
+    }
+}
+
+impl Drop for WindowPreviewLoader {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+struct GitSummaryWorker {
+    generation: u64,
+    receiver: Receiver<(String, GitSummary)>,
+}
+
+struct GitSummaryScheduler {
+    generation: u64,
+    pending: VecDeque<(String, PathBuf)>,
+    in_flight: Vec<GitSummaryWorker>,
+}
+
+impl GitSummaryScheduler {
+    fn new(targets: Vec<(String, PathBuf)>) -> Self {
+        let mut scheduler = Self {
+            generation: 0,
+            pending: VecDeque::new(),
+            in_flight: Vec::new(),
+        };
+        scheduler.restart(targets);
+        scheduler
+    }
+
+    fn restart(&mut self, targets: Vec<(String, PathBuf)>) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = targets.into();
+        self.fill_workers();
+    }
+
+    fn updates(&mut self) -> Vec<(String, GitSummary)> {
+        let mut updates = Vec::new();
+        let mut index = 0;
+        while index < self.in_flight.len() {
+            let generation = self.in_flight[index].generation;
+            match self.in_flight[index].receiver.try_recv() {
+                Ok(update) => {
+                    self.in_flight.swap_remove(index);
+                    if generation == self.generation {
+                        updates.push(update);
+                    }
+                }
+                Err(TryRecvError::Empty) => index += 1,
+                Err(TryRecvError::Disconnected) => {
+                    self.in_flight.swap_remove(index);
+                }
+            }
+        }
+        self.fill_workers();
+        updates
+    }
+
+    fn fill_workers(&mut self) {
+        while self.in_flight.len() < MAX_GIT_WORKERS {
+            let Some((project_id, path)) = self.pending.pop_front() else {
+                break;
+            };
+            self.in_flight.push(GitSummaryWorker {
+                generation: self.generation,
+                receiver: spawn_git_summary(project_id, path),
+            });
+        }
+    }
+
+    #[cfg(test)]
+    fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    #[cfg(test)]
+    fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    #[cfg(test)]
+    fn is_idle(&self) -> bool {
+        self.pending.is_empty() && self.in_flight.is_empty()
+    }
+}
+
 fn build_active_project_context(
     projects: &[Project],
     context: Option<&HostContext>,
@@ -625,10 +992,74 @@ fn build_active_project_context(
     })
 }
 
-struct CatalogDataSource<'a> {
-    catalog: &'a mut Catalog<StdFileSystem>,
-    active_project_git: Option<Receiver<(String, GitSummary)>>,
+struct DirectoryLoader {
+    sender: mpsc::Sender<DirectoryRequest>,
+    receiver: Receiver<DirectoryUpdate>,
+}
+
+impl DirectoryLoader {
+    fn new(config: Config, cache_path: PathBuf) -> Self {
+        let fingerprint = config.fingerprint();
+        Self::from_loader(move |request| {
+            let cache =
+                CacheStore::open(&cache_path, &fingerprint).map_err(|error| error.to_string())?;
+            let mut catalog = Catalog::new(config.clone(), StdFileSystem, cache);
+            let entries = if request.refresh {
+                catalog.refresh_directory(&request.path, now())
+            } else {
+                catalog.directory(&request.path, now())
+            };
+            entries.map_err(|error| error.to_string())
+        })
+    }
+
+    fn from_loader<F>(load: F) -> Self
+    where
+        F: Fn(&DirectoryRequest) -> Result<Vec<DirectoryEntry>, String> + Send + 'static,
+    {
+        let (sender, request_receiver) = mpsc::channel::<DirectoryRequest>();
+        let (update_sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok(mut request) = request_receiver.recv() {
+                loop {
+                    match request_receiver.recv_timeout(DIRECTORY_DEBOUNCE) {
+                        Ok(next) => request = next,
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                let result = load(&request);
+                if update_sender
+                    .send(DirectoryUpdate {
+                        request_id: request.request_id,
+                        path: request.path,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        Self { sender, receiver }
+    }
+
+    fn request(&self, request: DirectoryRequest) {
+        let _ = self.sender.send(request);
+    }
+
+    fn update(&mut self) -> Option<DirectoryUpdate> {
+        self.receiver.try_recv().ok()
+    }
+}
+
+struct CatalogDataSource {
+    catalog: Catalog<StdFileSystem>,
+    directory_loader: DirectoryLoader,
+    git_project_ids: BTreeSet<String>,
+    project_git: GitSummaryScheduler,
     opencode: Option<OpenCodeDataSource>,
+    window_preview: Option<WindowPreviewLoader>,
 }
 
 struct OpenCodeDataSource {
@@ -637,20 +1068,25 @@ struct OpenCodeDataSource {
     last_poll: Instant,
 }
 
-impl DataSource for CatalogDataSource<'_> {
-    fn active_project_git_update(&mut self) -> Option<(String, GitSummary)> {
-        let update = self.active_project_git.as_ref()?.try_recv();
-        match update {
-            Ok(update) => {
-                self.active_project_git = None;
-                Some(update)
-            }
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                self.active_project_git = None;
-                None
-            }
+impl DataSource for CatalogDataSource {
+    fn project_git_updates(&mut self) -> Vec<(String, GitSummary)> {
+        self.project_git.updates()
+    }
+
+    fn request_window_preview(&mut self, request: WindowPreviewRequest) {
+        if let Some(loader) = &mut self.window_preview {
+            loader.request(request);
         }
+    }
+
+    fn cancel_window_preview(&mut self) {
+        if let Some(loader) = &mut self.window_preview {
+            loader.cancel();
+        }
+    }
+
+    fn window_preview_update(&mut self) -> Option<WindowPreviewUpdate> {
+        self.window_preview.as_mut()?.update()
     }
 
     fn directory(&mut self, path: &Path) -> Result<Vec<DirectoryEntry>, String> {
@@ -659,10 +1095,27 @@ impl DataSource for CatalogDataSource<'_> {
             .map_err(|error| error.to_string())
     }
 
+    fn request_directory(&mut self, request: DirectoryRequest) -> Option<DirectoryUpdate> {
+        self.directory_loader.request(request);
+        None
+    }
+
+    fn directory_update(&mut self) -> Option<DirectoryUpdate> {
+        self.directory_loader.update()
+    }
+
     fn refresh_projects(&mut self) -> Result<Vec<Project>, String> {
-        self.catalog
+        let projects = self
+            .catalog
             .refresh(now())
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let targets = projects
+            .iter()
+            .filter(|project| self.git_project_ids.contains(&project.id))
+            .map(|project| (project.id.clone(), project.path.clone()))
+            .collect();
+        self.project_git.restart(targets);
+        Ok(projects)
     }
 
     fn refresh_directory(&mut self, path: &Path) -> Result<Vec<DirectoryEntry>, String> {
@@ -778,9 +1231,9 @@ fn open_selection(json: &str) -> Result<(), CliError> {
         }
         Selection::OpenCodeSession { opener, .. } => opener,
         Selection::CloseProject { .. }
-        | Selection::HostItem { .. }
+        | Selection::HostPane { .. }
         | Selection::Workspace { .. }
-        | Selection::WorkspaceItem { .. }
+        | Selection::WorkspacePane { .. }
         | Selection::CloseWorkspace { .. } => {
             return Err(CliError::MissingOpener);
         }
@@ -845,6 +1298,7 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        sync::Mutex,
         thread,
     };
 
@@ -959,7 +1413,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 4,
+            "protocol_version": 6,
             "projects": {
                 "api": { "labels": ["open"] },
                 "web": { "labels": ["current", "open"] }
@@ -998,7 +1452,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 4,
+            "protocol_version": 6,
             "projects": {
                 "api": { "labels": ["open"] },
                 "web": { "labels": ["current", "open"] }
@@ -1037,7 +1491,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 4,
+            "protocol_version": 6,
             "projects": {
                 "repos": { "labels": ["open"] },
                 "api": { "labels": ["new"] }
@@ -1057,6 +1511,242 @@ mod tests {
         .unwrap();
 
         assert_eq!(project.id, "api");
+    }
+
+    #[test]
+    fn git_summary_targets_include_open_projects_and_the_active_fallback() {
+        let projects = vec![
+            Project {
+                id: "api".into(),
+                path: PathBuf::from("/repos/api"),
+                group: "Repos".into(),
+                name: "api".into(),
+                display_name: "API".into(),
+            },
+            Project {
+                id: "web".into(),
+                path: PathBuf::from("/repos/web"),
+                group: "Repos".into(),
+                name: "web".into(),
+                display_name: "Web".into(),
+            },
+            Project {
+                id: "docs".into(),
+                path: PathBuf::from("/repos/docs"),
+                group: "Repos".into(),
+                name: "docs".into(),
+                display_name: "Docs".into(),
+            },
+        ];
+        let context: HostContext = serde_json::from_value(serde_json::json!({
+            "protocol_version": 6,
+            "projects": {
+                "api": { "labels": ["open"] },
+                "web": { "labels": ["new"] },
+                "docs": { "labels": ["new"] }
+            },
+            "workspaces": {}
+        }))
+        .unwrap();
+
+        let targets = git_summary_targets(&projects, Some(&context), Some("web"));
+
+        assert_eq!(
+            targets
+                .iter()
+                .map(|(project_id, _)| project_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["api", "web"]
+        );
+    }
+
+    #[test]
+    fn git_summary_scheduler_bounds_workers_and_advances_the_queue() {
+        let targets = (0..6)
+            .map(|index| {
+                (
+                    format!("project-{index}"),
+                    PathBuf::from(format!("/missing/{index}")),
+                )
+            })
+            .collect();
+        let mut scheduler = GitSummaryScheduler::new(targets);
+
+        assert_eq!(scheduler.in_flight_count(), MAX_GIT_WORKERS);
+        assert_eq!(scheduler.pending_count(), 2);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !scheduler.is_idle() && Instant::now() < deadline {
+            scheduler.updates();
+            assert!(scheduler.in_flight_count() <= MAX_GIT_WORKERS);
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(scheduler.is_idle());
+    }
+
+    #[test]
+    fn window_preview_argv_targets_one_pane_without_a_shell() {
+        assert_eq!(
+            window_preview_args("42"),
+            ["cli", "get-text", "--pane-id", "42"]
+        );
+    }
+
+    #[test]
+    fn window_preview_command_uses_the_gui_mux_namespace() {
+        let command = window_preview_command(Path::new("/wezterm"), "42");
+
+        assert!(command.get_envs().any(|(key, value)| {
+            key == std::ffi::OsStr::new("WEZTERM_UNIX_SOCKET") && value.is_none()
+        }));
+    }
+
+    #[test]
+    fn window_preview_text_normalizes_lines_and_strips_controls() {
+        assert_eq!(
+            sanitize_window_preview("ready\r\nnext\0\u{1b}[31m\n").as_deref(),
+            Some("ready\nnext[31m\n")
+        );
+    }
+
+    #[test]
+    fn window_preview_text_rejects_excess_physical_lines() {
+        let oversized = "line\n".repeat(MAX_WINDOW_PREVIEW_LINES + 1);
+        assert_eq!(sanitize_window_preview(&oversized), None);
+    }
+
+    #[test]
+    fn window_preview_reader_discards_bytes_beyond_the_limit() {
+        let encoded = vec![b'x'; MAX_WINDOW_PREVIEW_BYTES + 17];
+        let (retained, overflow) = read_window_preview(encoded.as_slice()).unwrap();
+
+        assert_eq!(retained.len(), MAX_WINDOW_PREVIEW_BYTES);
+        assert!(overflow);
+    }
+
+    #[test]
+    fn cancelling_window_preview_removes_the_debounced_request() {
+        let mut loader = WindowPreviewLoader::new(PathBuf::from("unused-wezterm"));
+        loader.request(WindowPreviewRequest {
+            request_id: 1,
+            pane_id: "42".into(),
+        });
+
+        loader.cancel();
+        thread::sleep(WINDOW_PREVIEW_DEBOUNCE + Duration::from_millis(10));
+
+        assert_eq!(loader.update(), None);
+        assert!(loader.pending.is_none());
+        assert!(loader.in_flight.is_none());
+    }
+
+    #[test]
+    fn cancelling_window_preview_signals_and_releases_in_flight_work() {
+        let mut loader = WindowPreviewLoader::new(PathBuf::from("unused-wezterm"));
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        loader.in_flight = Some(WindowPreviewWorker {
+            receiver,
+            cancelled: cancelled.clone(),
+            thread: Some(thread::spawn(|| {})),
+        });
+
+        loader.cancel();
+
+        assert!(cancelled.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(loader.in_flight.is_none());
+    }
+
+    #[test]
+    fn dropping_window_preview_loader_signals_in_flight_work() {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let mut loader = WindowPreviewLoader::new(PathBuf::from("unused-wezterm"));
+            let (_sender, receiver) = mpsc::sync_channel(1);
+            let worker_cancelled = cancelled.clone();
+            let worker_finished = finished.clone();
+            loader.in_flight = Some(WindowPreviewWorker {
+                receiver,
+                cancelled: cancelled.clone(),
+                thread: Some(thread::spawn(move || {
+                    while !worker_cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        thread::yield_now();
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                    worker_finished.store(true, std::sync::atomic::Ordering::Relaxed);
+                })),
+            });
+        }
+
+        assert!(cancelled.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(finished.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn window_preview_loader_debounces_to_the_latest_request() {
+        let mut loader = WindowPreviewLoader::new(PathBuf::from("/missing/wezterm"));
+        loader.request(wisp_tui::WindowPreviewRequest {
+            request_id: 1,
+            pane_id: "41".into(),
+        });
+        loader.request(wisp_tui::WindowPreviewRequest {
+            request_id: 2,
+            pane_id: "42".into(),
+        });
+
+        assert!(!loader.has_in_flight());
+        thread::sleep(WINDOW_PREVIEW_DEBOUNCE + Duration::from_millis(10));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let update = loop {
+            if let Some(update) = loader.update() {
+                break update;
+            }
+            assert!(Instant::now() < deadline, "preview worker should finish");
+            thread::sleep(Duration::from_millis(5));
+        };
+
+        assert_eq!(update.request_id, 2);
+        assert_eq!(update.pane_id, "42");
+        assert_eq!(update.content, wisp_tui::WindowPreviewContent::Unavailable);
+    }
+
+    #[test]
+    fn directory_loader_debounces_to_the_latest_request() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let worker_calls = calls.clone();
+        let mut loader = DirectoryLoader::from_loader(move |request| {
+            worker_calls.lock().unwrap().push(request.path.clone());
+            Ok(vec![DirectoryEntry::new(
+                request.path.join("entry"),
+                wisp_core::model::EntryKind::File,
+            )])
+        });
+        loader.request(wisp_tui::DirectoryRequest {
+            request_id: 1,
+            path: PathBuf::from("/repos/a"),
+            refresh: false,
+        });
+        loader.request(wisp_tui::DirectoryRequest {
+            request_id: 2,
+            path: PathBuf::from("/repos/b"),
+            refresh: false,
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let update = loop {
+            if let Some(update) = loader.update() {
+                break update;
+            }
+            assert!(Instant::now() < deadline, "directory worker should finish");
+            thread::sleep(Duration::from_millis(5));
+        };
+
+        assert_eq!(update.request_id, 2);
+        assert_eq!(update.path, PathBuf::from("/repos/b"));
+        assert_eq!(calls.lock().unwrap().as_slice(), [Path::new("/repos/b")]);
     }
 
     #[test]
@@ -1217,10 +1907,14 @@ mod tests {
             }
         });
         let temporary = TempDir::new().unwrap();
-        let config = Config::parse("version = 4", temporary.path()).unwrap();
+        let config = Config::parse("version = 6", temporary.path()).unwrap();
         let cache =
             CacheStore::open(temporary.path().join("cache.json"), config.fingerprint()).unwrap();
-        let mut catalog = Catalog::new(config, StdFileSystem, cache);
+        let directory_loader = DirectoryLoader::new(
+            config.clone(),
+            temporary.path().join("directory-cache.json"),
+        );
+        let catalog = Catalog::new(config, StdFileSystem, cache);
         let client = opencode::OpenCodeClient::with_registry_dir(
             OpenCodeConfig {
                 server_url,
@@ -1241,13 +1935,16 @@ mod tests {
             temporary.path().join("watcher-registry"),
         );
         let mut data = CatalogDataSource {
-            catalog: &mut catalog,
-            active_project_git: None,
+            catalog,
+            directory_loader,
+            git_project_ids: BTreeSet::new(),
+            project_git: GitSummaryScheduler::new(Vec::new()),
             opencode: Some(OpenCodeDataSource {
                 client,
                 watcher: watcher_client.watch_shared(),
                 last_poll: Instant::now() - Duration::from_secs(2),
             }),
+            window_preview: None,
         };
 
         DataSource::sessions(&mut data, Path::new("/repos/wisp")).unwrap();

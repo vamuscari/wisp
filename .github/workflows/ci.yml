@@ -127,6 +127,7 @@ jobs:
           chmod +x "${WEZTERM_ASSET}"
       - name: Parse plugin configuration
         run: |
+          APPIMAGE_EXTRACT_AND_RUN=1 "./${WEZTERM_ASSET}" cli get-text --help >/dev/null
           APPIMAGE_EXTRACT_AND_RUN=1 \
             WISP_DEPLOY_ROOT="$RUNNER_TEMP/wisp" \
             XDG_CONFIG_HOME="$RUNNER_TEMP/config" \
@@ -196,5 +197,7 @@ jobs:
           $env:XDG_CONFIG_HOME = Join-Path $env:RUNNER_TEMP "config"
           $wezterm = (Get-ChildItem wezterm -Recurse -Filter wezterm.exe | Select-Object -First 1).FullName
           if (-not $wezterm) { throw "wezterm.exe was not extracted" }
+          & $wezterm cli get-text --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "WezTerm get-text command is unavailable" }
           & $wezterm --config-file "$PWD\tests\deployed_wezterm_config.lua" ls-fonts --text test | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "WezTerm configuration parse failed" }

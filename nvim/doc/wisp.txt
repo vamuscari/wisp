@@ -17,7 +17,10 @@ Run `wisp deploy`, add its stable `nvim` directory to 'runtimepath', then call:
 The deployed adapter always invokes the executable from its own bundle. Wisp
 opens in a floating terminal. A project selection sets the originating tab's
 local working directory. A file selection also edits that file in the
-originating tab. The originating normal-file buffer is shown inline on the
+originating tab. File browsing uses retained directory columns: highlighting a
+folder loads only its immediate children on a debounced worker, Enter or Right
+descends, and Left or Backspace returns to its parent. Superseded folder results
+are discarded. The originating normal-file buffer is shown inline on the
 current project together with the Git branch and configurable clean/dirty,
 untracked, modified, staged, conflicted, upstream, and stashed markers. Nonzero
 category counts are shown. Git metadata loads after the picker opens. Editor

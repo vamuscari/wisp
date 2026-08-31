@@ -3,11 +3,21 @@ Status.__index = Status
 local FLASH_INTERVAL_SECONDS = 0.25
 local FLASH_TRANSITIONS = 6
 
-function Status.new(wezterm, options, client)
+function Status.new(wezterm, options, client, providers, activate)
+  local clickable = pcall(function()
+    wezterm.format {
+      { Hyperlink = "wisp://status/probe" },
+      { Text = "" },
+      "EndHyperlink",
+    }
+  end)
   return setmetatable({
     wezterm = wezterm,
     options = options,
     client = client,
+    providers = providers,
+    activate = activate,
+    clickable = clickable,
     counts = { waiting = 0, running = 0, retrying = 0, idle = 0, error = 0 },
     cooling_down = false,
     flashes = {
@@ -75,6 +85,13 @@ function Status:update_flash(kind, previous, current)
 end
 
 function Status:refresh()
+  local enabled = false
+  for _, item in ipairs(self.options:get().status_items) do
+    enabled = enabled or item.name == "opencode"
+  end
+  if not enabled then
+    return
+  end
   if self.refreshing or self.cooling_down then
     return
   end
@@ -134,40 +151,23 @@ function Status:render(window, pane)
   local colors = self.options:get().status_colors
   local workspace_color = checked_leader and leader_is_active and colors.active_workspace_background
     or colors.workspace_background
-  local items = {
-    { Background = { Color = colors.opencode_background } },
-    { Foreground = { Color = colors.foreground } },
-    { Attribute = { Intensity = "Bold" } },
-    { Text = " OC " },
-  }
-  local cells = {
-    { self.counts.idle, colors.idle_background },
-    { self.counts.running, colors.running_background },
-  }
-  if self.counts.waiting > 0 then
-    table.insert(cells, { self.counts.waiting, colors.waiting_background, self.flashes.waiting })
-  end
-  local failures = self.counts.retrying + self.counts.error
-  if failures > 0 then
-    table.insert(cells, { failures, colors.failure_background, self.flashes.failure })
-  end
-  for _, cell in ipairs(cells) do
-    table.insert(items, { Background = { Color = cell[2] } })
-    table.insert(items, { Foreground = { Color = colors.foreground } })
-    local hidden = cell[3] and cell[3].active and not cell[3].visible
-    if hidden then
-      table.insert(items, { Attribute = { Invisible = true } })
-    end
-    table.insert(items, { Text = " " .. cell[1] .. " " })
-    if hidden then
-      table.insert(items, { Attribute = { Invisible = false } })
-    end
-  end
-  table.insert(items, { Background = { Color = workspace_color } })
-  table.insert(items, { Foreground = { Color = colors.foreground } })
-  table.insert(items, { Attribute = { Intensity = "Bold" } })
-  table.insert(items, { Text = " " .. project .. " " })
+  local items = self.providers:render(self.options:get().status_items, {
+    colors = colors,
+    counts = self.counts,
+    flashes = self.flashes,
+    project = project,
+    workspace_color = workspace_color,
+  }, self.clickable)
   window:set_right_status(self.wezterm.format(items))
+end
+
+function Status:activate_provider(window, pane, provider_name)
+  for _, item in ipairs(self.options:get().status_items) do
+    if item.name == provider_name and item.action then
+      self.activate(window, pane, item.action)
+      return
+    end
+  end
 end
 
 function Status:install(safely)
@@ -177,6 +177,19 @@ function Status:install(safely)
       self:refresh()
       self:render(window, pane)
     end)
+  end)
+  self.wezterm.on("open-uri", function(window, pane, uri)
+    local provider_name = type(uri) == "string" and uri:match "^wisp://status/([%w_-]+)$" or nil
+    if not provider_name then
+      return
+    end
+    local activated, activate_error = pcall(function()
+      self:activate_provider(window, pane, provider_name)
+    end)
+    if not activated then
+      self:report_error("wisp status action failed: " .. tostring(activate_error))
+    end
+    return false
   end)
 end
 

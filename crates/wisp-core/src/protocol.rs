@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::{model::Project, opencode::OpenCodeStatusCounts};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Deserialize)]
 struct VersionHeader {
@@ -125,20 +125,26 @@ pub enum HostContextError {
     EmptyProjectId,
     #[error("host context labels must not be empty")]
     EmptyLabel,
-    #[error("host item IDs must not be empty")]
-    EmptyItemId,
-    #[error("host item labels must not be empty")]
-    EmptyItemLabel,
-    #[error("host context project {project_id} contains duplicate item ID {item_id}")]
-    DuplicateItemId { project_id: String, item_id: String },
+    #[error("host window IDs must not be empty")]
+    EmptyWindowId,
+    #[error("host window labels must not be empty")]
+    EmptyWindowLabel,
+    #[error("host pane IDs must not be empty")]
+    EmptyPaneId,
+    #[error("host pane labels must not be empty")]
+    EmptyPaneLabel,
+    #[error("host window {window_id} in {owner} must contain at least one pane")]
+    EmptyWindowPanes { owner: String, window_id: String },
+    #[error("{owner} contains duplicate window ID {window_id}")]
+    DuplicateWindowId { owner: String, window_id: String },
+    #[error("{owner} contains duplicate pane ID {pane_id}")]
+    DuplicatePaneId { owner: String, pane_id: String },
     #[error("OpenCode session IDs in host context must not be empty")]
     EmptySessionId,
     #[error("OpenCode session host item IDs must not be empty")]
     EmptySessionItemId,
     #[error("host workspace names must not be empty")]
     EmptyWorkspaceName,
-    #[error("host context workspace {workspace} contains duplicate item ID {item_id}")]
-    DuplicateWorkspaceItemId { workspace: String, item_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,7 +152,7 @@ pub enum HostContextError {
 pub struct HostProjectContext {
     pub labels: Vec<String>,
     #[serde(default)]
-    pub items: Vec<HostItem>,
+    pub windows: Vec<HostWindow>,
     #[serde(default)]
     pub session_items: BTreeMap<String, String>,
 }
@@ -156,18 +162,70 @@ pub struct HostProjectContext {
 pub struct HostWorkspaceContext {
     pub current: bool,
     #[serde(default)]
-    pub items: Vec<HostItem>,
+    pub windows: Vec<HostWindow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HostItem {
+pub struct HostWindow {
     pub id: String,
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(default)]
     pub active: bool,
+    pub panes: Vec<HostPane>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostPane {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub active: bool,
+}
+
+fn validate_windows(owner: &str, windows: &[HostWindow]) -> Result<(), HostContextError> {
+    let mut window_ids = BTreeSet::new();
+    let mut pane_ids = BTreeSet::new();
+    for window in windows {
+        if window.id.is_empty() {
+            return Err(HostContextError::EmptyWindowId);
+        }
+        if window.label.is_empty() {
+            return Err(HostContextError::EmptyWindowLabel);
+        }
+        if !window_ids.insert(&window.id) {
+            return Err(HostContextError::DuplicateWindowId {
+                owner: owner.to_string(),
+                window_id: window.id.clone(),
+            });
+        }
+        if window.panes.is_empty() {
+            return Err(HostContextError::EmptyWindowPanes {
+                owner: owner.to_string(),
+                window_id: window.id.clone(),
+            });
+        }
+        for pane in &window.panes {
+            if pane.id.is_empty() {
+                return Err(HostContextError::EmptyPaneId);
+            }
+            if pane.label.is_empty() {
+                return Err(HostContextError::EmptyPaneLabel);
+            }
+            if !pane_ids.insert(&pane.id) {
+                return Err(HostContextError::DuplicatePaneId {
+                    owner: owner.to_string(),
+                    pane_id: pane.id.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 impl HostContext {
@@ -182,21 +240,7 @@ impl HostContext {
             if context.labels.iter().any(String::is_empty) {
                 return Err(HostContextError::EmptyLabel);
             }
-            let mut item_ids = BTreeSet::new();
-            for item in &context.items {
-                if item.id.is_empty() {
-                    return Err(HostContextError::EmptyItemId);
-                }
-                if item.label.is_empty() {
-                    return Err(HostContextError::EmptyItemLabel);
-                }
-                if !item_ids.insert(&item.id) {
-                    return Err(HostContextError::DuplicateItemId {
-                        project_id: project_id.clone(),
-                        item_id: item.id.clone(),
-                    });
-                }
-            }
+            validate_windows(&format!("project {project_id}"), &context.windows)?;
             if context.session_items.keys().any(String::is_empty) {
                 return Err(HostContextError::EmptySessionId);
             }
@@ -208,21 +252,7 @@ impl HostContext {
             if workspace_name.is_empty() {
                 return Err(HostContextError::EmptyWorkspaceName);
             }
-            let mut item_ids = BTreeSet::new();
-            for item in &workspace.items {
-                if item.id.is_empty() {
-                    return Err(HostContextError::EmptyItemId);
-                }
-                if item.label.is_empty() {
-                    return Err(HostContextError::EmptyItemLabel);
-                }
-                if !item_ids.insert(&item.id) {
-                    return Err(HostContextError::DuplicateWorkspaceItemId {
-                        workspace: workspace_name.clone(),
-                        item_id: item.id.clone(),
-                    });
-                }
-            }
+            validate_windows(&format!("workspace {workspace_name}"), &workspace.windows)?;
         }
         Ok(Self {
             protocol_version: PROTOCOL_VERSION,
@@ -238,10 +268,10 @@ impl HostContext {
             .unwrap_or_default()
     }
 
-    pub fn items(&self, project_id: &str) -> &[HostItem] {
+    pub fn windows(&self, project_id: &str) -> &[HostWindow] {
         self.projects
             .get(project_id)
-            .map(|context| context.items.as_slice())
+            .map(|context| context.windows.as_slice())
             .unwrap_or_default()
     }
 
@@ -403,16 +433,18 @@ pub enum Selection {
     CloseProject {
         project: Project,
     },
-    HostItem {
+    HostPane {
         project: Project,
-        id: String,
+        window_id: String,
+        pane_id: String,
     },
     Workspace {
         workspace: String,
     },
-    WorkspaceItem {
+    WorkspacePane {
         workspace: String,
-        id: String,
+        window_id: String,
+        pane_id: String,
     },
     CloseWorkspace {
         workspace: String,

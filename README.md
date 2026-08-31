@@ -17,6 +17,11 @@ its own picker UI.
 - Neovim `0.10.4` or newer for the Neovim adapter
 - OpenCode `1.18.15` for optional session tracking
 
+Clickable right-status providers additionally require a WezTerm build where
+`wezterm.format` accepts `Hyperlink` and `EndHyperlink` items and linked status
+cells dispatch `open-uri`. Wisp probes this capability when the adapter loads;
+other supported WezTerm builds render the same status without click targets.
+
 Project discovery is local to the machine running `wisp`. A configured named
 WezTerm domain may point at a same-host mux server, but remote project paths are
 not supported.
@@ -93,7 +98,7 @@ Set `WISP_CONFIG_FILE` or pass the global `--config <path>` option to use a
 different file.
 
 ```toml
-version = 4
+version = 6
 cache_ttl_seconds = 60
 follow_symlinks = false
 
@@ -136,8 +141,8 @@ Openers are argv arrays, never shell strings. Supported placeholders are:
 `openers.file` is included in file selections. An optional `openers.project`
 is included in project selections. The picker itself never executes either.
 
-The optional `[vcs.icons]` table customizes the current project's Git markers.
-Omitted keys use these defaults:
+The optional `[vcs.icons]` table customizes Git markers for current and open
+projects. Omitted keys use these defaults:
 
 ```toml
 [vcs.icons]
@@ -216,18 +221,22 @@ wisp open "$(cat /tmp/wisp-selection.json)"
 | Key | Action |
 | --- | --- |
 | `Up` / `Down`, `j` / `k` | Move in the focused pane |
-| `Left` / `Right`, `h` / `l`, `Tab` | Change pane focus |
-| `Enter` | Select a project, host workspace, window, file, or session; enter a directory |
+| `Left` / `Right`, `h` / `l`, `Tab` | Move through the Project, Window, Pane, or directory hierarchy |
+| `Enter` | Descend into a project, window, or directory; select a pane, file, or session |
+| `o` | Directly activate the selected project or host workspace |
 | `w` | Show Windows and focus the detail pane |
 | `f` | Show Files and focus the detail pane |
 | `s` | Show OpenCode Sessions and focus the detail pane |
 | `x` | Close the selected open project or host workspace from the Projects pane and exit |
+| `p` | Toggle the window Preview pane |
+| `?` | Toggle the Commands pane |
 | `/` | Enter fuzzy search for the focused pane |
 | `Backspace` | Go to the parent directory; at the project root focus Projects |
-| `Ctrl-R` | Force-refresh projects or the active detail listing |
-| `Esc`, `q`, `Ctrl-C` | Cancel |
+| `Ctrl-R` | Force-refresh projects and open-project Git, or the active detail listing; Windows also refreshes a visible Preview |
+| `Esc` | Close Commands when visible; otherwise cancel |
+| `q`, `Ctrl-C` | Cancel |
 
-In search mode, printable characters update the focused pane's query,
+In search mode, printable characters, including `p` and `?`, update the focused pane's query,
 `Backspace` edits it, `Esc` returns to normal mode while retaining the query,
 and `Enter` selects the current match. Project and detail queries are
 independent.
@@ -240,26 +249,37 @@ indicators use green, cyan, and muted ANSI colors from the active terminal theme
 rather than fixed RGB values.
 
 The current project row includes the active Neovim file as a project-relative
-path when the current buffer is a normal file. It also includes the Git branch,
-clean or dirty state, and nonzero counts for untracked, modified, staged,
-conflicted, upstream, and stashed states when `git` can inspect the project.
-Combined upstream divergence renders as `ahead/behind`. This metadata stays
-inline in Projects; the Git summary is anchored to the right edge while the file
-path uses the remaining space and truncates from the left when needed. Git
-inspection runs after the picker opens and updates the row when it finishes. The
-Projects pane uses a capped adaptive width so most horizontal space remains
-available to the detail pane.
+path when the current buffer is a normal file. Every current or open configured
+project also includes the Git branch, clean or dirty state, and nonzero counts
+for untracked, modified, staged, conflicted, upstream, and stashed states when
+`git` can inspect it. Combined upstream divergence renders as `ahead/behind`.
+This metadata stays inline in Projects; each Git summary is anchored to the
+right edge while the active file path uses the remaining space and truncates
+from the left when needed. Up to four Git inspections run after the picker opens
+and rows update as they finish. The Projects pane uses a capped adaptive width
+so most horizontal space remains available to the detail pane.
 
-Projects and live host-only workspaces remain in the left pane. The right pane
-shows host windows, the selected project's files, or its OpenCode sessions.
+Projects and live host-only workspaces remain in the left pane. Windows mode
+shows separate Window and Pane columns so selecting a split activates its exact
+pane. Files mode uses retained Miller columns: highlighting a directory reads
+only its immediate children, Enter or Right focuses that child column, and
+Backspace or Left returns to an already loaded parent. Wide layouts show up to
+four hierarchy levels including Projects, medium layouts show three, and narrow
+layouts recycle the focused directory while retaining the full breadcrumb.
+Directory reads use a debounced background worker, and request IDs discard
+results superseded by a newer highlight.
+There is no application title bar. A white-bordered utility bar at the bottom
+shows the current mode and view, becomes the focused query input during search,
+and reports status errors. Command hints live in the `?` Commands pane, which
+uses the Preview region and restores its previous state when closed.
 Files and OpenCode sessions are unavailable for a host-only workspace. Pressing
 `x` on a host-current or host-open row returns a host action rather than
 terminating processes directly. The WezTerm adapter applies it by closing every
 pane in the exact workspace; `x` has no effect for new, standalone, or
 editor-active-only projects.
 
-File browsing lists only the current directory. Child directories are read
-when entered rather than indexed recursively.
+File browsing has unlimited logical depth without recursive indexing. Only the
+highlighted directory's immediate children are loaded.
 
 Session rows show the OpenCode agent and whether the session is a root or child.
 States are ordered by waiting for a question or permission, retrying, running,
@@ -285,36 +305,63 @@ local wisp = dofile(wezterm.config_dir .. "/wisp/init.lua")
 
 wisp.apply_to_config(config, {
   spawn_domain = { DomainName = "local" },
+  status_items = {
+    { name = "opencode", action = "sessions" },
+    { name = "directory", action = "projects" },
+  },
+  popup = { direction = "Bottom", size = 0.65 },
+  window_preview = true,
 })
 
 config.keys = config.keys or {}
 table.insert(config.keys, { key = "s", mods = "LEADER", action = wisp.project_picker_action() })
 table.insert(config.keys, { key = "w", mods = "LEADER", action = wisp.window_picker_action() })
 table.insert(config.keys, { key = "o", mods = "LEADER", action = wisp.opencode_picker_action() })
+table.insert(config.keys, { key = "p", mods = "LEADER", action = wisp.popup_action "projects" })
 
 return config
 ```
+
+A complete configuration with a leader key and additional Wisp actions is in
+[`examples/wezterm.lua`](examples/wezterm.lua).
 
 `apply_to_config` installs no binding unless the optional `picker_binding` is
 present; that convenience option binds the project-focused picker. Roots, fixed
 projects, cache settings, and openers belong in shared TOML, not in the Lua
 options.
 
-By default, the adapter owns WezTerm's right status area. It shows `OC`, the
-idle and running counts, optional waiting and failure counts, then the short
-project name. Failure is the sum of retrying and error registrations. Waiting
-and failure are hidden at zero; each flashes three times when it becomes
-nonzero, then remains solid. Counts refresh every two seconds and retain their
-last valid values across transient failures. Set `status_bar = false` to leave
-the right status area untouched.
+By default, the adapter owns WezTerm's right status area and renders the bundled
+`opencode` provider followed by `directory`. `opencode` shows `OC`, idle and
+running counts, and optional waiting and failure counts. Failure is the sum of
+retrying and error registrations. Waiting and failure are hidden at zero; each
+flashes three times when it becomes nonzero, then remains solid. Counts refresh
+every two seconds and retain their last valid values across transient failures.
+`directory` shows the short workspace name. On a capable WezTerm build, clicking
+the default providers opens Sessions or Projects in Wisp's popup. Set
+`status_bar = false` to leave the right status area untouched.
 
-The picker actions query `wisp projects --json`, snapshot every live workspace
-and its tabs, map configured project workspaces to `current`, `open`, and `new`
-labels, and include unmatched workspaces as host-only rows. They then launch
-`wisp pick` as the sole process in a temporary tab. The project action starts
-with Projects focused; the window action starts on the active tab of the current
-workspace. A completed result closes the owned picker tab and applies the
-selection through the original window and pane.
+The picker actions query `wisp projects --json`, snapshot every live workspace,
+tab, and pane, map configured project workspaces to `current`, `open`, and `new`
+labels, and include unmatched workspaces as host-only rows. The standard
+project, window, and OpenCode actions launch `wisp pick` as the sole process in
+a temporary tab. `popup_action` and status-provider clicks launch the same exact
+argv in a top-level split. Only one Wisp popup is active per GUI window; opening
+another replaces it, and cancellation or selection closes only the owned split.
+The project action starts with Projects focused; the window action starts on the
+active tab and pane of the current workspace. A completed result applies the
+selection through the original window and pane. `single_pane_behavior = "show"`
+keeps the Pane column visible for one-pane windows; `"activate"` makes Enter on
+such a window activate its sole pane immediately.
+
+Window Preview is available on demand through `p` and starts hidden by default.
+Set `window_preview = true` to start each picker with Preview visible. Hovering a
+Windows row while Preview is visible changes its target without changing
+selection; keyboard navigation previews the highlighted row. Wisp reads no pane
+text while Preview is hidden or Commands is visible. It runs a bounded
+`wezterm cli get-text` request only when Preview is shown, its target changes, or
+`Ctrl-R` is pressed. Preview text remains in picker memory, is never logged or
+cached, and is discarded when the target changes, Preview is hidden, or the
+picker exits.
 
 When the original pane is running Neovim with Wisp configured, the adapter
 reads Neovim's pane-local current-file variable before launching the picker.
@@ -336,15 +383,29 @@ project.
 | `domain_for_project` | none | Callback returning `{ DomainName = name }` |
 | `poll_interval_seconds` | `0.05` | Atomic result polling interval |
 | `picker_timeout_seconds` | `3600` | Missing-result timeout |
-| `status_bar` | `true` | Install the workspace and OpenCode right-status renderer |
+| `status_bar` | `true` | Install Wisp's right-status renderer |
+| `status_items` | `opencode`, `directory` | Ordered bundled status providers and optional picker actions |
 | `status_interval_seconds` | `2` | Minimum interval between OpenCode status queries |
 | `status_colors` | built-in OldBook palette | Partial semantic status color table |
+| `popup` | `{ direction = "Bottom", size = 0.65 }` | Top-level popup split placement and size |
+| `window_preview` | `false` | Start with window Preview visible instead of on demand |
+| `single_pane_behavior` | `"show"` | Show a one-pane Window's Pane column, or use `"activate"` to select it immediately |
 
 `status_colors` accepts only `foreground`, `opencode_background`,
 `workspace_background`, `active_workspace_background`, `idle_background`,
 `running_background`, `waiting_background`, and `failure_background`. A main
 WezTerm theme can derive these semantic roles from its selected scheme and pass
 the resulting Lua table directly to Wisp.
+
+`status_items` is a strict array of bundled providers. Available names are
+`opencode` and `directory`; available actions are `projects`, `windows`, and
+`sessions`. Array order controls render order, omitting an action makes that
+provider display-only, and an empty array renders no Wisp status cells. Wisp
+does not load provider modules or execute user-supplied commands.
+
+`popup.direction` accepts `Top`, `Bottom`, `Left`, or `Right`. A `popup.size`
+below `1` is a fraction of the available space; a value of `1` or greater is a
+cell count, matching `pane:split` semantics.
 
 Mux workspace names and domains remain host policy:
 
@@ -365,18 +426,24 @@ The adapter exports action constructors for user-owned mappings:
 wisp.project_picker_action()
 wisp.window_picker_action()
 wisp.opencode_picker_action()
+wisp.popup_action "projects" -- also accepts "windows" or "sessions"
 wisp.refresh_cache_action()
 wisp.switch_to_project_action "dotfiles"
 wisp.new_tab_action()
 wisp.split_pane_action("Right", false)
 ```
 
+The three named picker actions use temporary tabs. `popup_action` uses the
+configured top-level split and shares its singleton lifecycle with status
+provider clicks.
+
 Project workspaces and project-aware tabs/splits set `WISP_PROJECT_DIR` and
 `WISP_PROJECT_NAME`. Tabs and splits preserve pane directories after converting
 WezTerm file URLs to native drive or UNC paths on Windows. File selections
 launch `wisp open` as the initial process in a new workspace or a new tab in an
-existing workspace; the adapter never executes opener argv itself. Window
-selections activate the exact tab captured when the picker launched. Host-only
+existing workspace; the adapter never executes opener argv itself. Pane
+selections validate and activate the exact workspace, tab, and pane captured
+when the picker launched. Host-only
 workspace selections use WezTerm's existing-workspace API, so a stale selection
 cannot recreate a closed workspace. Closing a project or host-only workspace
 terminates all panes in the selected workspace through `wezterm cli kill-pane`.
@@ -467,7 +534,7 @@ executables reject mismatched schemas:
 
 ```json
 {
-  "protocol_version": 4,
+  "protocol_version": 6,
   "projects": [
     {
       "id": "api",
@@ -480,11 +547,11 @@ executables reject mismatched schemas:
 }
 ```
 
-Selection protocol version 4 embeds the owning project and resolved opener:
+Selection protocol version 6 embeds the owning project and resolved opener:
 
 ```json
 {
-  "protocol_version": 4,
+  "protocol_version": 6,
   "status": "selected",
   "selection": {
     "kind": "file",
@@ -506,7 +573,7 @@ renderer:
 
 ```json
 {
-  "protocol_version": 4,
+  "protocol_version": 6,
   "sessions": {
     "waiting": 1,
     "running": 2,
@@ -518,12 +585,12 @@ renderer:
 ```
 
 Host-managed project closure uses the same envelope with a
-`"kind": "close_project"` selection containing the project. Host window
-selection uses `"kind": "host_item"` with the project and an opaque `"id"`.
-Host-only rows use `"workspace"`, `"workspace_item"`, and `"close_workspace"`
-selections carrying the exact `"workspace"` name; workspace items also carry an
-opaque `"id"`. Standalone Wisp cannot produce these selections without host
-context, and `wisp open` does not execute them.
+`"kind": "close_project"` selection containing the project. Exact split
+activation uses `"kind": "host_pane"` with the project, opaque `"window_id"`,
+and opaque `"pane_id"`. Host-only rows use `"workspace"`, `"workspace_pane"`,
+and `"close_workspace"` selections; pane selections carry the exact workspace,
+window, and pane identities. Standalone Wisp cannot produce these selections
+without host context, and `wisp open` does not execute them.
 
 OpenCode session selection uses `"kind": "open_code_session"` with the owning
 project, session ID, resolved attach argv, and an optional opaque
@@ -532,24 +599,34 @@ directly when the host cannot focus the exact target.
 
 Host context is a separate versioned input. Project entries are keyed by project
 ID, while live host-only entries are keyed by exact workspace name. Project
-labels control status and both entry types can describe host-owned windows:
+labels control status and both entry types describe host-owned windows with
+nested panes. The WezTerm adapter carries every pane so selection and on-demand
+Preview target the exact split captured at launch:
 
 ```json
 {
-  "protocol_version": 4,
+  "protocol_version": 6,
   "projects": {
     "api": {
       "labels": ["current", "open"],
-      "items": [
+      "windows": [
         {
           "id": "17",
-          "label": "nvim",
+          "label": "editor",
           "detail": "src/main.rs",
-          "active": true
+          "active": true,
+          "panes": [
+            {
+              "id": "42",
+              "label": "nvim",
+              "detail": "src/main.rs",
+              "active": true
+            }
+          ]
         }
       ],
       "session_items": {
-        "ses_123": "tab:17"
+        "ses_123": "pane:42"
       }
     },
     "dotfiles": {
@@ -559,10 +636,16 @@ labels control status and both entry types can describe host-owned windows:
   "workspaces": {
     "default": {
       "current": false,
-      "items": [
+      "windows": [
         {
           "id": "29",
-          "label": "shell"
+          "label": "shell",
+          "panes": [
+            {
+              "id": "43",
+              "label": "zsh"
+            }
+          ]
         }
       ]
     }
@@ -571,9 +654,10 @@ labels control status and both entry types can describe host-owned windows:
 ```
 
 The `workspaces` map is required; each key exists only while that workspace is
-open, and `current` selects the current row. Omitted `items` and `session_items`
-fields are empty. Host item IDs are opaque to the Rust picker. Adapters reject
-protocol versions other than 4 rather than attempting compatibility. Canonical
+open, and `current` selects the current row. Omitted `windows` and
+`session_items` fields are empty, while every window must contain at least one
+pane. Window and pane IDs are opaque to the Rust picker. Adapters reject
+protocol versions other than 6 rather than attempting compatibility. Canonical
 examples live in [`tests/fixtures`](tests/fixtures).
 
 ## Cache And Limits
@@ -594,9 +678,12 @@ server exits or the host restarts, and Wisp itself runs no daemon.
 ## Development
 
 ```sh
-cargo test --workspace
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo +1.85.0 check --workspace --locked
+node --check opencode/wisp.js
+node --test tests/opencode_plugin_test.mjs tests/opencode_plugin_process_test.mjs
 lua tests/run.lua
 stylua --check .
 ```

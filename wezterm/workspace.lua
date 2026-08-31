@@ -132,6 +132,25 @@ function Workspace:wezterm_executable()
   return self.wezterm.executable_dir .. "/" .. name
 end
 
+function Workspace:close_pane(pane_id)
+  local success, stdout, stderr = self.wezterm.run_child_process {
+    self:wezterm_executable(),
+    "cli",
+    "kill-pane",
+    "--pane-id",
+    tostring(pane_id),
+  }
+  if not success then
+    local inspected, pane = pcall(self.wezterm.mux.get_pane, pane_id)
+    if inspected and not pane then
+      return true
+    end
+    local message = stderr ~= "" and stderr or stdout
+    return nil, "wisp could not close pane " .. tostring(pane_id) .. ": " .. tostring(message)
+  end
+  return true
+end
+
 function Workspace:close_workspace(workspace, ignored_pane_id)
   if type(workspace) ~= "string" or workspace == "" then
     return nil, "wisp result contains an invalid workspace"
@@ -155,16 +174,9 @@ function Workspace:close_workspace(workspace, ignored_pane_id)
 
   local failures = {}
   for _, pane_id in ipairs(pane_ids) do
-    local success, stdout, stderr = self.wezterm.run_child_process {
-      self:wezterm_executable(),
-      "cli",
-      "kill-pane",
-      "--pane-id",
-      tostring(pane_id),
-    }
+    local success, close_error = self:close_pane(pane_id)
     if not success then
-      local message = stderr ~= "" and stderr or stdout
-      table.insert(failures, tostring(message))
+      table.insert(failures, close_error)
     end
   end
   if #failures > 0 then
@@ -188,34 +200,49 @@ function Workspace:activate_workspace(workspace)
   return true
 end
 
-function Workspace:activate_workspace_item(workspace, id)
+function Workspace:activate_pane_target(workspace, window_id, pane_id)
   if type(workspace) ~= "string" or workspace == "" then
     return nil, "wisp result contains an invalid workspace"
   end
-  local tab_id = type(id) == "string" and tonumber(id) or nil
-  if not tab_id or tab_id % 1 ~= 0 then
-    return nil, "wisp result contains an invalid workspace item ID"
+  local tab_id = type(window_id) == "string" and tonumber(window_id) or nil
+  local target_pane_id = type(pane_id) == "string" and tonumber(pane_id) or nil
+  if not tab_id or tab_id % 1 ~= 0 or not target_pane_id or target_pane_id % 1 ~= 0 then
+    return nil, "wisp result contains an invalid host pane target"
   end
-  local found, tab = pcall(self.wezterm.mux.get_tab, tab_id)
-  if not found or not tab then
-    return nil, "wisp selected tab " .. tostring(id) .. " no longer exists"
+  local found, target = pcall(self.wezterm.mux.get_pane, target_pane_id)
+  if not found or not target then
+    return nil, "wisp selected pane " .. tostring(pane_id) .. " no longer exists"
   end
-  local inspected, mux_window = pcall(function()
-    return tab:window()
+  local inspected_tab, tab = pcall(function()
+    return target:tab()
   end)
-  if not inspected or not mux_window or mux_window:get_workspace() ~= workspace then
-    return nil, "wisp selected tab " .. tostring(id) .. " no longer belongs to workspace " .. workspace
+  if not inspected_tab or not tab or tab:tab_id() ~= tab_id then
+    return nil, "wisp selected pane " .. tostring(pane_id) .. " no longer belongs to window " .. tostring(window_id)
+  end
+  local inspected_window, mux_window = pcall(function()
+    return target:window()
+  end)
+  if not inspected_window or not mux_window or mux_window:get_workspace() ~= workspace then
+    return nil, "wisp selected pane " .. tostring(pane_id) .. " no longer belongs to workspace " .. workspace
   end
   local activated, activate_error = pcall(function()
-    tab:activate()
+    target:activate()
   end)
   if not activated then
-    return nil, "wisp could not activate tab " .. tostring(id) .. ": " .. tostring(activate_error)
+    return nil, "wisp could not activate pane " .. tostring(pane_id) .. ": " .. tostring(activate_error)
+  end
+  return true
+end
+
+function Workspace:activate_workspace_pane(workspace, window_id, pane_id)
+  local activated, activate_error = self:activate_pane_target(workspace, window_id, pane_id)
+  if not activated then
+    return nil, activate_error
   end
   return self:activate_workspace(workspace)
 end
 
-function Workspace:activate_host_item(window, pane, project, id)
+function Workspace:activate_project_tab(window, pane, project, id)
   local tab_id = type(id) == "string" and tonumber(id) or nil
   if not tab_id or tab_id % 1 ~= 0 then
     return nil, "wisp result contains an invalid host item ID"
@@ -241,13 +268,23 @@ function Workspace:activate_host_item(window, pane, project, id)
   return true
 end
 
+function Workspace:activate_host_pane(window, pane, project, window_id, pane_id)
+  local workspace = self:workspace_for(project)
+  local activated, activate_error = self:activate_pane_target(workspace, window_id, pane_id)
+  if not activated then
+    return nil, activate_error
+  end
+  window:perform_action(self.wezterm.action.SwitchToWorkspace { name = workspace }, pane)
+  return true
+end
+
 function Workspace:activate_opencode_host_item(window, pane, project, id)
   if type(id) ~= "string" or id == "" then
     return nil, "wisp result contains an invalid OpenCode host item ID"
   end
   local kind, value = id:match "^(%a+):(.+)$"
   if kind == "tab" then
-    return self:activate_host_item(window, pane, project, value)
+    return self:activate_project_tab(window, pane, project, value)
   end
   if kind ~= "pane" then
     return nil, "wisp result contains an invalid OpenCode host item ID"

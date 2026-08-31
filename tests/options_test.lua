@@ -26,6 +26,44 @@ helper.test("poll timing must be positive", function()
   assert_config_error({ picker_timeout_seconds = "60" }, "picker_timeout_seconds")
 end)
 
+helper.test("window preview initial visibility is a boolean", function()
+  local wezterm = helper.fake_wezterm()
+  local wisp = helper.load_wezterm_adapter(wezterm)
+  wisp.apply_to_config({}, { window_preview = true })
+  wisp.apply_to_config({}, { window_preview = false })
+  assert_config_error({ window_preview = "yes" }, "window_preview")
+end)
+
+helper.test("single-pane behavior is strict and defaults to showing panes", function()
+  local wezterm = helper.fake_wezterm()
+  local wisp = helper.load_wezterm_adapter(wezterm)
+  wisp.apply_to_config({}, { single_pane_behavior = "show" })
+  wisp.apply_to_config({}, { single_pane_behavior = "activate" })
+  assert_config_error({ single_pane_behavior = "skip" }, "single_pane_behavior")
+end)
+
+helper.test("status providers and popup options are strict", function()
+  local wezterm = helper.fake_wezterm()
+  local wisp = helper.load_wezterm_adapter(wezterm)
+  wisp.apply_to_config({}, {
+    status_items = {
+      { name = "opencode", action = "sessions" },
+      { name = "directory", action = "projects" },
+    },
+    popup = { direction = "Bottom", size = 0.65 },
+  })
+
+  assert_config_error({ status_items = { { name = "missing" } } }, "status_items")
+  assert_config_error({ status_items = { { name = "directory", action = "missing" } } }, "status_items")
+  assert_config_error({ status_items = { { name = "directory", unknown = true } } }, "status_items")
+  local sparse = { { name = "opencode" }, { name = "opencode" }, { name = "directory" } }
+  sparse[2] = nil
+  assert_config_error({ status_items = sparse }, "dense")
+  assert_config_error({ popup = { direction = "Center", size = 0.5 } }, "popup")
+  assert_config_error({ popup = { direction = "Bottom", size = 0 } }, "popup")
+  assert_config_error({ popup = { direction = "Bottom", unknown = true } }, "popup")
+end)
+
 helper.test("spawn and picker domains must use stable domain names", function()
   assert_config_error({ spawn_domain = "DefaultDomain" }, "spawn_domain")
   assert_config_error({ picker_domain = { DomainId = 1 } }, "picker_domain")

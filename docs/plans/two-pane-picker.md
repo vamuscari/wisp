@@ -20,9 +20,111 @@ list instead of behind a project-action screen.
 - Use `/` to enter search mode so normal-mode `x`, `w`, and `f` remain direct
   commands.
 - Make `x` close the selected open project and exit Wisp.
-- Keep the picker one-shot. Do not add a daemon, interactive IPC, or an
-  in-place close-and-refresh loop.
+- Keep the picker one-shot. Do not add a daemon, a custom bidirectional host
+  protocol, continuous pane polling, or an in-place close-and-refresh loop.
+  Window previews may make bounded `wezterm cli get-text` requests when the
+  preview target changes or the user explicitly refreshes it.
 - Leave the live Neovim configuration unchanged.
+
+## Implemented Follow-Up: Open-Project Git Status
+
+- Show the Git branch and working-tree summary on every configured project row
+  labeled `current` or `open`, rather than only on the active project.
+- Reuse the existing VCS icons and right-aligned project-row rendering. The
+  active project's file context remains visible alongside its Git summary.
+- Collect summaries asynchronously with bounded concurrency so repositories do
+  not block picker startup or input. Rows update as results arrive.
+- Do not run Git for closed projects. A missing Git executable, a non-repository
+  project, or a failed status command leaves that row without a summary.
+- Refresh Git summaries for the current open-project snapshot on `Ctrl-R`.
+- Keep this internal to the CLI and TUI. Existing host-context labels identify
+  open projects, so no protocol, configuration, or cache schema change is
+  required.
+
+## Implemented Follow-Up: Window Preview
+
+- In Windows mode, show a preview panel for the window row under the mouse. A
+  mouse hover only changes the preview; it never activates the window.
+- Keep full keyboard parity: when there is no hovered row, preview the currently
+  highlighted window as `j`, `k`, or the arrow keys move it.
+- Preview the current plain-text viewport of the tab's active pane, not a
+  graphical screenshot. Split panes are represented by the active pane only.
+- Add an optional active pane ID to project and host-workspace items. Because
+  host context is strict, this requires a synchronized protocol bump across the
+  Rust models, both Lua adapters, protocol fixtures, adapter tests, and schema
+  assertions. Follow the repository versioning policy for the package and the
+  config/cache versions coupled to the protocol.
+- Have the WezTerm adapter pass the full WezTerm executable path to the picker.
+  When the keyboard or mouse preview target changes, asynchronously run
+  `wezterm cli get-text --pane-id <id>` and render its stdout. The pinned
+  minimum WezTerm version supports this command, and an explicit pane ID keeps
+  the request targeted at the original tab rather than the picker pane.
+- Treat each read as a current-buffer snapshot. Do not poll while the target is
+  unchanged; `Ctrl-R` explicitly refreshes the current preview. Debounce rapid
+  target changes, keep input responsive, and discard responses for targets
+  that are no longer selected or hovered.
+- Make current-buffer reads explicit through `p`. The Preview pane starts hidden
+  by default; the WezTerm `window_preview = true` option makes it initially
+  visible. Preview text may contain secrets, so never read it while Preview is
+  hidden, cache it, log it, or write it to host context or another temporary
+  file. Retain only the current response in picker memory and clear it when the
+  target changes, Preview is hidden, or the picker exits.
+- Bound preview subprocess concurrency, captured bytes, and rendered physical
+  lines. A missing WezTerm executable, failed command, invalid pane ID, or
+  oversized response produces `Preview unavailable` without blocking input or
+  changing selection behavior.
+- Render Projects, Windows, and the requested Preview or Commands pane as three
+  regions at wide widths. In the stacked layout, place the auxiliary pane below
+  Windows; replace the detail pane when there is not enough room for both.
+- Preserve newlines, strip unsupported control characters, truncate each line
+  to the preview width, and show explicit `Preview unavailable` and `No output`
+  states without changing selection behavior.
+- Extend TUI input from key-only events to keyboard and mouse events, enable
+  mouse capture only while Preview is visible in the alternate screen, and
+  disable it when Preview is hidden and on every normal and error exit path.
+- Test adapter pane IDs and executable-path wiring, strict protocol decoding,
+  keyboard and mouse target changes, explicit refresh, output limits, stale
+  response suppression, command failures, empty previews, wide and stacked
+  layouts, and terminal mouse-capture cleanup. Keep minimum-WezTerm parsing in
+  the verification matrix.
+
+## Implemented Follow-Up: Status Providers And Popup Surface
+
+- Keep status composition in bundled providers. `opencode` renders aggregate
+  session state and `directory` renders the short workspace name; external
+  `status_items` controls only inclusion, order, and an optional `projects`,
+  `windows`, or `sessions` picker action.
+- Do not load arbitrary provider paths or execute status-configured commands.
+  Status actions launch the same typed Wisp picker flow as public adapter
+  actions.
+- Encode clickable cells with `Hyperlink` and `EndHyperlink` format items and
+  dispatch the resulting `wisp://status/*` URI through WezTerm's cancellable
+  `open-uri` event. Probe support at adapter startup and retain non-clickable
+  rendering on WezTerm builds without the status-hyperlink patch.
+- Use one reusable top-level split per GUI window for popup pickers. Preserve
+  exact argv and named-domain spawning, make direction and size strict options,
+  replace an existing Wisp popup before opening another, and make every cleanup
+  path idempotent.
+- Export `popup_action()` for consumer-owned mappings. Existing project,
+  window, and OpenCode actions retain their temporary-tab behavior.
+
+## Implemented Follow-Up: Hierarchical Windows And Files
+
+- Protocol v6 replaces flat host items with Window entries containing exact
+  Pane entries. Project-backed and host-only workspaces both navigate through
+  Project → Window → Pane and return the captured window and pane IDs.
+- `single_pane_behavior = "show" | "activate"` controls whether Enter exposes a
+  one-pane Window or activates it immediately. The default is `"show"`.
+- Files use adaptive retained Miller columns. Highlighting a directory loads
+  only its immediate children; Enter or Right focuses that child, while Left or
+  Backspace returns to a retained ancestor. Reads run on a debounced worker;
+  request IDs prevent superseded results from replacing the newest column.
+  Logical depth is unlimited.
+- Wide layouts show Projects plus three directory levels, medium layouts show
+  Projects plus two, and narrow layouts stack Projects with one recycled file
+  column. The utility bar retains the full focused breadcrumb.
+- `o` remains the direct project/workspace activation path; Enter drills into
+  the hierarchy before selecting an exact pane or file.
 
 ## Layout
 
@@ -32,8 +134,10 @@ than the detail pane. The focused pane uses the terminal accent color for its
 border and the selected row keeps the existing reversed, bold treatment.
 
 Below the minimum useful two-column width, stack Projects above the detail
-pane. Both layouts retain the current header, status area, project status
-icons, and terminal ANSI palette.
+pane. Remove the application title bar and use one white-bordered bottom utility
+bar for mode/context, search input, and status errors. Command guidance appears
+only in the `?` Commands pane. Both layouts retain project status icons and the
+terminal ANSI palette.
 
 The right pane has explicit empty states:
 
@@ -53,10 +157,14 @@ The right pane has explicit empty states:
 | `Enter` | Select a project, window, or file; enter a directory |
 | `w` | Show Windows and focus the right pane |
 | `f` | Show Files and focus the right pane |
+| `s` | Show OpenCode Sessions and focus the right pane |
 | `x` | Close the focused open project from the project pane |
+| `p` | Toggle the window Preview pane |
+| `?` | Toggle the Commands pane |
 | `/` | Enter search mode for the focused pane |
 | `Backspace` | Go to the parent directory; at the project root focus Projects |
-| `Esc`, `q`, `Ctrl-C` | Cancel |
+| `Esc` | Close Commands when visible; otherwise cancel |
+| `q`, `Ctrl-C` | Cancel |
 | `Ctrl-R` | Refresh the active project or filesystem listing |
 
 Project and detail queries are independent. Changing the selected project,
@@ -64,7 +172,7 @@ right-pane mode, or directory clears the affected detail query and cursor.
 
 ### Search Mode
 
-Printable characters, including `x`, `w`, and `f`, update the focused pane's
+Printable characters, including `x`, `w`, `f`, `p`, and `?`, update the focused pane's
 fuzzy query. `Backspace` edits it. `Esc` returns to normal mode while retaining
 the query. `Enter` selects the current match.
 
@@ -183,7 +291,8 @@ use the same picker lifecycle and differ only in their initial view.
   traversal have state-machine tests.
 - Both wide and narrow TestBackend layouts render useful content.
 - WezTerm tests cover metadata generation, active tab selection, stale IDs,
-  moved tabs, closure scope, and both launcher actions.
+  moved tabs, closure scope, tab and popup launchers, ordered status providers,
+  click dispatch, and compatibility fallback.
 - Rustfmt, locked workspace tests, strict Clippy, StyLua, Lua tests, and real
   WezTerm configuration parsing pass.
 - Manual verification covers `leader+s`, `leader+w`, tab activation, file

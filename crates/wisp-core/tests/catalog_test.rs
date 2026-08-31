@@ -59,7 +59,7 @@ impl FileSystem for CountingFileSystem {
 fn config() -> Config {
     Config::parse(
         r#"
-version = 4
+version = 6
 cache_ttl_seconds = 60
 
 [[roots]]

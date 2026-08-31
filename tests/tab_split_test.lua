@@ -17,7 +17,7 @@ local function configured(projects, target_triple)
       return true, "PROJECTS", ""
     end,
     json_parse = function()
-      return { protocol_version = 4, projects = projects }
+      return { protocol_version = 6, projects = projects }
     end,
   }
   local wisp = helper.load_wezterm_adapter(wezterm)
