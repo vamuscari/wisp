@@ -26,6 +26,7 @@ local STATUS_COLOR_FIELDS = {
 local STATUS_PROVIDERS = { opencode = true, directory = true }
 local STATUS_ACTIONS = { projects = true, windows = true, sessions = true }
 local POPUP_DIRECTIONS = { Top = true, Bottom = true, Left = true, Right = true }
+local FILE_OPEN_TARGETS = { window = true, right_pane = true, bottom_pane = true }
 local SINGLE_PANE_BEHAVIORS = { show = true, activate = true }
 local DEFAULT_STATUS_ITEMS = {
   { name = "opencode", action = "sessions" },
@@ -46,6 +47,8 @@ local function validate(configured)
   local allowed = {
     config_file = true,
     domain_for_project = true,
+    file_open = true,
+    file_preview = true,
     picker_binding = true,
     picker_domain = true,
     picker_timeout_seconds = true,
@@ -96,6 +99,49 @@ local function validate(configured)
   end
   if configured.status_bar ~= nil and type(configured.status_bar) ~= "boolean" then
     error "wisp status_bar must be a boolean"
+  end
+  if configured.file_open ~= nil then
+    if type(configured.file_open) ~= "table" then
+      error "wisp file_open must be a table"
+    end
+    for field in pairs(configured.file_open) do
+      if field ~= "default" then
+        error("wisp file_open contains unknown field " .. tostring(field))
+      end
+    end
+    if not FILE_OPEN_TARGETS[configured.file_open.default] then
+      error "wisp file_open default must be window, right_pane, or bottom_pane"
+    end
+  end
+  if configured.file_preview ~= nil then
+    if type(configured.file_preview) ~= "table" then
+      error "wisp file_preview must be a table"
+    end
+    for field in pairs(configured.file_preview) do
+      if field ~= "command" and field ~= "direction" and field ~= "size" then
+        error("wisp file_preview contains unknown field " .. tostring(field))
+      end
+    end
+    local command = configured.file_preview.command
+    if type(command) ~= "table" or #command == 0 then
+      error "wisp file_preview command must be a dense non-empty argv array"
+    end
+    local count = 0
+    for key, argument in pairs(command) do
+      if type(key) ~= "number" or key < 1 or key % 1 ~= 0 or type(argument) ~= "string" or argument == "" then
+        error "wisp file_preview command must be a dense non-empty argv array"
+      end
+      count = count + 1
+    end
+    if count ~= #command then
+      error "wisp file_preview command must be a dense non-empty argv array"
+    end
+    if not POPUP_DIRECTIONS[configured.file_preview.direction] then
+      error "wisp file_preview direction must be Top, Bottom, Left, or Right"
+    end
+    if type(configured.file_preview.size) ~= "number" or configured.file_preview.size <= 0 then
+      error "wisp file_preview size must be a positive number"
+    end
   end
   if configured.window_preview ~= nil and type(configured.window_preview) ~= "boolean" then
     error "wisp window_preview must be a boolean"
@@ -173,8 +219,8 @@ local function validate(configured)
   end
 end
 
-function Options.new(executable_path)
-  local self = setmetatable({ executable_path = executable_path }, Options)
+function Options.new(executable_path, module_directory)
+  local self = setmetatable({ executable_path = executable_path, module_directory = module_directory }, Options)
   self:configure {}
   return self
 end
@@ -191,9 +237,24 @@ function Options:configure(configured)
     table.insert(status_items, { name = item.name, action = item.action })
   end
   local popup = configured.popup or {}
+  local file_preview
+  if configured.file_preview then
+    local command = {}
+    for _, argument in ipairs(configured.file_preview.command) do
+      table.insert(command, argument)
+    end
+    file_preview = {
+      command = command,
+      direction = configured.file_preview.direction,
+      size = configured.file_preview.size,
+      script = self.module_directory .. "/../nvim/lua/wisp/file_preview.lua",
+    }
+  end
   self.values = {
     config_file = configured.config_file,
     domain_for_project = configured.domain_for_project,
+    file_open = { default = configured.file_open and configured.file_open.default or "window" },
+    file_preview = file_preview,
     picker_binding = configured.picker_binding,
     picker_domain = configured.picker_domain or spawn_domain,
     picker_timeout_seconds = configured.picker_timeout_seconds or 3600,

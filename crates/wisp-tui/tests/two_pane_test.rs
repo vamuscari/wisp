@@ -6,7 +6,7 @@ use wisp_core::{
     config::{Openers, VcsIcons},
     model::{DirectoryEntry, EntryKind, Project},
     opencode::{OpenCodeSession, OpenCodeSnapshot, SessionActivity, SessionWaiting},
-    protocol::{HostContext, Selection},
+    protocol::{FileHostTarget, FilePreviewState, HostContext, Selection},
 };
 use wisp_tui::{
     ActiveProjectContext, App, AuxiliaryPane, Command, Focus, GitSummary, InitialView, InputMode,
@@ -45,7 +45,7 @@ fn projects() -> Vec<Project> {
 
 fn context() -> HostContext {
     serde_json::from_value(serde_json::json!({
-        "protocol_version": 6,
+        "protocol_version": 7,
         "projects": {
             "api": {
                 "labels": ["new"],
@@ -91,7 +91,7 @@ fn context() -> HostContext {
 
 fn host_workspace_context() -> HostContext {
     serde_json::from_value(serde_json::json!({
-        "protocol_version": 6,
+        "protocol_version": 7,
         "projects": {
             "api": { "labels": ["open"] },
             "web": { "labels": ["new"] },
@@ -190,7 +190,7 @@ fn sessions_command_loads_the_selected_project_and_groups_children() {
 #[test]
 fn selecting_a_session_uses_the_exact_host_mapping_and_attach_argv() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 6,
+        "protocol_version": 7,
         "projects": {
             "api": { "labels": ["new"] },
             "web": { "labels": ["open"] },
@@ -395,7 +395,7 @@ fn windows_initial_view_focuses_a_current_host_workspace() {
 #[test]
 fn windows_initial_view_falls_back_when_the_workspace_is_unmanaged() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 6,
+        "protocol_version": 7,
         "projects": {
             "api": { "labels": ["open"], "windows": [] },
             "web": { "labels": ["new"], "windows": [] },
@@ -707,6 +707,350 @@ fn entering_a_directory_loads_it_lazily() {
         Some(PathBuf::from("/repos/docs/src").as_path())
     );
     assert_eq!(app.visible_detail_labels(), vec!["lib.rs"]);
+}
+
+#[test]
+fn file_preview_and_enter_use_the_exact_ranked_nvim_target() {
+    let context: HostContext = serde_json::from_value(serde_json::json!({
+        "protocol_version": 7,
+        "projects": {
+            "docs": {
+                "labels": ["current", "open"],
+                "windows": [
+                    {
+                        "id": "inactive-window", "label": "inactive",
+                        "panes": [{
+                            "id": "active-pane", "label": "editor", "active": true,
+                            "nvim_views": [{
+                                "window_id": "active-view", "path": "/repos/docs/README.md",
+                                "active": true, "width": 80, "height": 20, "bottomline": 20,
+                                "view": { "lnum": 1, "col": 0, "coladd": 0, "curswant": 0, "topline": 1, "topfill": 0, "leftcol": 0, "skipcol": 0 }
+                            }]
+                        }]
+                    },
+                    {
+                        "id": "active-window", "label": "active", "active": true,
+                        "panes": [
+                            {
+                                "id": "inactive-pane", "label": "editor",
+                                "nvim_views": [{
+                                    "window_id": "active-view", "path": "/repos/docs/README.md",
+                                    "active": true, "width": 80, "height": 20, "bottomline": 20,
+                                    "view": { "lnum": 2, "col": 0, "coladd": 0, "curswant": 0, "topline": 1, "topfill": 0, "leftcol": 0, "skipcol": 0 }
+                                }]
+                            },
+                            {
+                                "id": "ranked-pane", "label": "editor", "active": true,
+                                "nvim_views": [
+                                    {
+                                        "window_id": "inactive-view", "path": "/repos/docs/README.md",
+                                        "active": false,
+                                        "width": 80, "height": 20, "bottomline": 20,
+                                        "view": { "lnum": 3, "col": 0, "coladd": 0, "curswant": 0, "topline": 1, "topfill": 0, "leftcol": 0, "skipcol": 0 }
+                                    },
+                                    {
+                                        "window_id": "ranked-view", "path": "/repos/docs/README.md",
+                                        "active": true, "width": 80, "height": 20, "bottomline": 20,
+                                        "view": { "lnum": 4, "col": 0, "coladd": 0, "curswant": 0, "topline": 1, "topfill": 0, "leftcol": 0, "skipcol": 0 }
+                                    },
+                                    {
+                                        "window_id": "later-active-view", "path": "/repos/docs/README.md",
+                                        "active": true, "width": 80, "height": 20, "bottomline": 20,
+                                        "view": { "lnum": 5, "col": 0, "coladd": 0, "curswant": 0, "topline": 1, "topfill": 0, "leftcol": 0, "skipcol": 0 }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "workspaces": {}
+    }))
+    .unwrap();
+    let expected_view = context.windows("docs")[1].panes[1].nvim_views[1].clone();
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context),
+        InitialView::Projects,
+    );
+    app.configure_file_preview(true, true);
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/README.md"),
+        EntryKind::File,
+    )]);
+
+    assert_eq!(
+        app.file_preview_state(),
+        FilePreviewState::File {
+            project: projects()[2].clone(),
+            path: PathBuf::from("/repos/docs/README.md"),
+            nvim_view: Some(Box::new(expected_view)),
+        }
+    );
+    let Command::Finish(Selection::File { host_target, .. }) =
+        app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("file enter should finish");
+    };
+    assert_eq!(
+        host_target,
+        Some(FileHostTarget {
+            window_id: "active-window".into(),
+            pane_id: "ranked-pane".into(),
+        })
+    );
+}
+
+#[test]
+fn file_matching_normalizes_windows_drive_and_unc_paths() {
+    for (project_path, entry_path, view_path) in [
+        (
+            r"C:\Repos\Docs",
+            r"C:\REPOS\DOCS\README.md",
+            r"c:/repos/docs/src/../README.md",
+        ),
+        (
+            r"\\Server\Share\Docs",
+            r"\\SERVER\SHARE\DOCS\README.md",
+            r"//server/share/docs/./README.md",
+        ),
+    ] {
+        let project = Project {
+            id: "docs".into(),
+            path: PathBuf::from(project_path),
+            group: "Repos".into(),
+            name: "docs".into(),
+            display_name: "Documentation".into(),
+        };
+        let context: HostContext = serde_json::from_value(serde_json::json!({
+            "protocol_version": 7,
+            "projects": {
+                "docs": {
+                    "labels": ["current", "open"],
+                    "windows": [{
+                        "id": "17", "label": "editor", "active": true,
+                        "panes": [{
+                            "id": "71", "label": "editor", "active": true,
+                            "nvim_views": [{
+                                "window_id": "9", "path": view_path, "active": true,
+                                "width": 80, "height": 20, "bottomline": 20,
+                                "view": { "lnum": 1, "col": 0, "coladd": 0, "curswant": 0, "topline": 1, "topfill": 0, "leftcol": 0, "skipcol": 0 }
+                            }]
+                        }]
+                    }]
+                }
+            },
+            "workspaces": {}
+        }))
+        .unwrap();
+        let mut app = App::new(
+            vec![project],
+            Openers::default(),
+            false,
+            Some(context),
+            InitialView::Projects,
+        );
+        app.configure_file_preview(true, true);
+        app.handle_key(key(KeyCode::Char('f'))).unwrap();
+        app.load_directory(vec![DirectoryEntry::new(
+            PathBuf::from(entry_path),
+            EntryKind::File,
+        )]);
+
+        let FilePreviewState::File { nvim_view, .. } = app.file_preview_state() else {
+            panic!("selected file should be previewed");
+        };
+        assert_eq!(
+            nvim_view.as_ref().map(|view| view.window_id.as_str()),
+            Some("9")
+        );
+    }
+}
+
+#[test]
+fn file_matching_excludes_other_projects_and_host_workspaces() {
+    let context: HostContext = serde_json::from_value(serde_json::json!({
+        "protocol_version": 7,
+        "projects": {
+            "docs": { "labels": ["current", "open"] },
+            "api": {
+                "labels": ["open"],
+                "windows": [{
+                    "id": "other-window", "label": "editor",
+                    "panes": [{
+                        "id": "other-pane", "label": "editor",
+                        "nvim_views": [{
+                            "window_id": "1", "path": "/repos/docs/README.md",
+                            "active": true, "width": 80, "height": 20, "bottomline": 20,
+                            "view": { "lnum": 1, "col": 0, "coladd": 0, "curswant": 0, "topline": 1, "topfill": 0, "leftcol": 0, "skipcol": 0 }
+                        }]
+                    }]
+                }]
+            }
+        },
+        "workspaces": {
+            "host-only": {
+                "current": false,
+                "windows": [{
+                    "id": "workspace-window", "label": "editor",
+                    "panes": [{
+                        "id": "workspace-pane", "label": "editor",
+                        "nvim_views": [{
+                            "window_id": "2", "path": "/repos/docs/README.md",
+                            "active": false,
+                            "width": 80, "height": 20, "bottomline": 20,
+                            "view": { "lnum": 1, "col": 0, "coladd": 0, "curswant": 0, "topline": 1, "topfill": 0, "leftcol": 0, "skipcol": 0 }
+                        }]
+                    }]
+                }]
+            }
+        }
+    }))
+    .unwrap();
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context),
+        InitialView::Projects,
+    );
+    app.configure_file_preview(true, true);
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/README.md"),
+        EntryKind::File,
+    )]);
+
+    let FilePreviewState::File { nvim_view, .. } = app.file_preview_state() else {
+        panic!("selected file should be previewed");
+    };
+    assert_eq!(nvim_view, None);
+    let Command::Finish(Selection::File { host_target, .. }) =
+        app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("file enter should finish");
+    };
+    assert_eq!(host_target, None);
+}
+
+#[test]
+fn file_preview_visibility_tracks_selection_toggles_and_mode_transitions() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+    app.configure_file_preview(true, true);
+
+    assert_eq!(app.file_preview_state(), FilePreviewState::Hidden);
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    assert_eq!(app.file_preview_state(), FilePreviewState::Empty);
+    app.load_directory(vec![
+        DirectoryEntry::new(PathBuf::from("/repos/docs/src"), EntryKind::Directory),
+        DirectoryEntry::new(PathBuf::from("/repos/docs/README.md"), EntryKind::File),
+    ]);
+    assert!(matches!(
+        app.file_preview_state(),
+        FilePreviewState::File { .. }
+    ));
+
+    app.handle_key(key(KeyCode::Char('w'))).unwrap();
+    assert_eq!(app.file_preview_state(), FilePreviewState::Hidden);
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/README.md"),
+        EntryKind::File,
+    )]);
+    assert!(matches!(
+        app.file_preview_state(),
+        FilePreviewState::File { .. }
+    ));
+
+    app.handle_key(key(KeyCode::Char('p'))).unwrap();
+    assert_eq!(app.file_preview_state(), FilePreviewState::Hidden);
+    app.handle_key(key(KeyCode::Char('s'))).unwrap();
+    assert_eq!(app.file_preview_state(), FilePreviewState::Hidden);
+    app.clear_status();
+    app.handle_key(key(KeyCode::Char('p'))).unwrap();
+    assert_eq!(app.status(), Some("File preview is unavailable"));
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/README.md"),
+        EntryKind::File,
+    )]);
+    assert_eq!(app.file_preview_state(), FilePreviewState::Hidden);
+}
+
+#[test]
+fn file_preview_is_empty_for_a_highlighted_directory() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.configure_file_preview(true, true);
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src"),
+        EntryKind::Directory,
+    )]);
+
+    assert_eq!(app.file_preview_state(), FilePreviewState::Empty);
+}
+
+#[test]
+fn file_rows_render_a_live_target_marker_without_changing_labels() {
+    let context: HostContext = serde_json::from_value(serde_json::json!({
+        "protocol_version": 7,
+        "projects": {
+            "docs": {
+                "labels": ["current", "open"],
+                "windows": [{
+                    "id": "17", "label": "editor",
+                    "panes": [{
+                        "id": "71", "label": "editor",
+                        "nvim_views": [{
+                            "window_id": "9", "path": "/repos/docs/README.md",
+                            "active": false,
+                            "width": 80, "height": 20, "bottomline": 20,
+                            "view": { "lnum": 1, "col": 0, "coladd": 0, "curswant": 0, "topline": 1, "topfill": 0, "leftcol": 0, "skipcol": 0 }
+                        }]
+                    }]
+                }]
+            }
+        },
+        "workspaces": {}
+    }))
+    .unwrap();
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![
+        DirectoryEntry::new(PathBuf::from("/repos/docs/README.md"), EntryKind::File),
+        DirectoryEntry::new(PathBuf::from("/repos/docs/src"), EntryKind::Directory),
+    ]);
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+
+    assert_eq!(app.visible_detail_labels(), vec!["README.md", "src/"]);
+    assert!(rendered.contains("◆ README.md"));
+    assert!(!rendered.contains("◆ src/"));
 }
 
 #[test]
@@ -1301,9 +1645,35 @@ fn commands_render_in_the_preview_slot() {
     let rendered = rendered_lines(&terminal).join("\n");
 
     assert!(rendered.contains("Commands"));
-    assert!(rendered.contains("p Preview"));
+    assert!(rendered.contains("p File/Window Preview"));
     assert!(rendered.contains("Ctrl-R Refresh"));
     assert!(!rendered.contains("Preview unavailable"));
+}
+
+#[test]
+fn commands_show_default_and_forced_file_open_targets() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    let backend = TestBackend::new(140, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let rendered = rendered_lines(&terminal).join("\n");
+
+    assert!(rendered.contains("Enter Default"));
+    assert!(rendered.contains("Ctrl-T Window"));
+    assert!(rendered.contains("Ctrl-V Right"));
+    assert!(rendered.contains("Ctrl-X Bottom"));
+    assert!(rendered.contains("p File/Window Preview"));
+    assert!(rendered.contains("w/f/s View"));
+    assert!(rendered.contains("Ctrl-R Refresh"));
 }
 
 #[test]
@@ -1802,7 +2172,7 @@ fn narrow_renderer_stacks_projects_above_windows() {
 #[test]
 fn renderer_explains_when_an_open_project_has_no_windows() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 6,
+        "protocol_version": 7,
         "projects": {
             "docs": { "labels": ["current", "open"], "windows": [] }
         },
@@ -1826,7 +2196,7 @@ fn renderer_explains_when_an_open_project_has_no_windows() {
 #[test]
 fn renderer_explains_when_the_selected_project_is_not_open() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 6,
+        "protocol_version": 7,
         "projects": {
             "api": { "labels": ["new"], "windows": [] },
             "web": { "labels": ["open"], "windows": [] },

@@ -2,6 +2,9 @@ local tests = {
   "tests/wezterm_api_test.lua",
   "tests/wezterm_status_test.lua",
   "tests/options_test.lua",
+  "tests/client_protocol_test.lua",
+  "tests/wezterm_file_feature_test.lua",
+  "tests/wezterm_preview_test.lua",
   "tests/refresh_test.lua",
   "tests/process_adapter_test.lua",
   "tests/popup_test.lua",
@@ -9,6 +12,7 @@ local tests = {
   "tests/tab_split_test.lua",
   "tests/wezterm_example_test.lua",
   "tests/nvim_adapter_test.lua",
+  "tests/nvim_file_preview_test.lua",
 }
 
 local script = arg and arg[0] or "tests/run.lua"

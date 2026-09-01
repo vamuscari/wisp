@@ -6,7 +6,7 @@ use crate::{
     config::Openers,
     model::{DirectoryEntry, Project},
     opencode::OpenCodeSession,
-    protocol::Selection,
+    protocol::{FileHostTarget, FileOpenTarget, Selection},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,6 +141,9 @@ impl Navigator {
         &mut self,
         entry: &DirectoryEntry,
         openers: &Openers,
+        open_target: FileOpenTarget,
+        reuse_existing: bool,
+        host_target: Option<FileHostTarget>,
     ) -> Result<NavigationOutcome, NavigationError> {
         let Screen::Directory {
             project_id,
@@ -169,6 +172,9 @@ impl Navigator {
             opener: resolve_opener(openers.file.as_deref(), &project, &entry.path),
             project,
             path: entry.path.clone(),
+            open_target,
+            reuse_existing,
+            host_target,
         }))
     }
 

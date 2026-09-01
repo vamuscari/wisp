@@ -1,0 +1,33 @@
+{
+  "protocol_version": 7,
+  "sequence": 3,
+  "state": {
+    "state": "file",
+    "project": {
+      "id": "api",
+      "path": "/home/user/Repos/api",
+      "group": "Repos",
+      "name": "api",
+      "display_name": "API"
+    },
+    "path": "/home/user/Repos/api/src/main.rs",
+    "nvim_view": {
+      "window_id": "1001",
+      "path": "/home/user/Repos/api/src/main.rs",
+      "active": true,
+      "width": 120,
+      "height": 40,
+      "bottomline": 30,
+      "view": {
+        "lnum": 12,
+        "col": 0,
+        "coladd": 0,
+        "curswant": 0,
+        "topline": 4,
+        "topfill": 0,
+        "leftcol": 0,
+        "skipcol": 0
+      }
+    }
+  }
+}

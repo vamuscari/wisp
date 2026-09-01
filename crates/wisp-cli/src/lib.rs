@@ -26,8 +26,8 @@ use wisp_core::{
     model::{DirectoryEntry, Project},
     path::{comparison_key, normalized_path},
     protocol::{
-        HostContext, OpenCodeStatusEnvelope, ProjectsEnvelope, Selection, SelectionEnvelope,
-        SelectionStatus,
+        FileOpenTarget, FilePreviewEnvelope, FilePreviewState, HostContext, OpenCodeStatusEnvelope,
+        PROTOCOL_VERSION, ProjectsEnvelope, Selection, SelectionEnvelope, SelectionStatus,
     },
 };
 use wisp_tui::{
@@ -98,6 +98,12 @@ struct PickArgs {
     wezterm_executable: Option<PathBuf>,
     #[arg(long)]
     window_preview: bool,
+    #[arg(long, value_name = "PATH")]
+    file_preview_state_file: Option<PathBuf>,
+    #[arg(long)]
+    file_preview: bool,
+    #[arg(long, value_enum, default_value_t = PickFileOpenTarget::Window)]
+    file_open_target: PickFileOpenTarget,
     #[arg(long, value_enum, default_value_t = PickSinglePaneBehavior::Show)]
     single_pane_behavior: PickSinglePaneBehavior,
     #[arg(long, value_enum, default_value_t = InitialView::Projects)]
@@ -119,6 +125,14 @@ enum PickSinglePaneBehavior {
     #[default]
     Show,
     Activate,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum PickFileOpenTarget {
+    #[default]
+    Window,
+    RightPane,
+    BottomPane,
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]
@@ -467,6 +481,12 @@ fn pick(config_override: Option<&Path>, args: &PickArgs) -> Result<Option<Select
         app.set_active_project_context(active_project);
     }
     app.configure_window_preview(args.wezterm_executable.is_some(), args.window_preview);
+    app.configure_file_open_target(match args.file_open_target {
+        PickFileOpenTarget::Window => FileOpenTarget::Window,
+        PickFileOpenTarget::RightPane => FileOpenTarget::RightPane,
+        PickFileOpenTarget::BottomPane => FileOpenTarget::BottomPane,
+    });
+    app.configure_file_preview(args.file_preview_state_file.is_some(), args.file_preview);
     app.configure_single_pane_behavior(match args.single_pane_behavior {
         PickSinglePaneBehavior::Show => wisp_tui::SinglePaneBehavior::Show,
         PickSinglePaneBehavior::Activate => wisp_tui::SinglePaneBehavior::Activate,
@@ -491,6 +511,10 @@ fn pick(config_override: Option<&Path>, args: &PickArgs) -> Result<Option<Select
             .as_deref()
             .map(Path::to_path_buf)
             .map(WindowPreviewLoader::new),
+        file_preview: args
+            .file_preview_state_file
+            .as_ref()
+            .map(|path| FilePreviewPublisher::new(path.clone())),
     };
     Ok(wisp_tui::run(app, &mut data)?)
 }
@@ -1060,6 +1084,30 @@ struct CatalogDataSource {
     project_git: GitSummaryScheduler,
     opencode: Option<OpenCodeDataSource>,
     window_preview: Option<WindowPreviewLoader>,
+    file_preview: Option<FilePreviewPublisher>,
+}
+
+struct FilePreviewPublisher {
+    path: PathBuf,
+    sequence: u64,
+}
+
+impl FilePreviewPublisher {
+    fn new(path: PathBuf) -> Self {
+        Self { path, sequence: 0 }
+    }
+
+    fn publish(&mut self, state: FilePreviewState) -> Result<(), CliError> {
+        self.sequence = self.sequence.wrapping_add(1);
+        write_json_file(
+            &self.path,
+            &FilePreviewEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                sequence: self.sequence,
+                state,
+            },
+        )
+    }
 }
 
 struct OpenCodeDataSource {
@@ -1087,6 +1135,13 @@ impl DataSource for CatalogDataSource {
 
     fn window_preview_update(&mut self) -> Option<WindowPreviewUpdate> {
         self.window_preview.as_mut()?.update()
+    }
+
+    fn publish_file_preview(&mut self, state: FilePreviewState) -> Result<(), String> {
+        self.file_preview
+            .as_mut()
+            .map_or(Ok(()), |publisher| publisher.publish(state))
+            .map_err(|error| format!("could not publish file preview: {error}"))
     }
 
     fn directory(&mut self, path: &Path) -> Result<Vec<DirectoryEntry>, String> {
@@ -1265,12 +1320,16 @@ fn emit_envelope(envelope: &SelectionEnvelope, result_file: Option<&Path>) -> Re
 }
 
 pub fn write_envelope_file(path: &Path, envelope: &SelectionEnvelope) -> Result<(), CliError> {
+    write_json_file(path, envelope)
+}
+
+fn write_json_file(path: &Path, value: &impl serde::Serialize) -> Result<(), CliError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let mut temporary = NamedTempFile::new_in(parent)?;
     {
         let mut writer = BufWriter::new(temporary.as_file_mut());
-        serde_json::to_writer_pretty(&mut writer, envelope)?;
+        serde_json::to_writer_pretty(&mut writer, value)?;
         writer.write_all(b"\n")?;
         writer.flush()?;
     }
@@ -1306,6 +1365,48 @@ mod tests {
     use wisp_core::config::OpenCodeConfig;
 
     use super::*;
+
+    #[test]
+    fn file_preview_publisher_writes_atomic_versioned_sequences() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("preview.json");
+        let mut publisher = FilePreviewPublisher::new(path.clone());
+
+        publisher
+            .publish(wisp_core::protocol::FilePreviewState::Hidden)
+            .unwrap();
+        let first: wisp_core::protocol::FilePreviewEnvelope =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            first.protocol_version,
+            wisp_core::protocol::PROTOCOL_VERSION
+        );
+        assert_eq!(first.sequence, 1);
+        assert_eq!(first.state, wisp_core::protocol::FilePreviewState::Hidden);
+
+        publisher
+            .publish(wisp_core::protocol::FilePreviewState::File {
+                project: Project {
+                    id: "api".into(),
+                    path: "/repos/api".into(),
+                    group: "Repos".into(),
+                    name: "api".into(),
+                    display_name: "API".into(),
+                },
+                path: "/repos/api/src/main.rs".into(),
+                nvim_view: None,
+            })
+            .unwrap();
+        let second: wisp_core::protocol::FilePreviewEnvelope =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(second.sequence, 2);
+        assert!(matches!(
+            second.state,
+            wisp_core::protocol::FilePreviewState::File { ref path, .. }
+                if path == Path::new("/repos/api/src/main.rs")
+        ));
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn explicit_project_path_resolves_a_project_relative_active_file() {
@@ -1413,7 +1514,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 6,
+            "protocol_version": 7,
             "projects": {
                 "api": { "labels": ["open"] },
                 "web": { "labels": ["current", "open"] }
@@ -1452,7 +1553,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 6,
+            "protocol_version": 7,
             "projects": {
                 "api": { "labels": ["open"] },
                 "web": { "labels": ["current", "open"] }
@@ -1491,7 +1592,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 6,
+            "protocol_version": 7,
             "projects": {
                 "repos": { "labels": ["open"] },
                 "api": { "labels": ["new"] }
@@ -1539,7 +1640,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 6,
+            "protocol_version": 7,
             "projects": {
                 "api": { "labels": ["open"] },
                 "web": { "labels": ["new"] },
@@ -1907,7 +2008,7 @@ mod tests {
             }
         });
         let temporary = TempDir::new().unwrap();
-        let config = Config::parse("version = 6", temporary.path()).unwrap();
+        let config = Config::parse("version = 7", temporary.path()).unwrap();
         let cache =
             CacheStore::open(temporary.path().join("cache.json"), config.fingerprint()).unwrap();
         let directory_loader = DirectoryLoader::new(
@@ -1945,6 +2046,7 @@ mod tests {
                 last_poll: Instant::now() - Duration::from_secs(2),
             }),
             window_preview: None,
+            file_preview: None,
         };
 
         DataSource::sessions(&mut data, Path::new("/repos/wisp")).unwrap();

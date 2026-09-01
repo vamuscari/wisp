@@ -1,5 +1,5 @@
 {
-  "protocol_version": 6,
+  "protocol_version": 7,
   "sessions": {
     "waiting": 1,
     "running": 2,

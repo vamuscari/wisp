@@ -18,28 +18,51 @@ function Workspace:normalize_path(path)
   if type(path) ~= "string" then
     return nil, nil
   end
-  if not (type(self.wezterm.target_triple) == "string" and self.wezterm.target_triple:match "windows") then
-    local normalized = path:gsub("[/\\]+$", "")
-    return normalized, normalized
+  local windows_drive = path:match "^%a:[/\\]" ~= nil
+  local windows_unc = path:match "^[/\\][/\\]" ~= nil
+  local replaced = path:gsub("\\", "/")
+  local collapsed = windows_unc and "//" .. replaced:sub(3):gsub("/+", "/") or replaced:gsub("/+", "/")
+  local prefix = ""
+  local rest = collapsed
+  local protected_components = 0
+  if windows_unc then
+    prefix = "//"
+    rest = collapsed:sub(3)
+    protected_components = 2
+  elseif windows_drive then
+    prefix = collapsed:sub(1, 3)
+    rest = collapsed:sub(4)
+  elseif collapsed:sub(1, 1) == "/" then
+    prefix = "/"
+    rest = collapsed:sub(2)
   end
 
-  local normalized = path:gsub("/", "\\")
-  local unc = normalized:sub(1, 2) == "\\\\"
-  if normalized:match "^\\%a:" then
-    normalized = normalized:sub(2)
-    unc = false
+  local components = {}
+  for component in rest:gmatch "[^/]+" do
+    if component == "." then
+      -- Skip current-directory components.
+    elseif component == ".." and #components > protected_components and components[#components] ~= ".." then
+      table.remove(components)
+    elseif component == ".." and prefix == "" then
+      table.insert(components, component)
+    elseif component ~= ".." then
+      table.insert(components, component)
+    end
   end
-  if unc then
-    normalized = "\\\\" .. normalized:sub(3):gsub("\\+", "\\")
-  else
-    normalized = normalized:gsub("\\+", "\\")
+
+  local normalized = prefix .. table.concat(components, "/")
+  if normalized == "" then
+    normalized = "."
   end
-  if not normalized:match "^%a:\\$" and not normalized:match "^\\\\[^\\]+\\[^\\]+\\$" then
-    normalized = normalized:gsub("\\+$", "")
+  local identity = normalized
+  if windows_drive or windows_unc then
+    identity = identity:gsub("[A-Z]", function(character)
+      return string.char(character:byte() + 32)
+    end)
   end
-  local identity = normalized:gsub("[A-Z]", function(character)
-    return string.char(character:byte() + 32)
-  end)
+  if type(self.wezterm.target_triple) == "string" and self.wezterm.target_triple:match "windows" then
+    normalized = normalized:gsub("/", "\\")
+  end
   return normalized, identity
 end
 
@@ -53,7 +76,9 @@ function Workspace:path_from_file_url(url)
 
   local path = url.file_path
   local drive_path = path:match "^[/\\]%a:[/\\]"
-  if not drive_path and type(url.host) == "string" and url.host ~= "" then
+  if drive_path then
+    path = path:sub(2)
+  elseif type(url.host) == "string" and url.host ~= "" then
     path = "\\\\" .. url.host .. "\\" .. path:gsub("^[/\\]+", "")
   end
   return self:normalize_path(path)
@@ -96,32 +121,102 @@ end
 function Workspace:open_file(window, pane, result)
   local selection = result.selection
   local project = selection.project
+  local workspace = self:workspace_for(project)
+
+  if selection.reuse_existing and selection.host_target then
+    local pane_id = tonumber(selection.host_target.pane_id)
+    local tab_id = tonumber(selection.host_target.window_id)
+    local inspected, target = pcall(function()
+      local live_target = self.wezterm.mux.get_pane(pane_id)
+      if not live_target or not pane_id or not tab_id then
+        return nil
+      end
+      local tab = live_target:tab()
+      local mux_window = live_target:window()
+      local contains_file = false
+      local _, selected_identity = self:normalize_path(selection.path)
+      for _, view in ipairs(self.client:nvim_views(live_target) or {}) do
+        local _, view_identity = self:normalize_path(view.path)
+        if selected_identity ~= nil and view_identity == selected_identity then
+          contains_file = true
+          break
+        end
+      end
+      if
+        tab
+        and tab:tab_id() == tab_id
+        and mux_window
+        and mux_window:get_workspace() == workspace
+        and contains_file
+      then
+        return live_target
+      end
+      return nil
+    end)
+    if inspected and target then
+      local activated = pcall(function()
+        target:activate()
+        window:perform_action(self.wezterm.action.SwitchToWorkspace { name = workspace }, pane)
+      end)
+      if activated then
+        return true
+      end
+    end
+  end
+
   if not self.client:valid_argv(selection.opener) then
-    self.report_error(window, "wisp selected file has no valid opener; configure openers.file in Wisp TOML")
-    return
+    return nil, "wisp selected file has no valid opener; configure openers.file in Wisp TOML"
   end
   local command = self.client:args("open", self.wezterm.json_encode(result))
 
-  local workspace = self:workspace_for(project)
+  local function create_first_window()
+    local switched, switch_error = pcall(function()
+      window:perform_action(
+        self.wezterm.action.SwitchToWorkspace {
+          name = workspace,
+          spawn = self:spawn_command(project, command),
+        },
+        pane
+      )
+    end)
+    if not switched then
+      return nil, "wisp could not open file in workspace " .. workspace .. ": " .. tostring(switch_error)
+    end
+    return true
+  end
+
   if not self:is_open(workspace) then
-    window:perform_action(
-      self.wezterm.action.SwitchToWorkspace {
-        name = workspace,
-        spawn = self:spawn_command(project, command),
-      },
-      pane
-    )
-    return
+    return create_first_window()
   end
 
   for _, mux_window in ipairs(self.wezterm.mux.all_windows()) do
     if mux_window:get_workspace() == workspace then
-      mux_window:spawn_tab(self:spawn_command(project, command))
-      window:perform_action(self.wezterm.action.SwitchToWorkspace { name = workspace }, pane)
-      return
+      local opened, open_error = pcall(function()
+        if selection.open_target == "window" then
+          mux_window:spawn_tab(self:spawn_command(project, command))
+        else
+          local tab = mux_window:active_tab()
+          local active_pane = tab and tab:active_pane() or nil
+          if not active_pane then
+            error "project mux window has no active pane"
+          end
+          local split = self:spawn_command(project, command)
+          split.direction = selection.open_target == "right_pane" and "Right" or "Bottom"
+          local opened_pane = active_pane:split(split)
+          if not opened_pane then
+            error "pane split returned no pane"
+          end
+          opened_pane:activate()
+        end
+        window:perform_action(self.wezterm.action.SwitchToWorkspace { name = workspace }, pane)
+      end)
+      if not opened then
+        return nil, "wisp could not open file in workspace " .. workspace .. ": " .. tostring(open_error)
+      end
+      return true
     end
   end
-  self.report_error(window, "wisp could not find a mux window for workspace " .. workspace)
+  return create_first_window()
 end
 
 function Workspace:wezterm_executable()

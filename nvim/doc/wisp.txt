@@ -16,19 +16,31 @@ Run `wisp deploy`, add its stable `nvim` directory to 'runtimepath', then call:
 <
 The deployed adapter always invokes the executable from its own bundle. Wisp
 opens in a floating terminal. A project selection sets the originating tab's
-local working directory. A file selection also edits that file in the
-originating tab. File browsing uses retained directory columns: highlighting a
-folder loads only its immediate children on a debounced worker, Enter or Right
-descends, and Left or Backspace returns to its parent. Superseded folder results
-are discarded. The originating normal-file buffer is shown inline on the
-current project together with the Git branch and configurable clean/dirty,
-untracked, modified, staged, conflicted, upstream, and stashed markers. Nonzero
-category counts are shown. Git metadata loads after the picker opens. Editor
-activity does not make a project host-open or closable.
+local working directory. Enter on a file first reuses a matching visible normal
+file window. Otherwise, the selected target creates a tab page, right vertical
+split, or bottom horizontal split. Ctrl-T, Ctrl-V, and Ctrl-X force those three
+targets without reuse. File browsing uses retained directory columns:
+highlighting a folder loads only its immediate children on a debounced worker,
+Enter or Right descends, and Left or Backspace returns to its parent. Superseded
+folder results are discarded. The originating normal-file buffer is shown
+inline on the current project together with the Git branch and configurable
+clean/dirty, untracked, modified, staged, conflicted, upstream, and stashed
+markers. Nonzero category counts are shown. Git metadata loads after the picker
+opens. Editor activity does not make a project host-open or closable.
 
-Inside WezTerm, Wisp publishes the active normal-file path to the containing
-pane. Unnamed and non-file buffers, including terminals, quickfix lists, and
-file-tree buffers, are omitted. The picker does not add a separate tool pane.
+Inside WezTerm, Wisp publishes strict protocol-v7 viewport state for every
+normal file window in the current Neovim tab. Unnamed and non-file buffers,
+including terminals, quickfix lists, help, and file-tree buffers, are omitted.
+Buffer, tab, and window changes publish immediately; cursor, scroll, and resize
+updates use one short debounce.
+
+When file_preview is configured, Files mode starts with a companion scratch
+float to the picker's right. It follows the highlighted file while focus remains
+in the picker terminal. Press p in Files mode to hide or show it. The renderer
+reads at most 1 MiB or 10,000 lines, rejects NUL-containing binary content,
+detects filetype normally, and restores a matching captured viewport when it is
+within the bounded content. It does not add highlighted paths to the normal
+buffer list.
 
 The Neovim adapter disables OpenCode session mode. Session focus and attach
 actions are currently implemented only by the WezTerm adapter.
@@ -53,6 +65,8 @@ Pass options to setup():
     width = 0.8,
     height = 0.7,
     border = "rounded",
+    file_open = { default = "window" },
+    file_preview = { width = 0.5 },
   })
 <
 `config_file`       Optional shared TOML path.
@@ -61,5 +75,9 @@ Pass options to setup():
 `keymap_options`    Options passed to vim.keymap.set().
 `width`, `height`   Fractions up to 1, or absolute cell counts.
 `border`            Border accepted by nvim_open_win().
+`file_open`         Exact table with default set to "window", "right_pane", or
+                    "bottom_pane". Default: { default = "window" }.
+`file_preview`      Optional exact table with width greater than zero and at
+                    most 1. Omit it to disable live file preview.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

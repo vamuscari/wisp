@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::{model::Project, opencode::OpenCodeStatusCounts};
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 #[derive(Deserialize)]
 struct VersionHeader {
@@ -145,6 +145,8 @@ pub enum HostContextError {
     EmptySessionItemId,
     #[error("host workspace names must not be empty")]
     EmptyWorkspaceName,
+    #[error("invalid Neovim view: {0}")]
+    InvalidNvimView(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +188,108 @@ pub struct HostPane {
     pub detail: Option<String>,
     #[serde(default)]
     pub active: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nvim_views: Vec<NvimView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NvimViewport {
+    pub lnum: u64,
+    pub col: u64,
+    pub coladd: u64,
+    pub curswant: u64,
+    pub topline: u64,
+    pub topfill: u64,
+    pub leftcol: u64,
+    pub skipcol: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NvimView {
+    pub window_id: String,
+    pub path: PathBuf,
+    pub active: bool,
+    pub width: u64,
+    pub height: u64,
+    pub bottomline: u64,
+    pub view: NvimViewport,
+}
+
+fn validate_nvim_views(views: &[NvimView]) -> Result<(), String> {
+    let mut window_ids = BTreeSet::new();
+    for view in views {
+        if view.window_id.is_empty() {
+            return Err("Neovim window IDs must not be empty".into());
+        }
+        if !window_ids.insert(&view.window_id) {
+            return Err(format!("duplicate Neovim window ID {}", view.window_id));
+        }
+        if !is_absolute_protocol_path(&view.path) {
+            return Err("Neovim view paths must be nonempty and absolute".into());
+        }
+        if view.width == 0 || view.height == 0 {
+            return Err("Neovim view dimensions must be positive".into());
+        }
+        if view.view.lnum == 0 || view.view.topline == 0 || view.bottomline == 0 {
+            return Err("Neovim line positions must be positive".into());
+        }
+        if view.bottomline < view.view.topline {
+            return Err("Neovim bottomline must not precede topline".into());
+        }
+    }
+    Ok(())
+}
+
+fn is_absolute_protocol_path(path: &std::path::Path) -> bool {
+    let bytes = path.to_string_lossy();
+    let bytes = bytes.as_bytes();
+    bytes.first() == Some(&b'/')
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
+        || (bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'\\')
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NvimPaneStateEnvelope {
+    pub protocol_version: u32,
+    pub views: Vec<NvimView>,
+}
+
+impl<'de> Deserialize<'de> for NvimPaneStateEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let json = Box::<RawValue>::deserialize(deserializer)?;
+        crate::strict_json::reject_duplicate_fields(json.get().as_bytes())
+            .map_err(de::Error::custom)?;
+        let header: VersionHeader = serde_json::from_str(json.get()).map_err(de::Error::custom)?;
+        if header.protocol_version != PROTOCOL_VERSION {
+            return Err(de::Error::custom(format!(
+                "unsupported Neovim pane state protocol version {}",
+                header.protocol_version
+            )));
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawNvimPaneStateEnvelope {
+            protocol_version: u32,
+            views: Vec<NvimView>,
+        }
+
+        let raw: RawNvimPaneStateEnvelope =
+            serde_json::from_str(json.get()).map_err(de::Error::custom)?;
+        validate_nvim_views(&raw.views).map_err(de::Error::custom)?;
+        Ok(Self {
+            protocol_version: raw.protocol_version,
+            views: raw.views,
+        })
+    }
 }
 
 fn validate_windows(owner: &str, windows: &[HostWindow]) -> Result<(), HostContextError> {
@@ -223,6 +327,7 @@ fn validate_windows(owner: &str, windows: &[HostWindow]) -> Result<(), HostConte
                     pane_id: pane.id.clone(),
                 });
             }
+            validate_nvim_views(&pane.nvim_views).map_err(HostContextError::InvalidNvimView)?;
         }
     }
     Ok(())
@@ -416,6 +521,146 @@ pub enum SelectionStatus {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileOpenTarget {
+    Window,
+    RightPane,
+    BottomPane,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FileHostTarget {
+    pub window_id: String,
+    pub pane_id: String,
+}
+
+impl<'de> Deserialize<'de> for FileHostTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawFileHostTarget {
+            window_id: String,
+            pane_id: String,
+        }
+
+        let raw = RawFileHostTarget::deserialize(deserializer)?;
+        if raw.window_id.is_empty() || raw.pane_id.is_empty() {
+            return Err(de::Error::custom(
+                "file host target window and pane IDs must not be empty",
+            ));
+        }
+        Ok(Self {
+            window_id: raw.window_id,
+            pane_id: raw.pane_id,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FilePreviewEnvelope {
+    pub protocol_version: u32,
+    pub sequence: u64,
+    pub state: FilePreviewState,
+}
+
+impl<'de> Deserialize<'de> for FilePreviewEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let json = Box::<RawValue>::deserialize(deserializer)?;
+        crate::strict_json::reject_duplicate_fields(json.get().as_bytes())
+            .map_err(de::Error::custom)?;
+        let header: VersionHeader = serde_json::from_str(json.get()).map_err(de::Error::custom)?;
+        if header.protocol_version != PROTOCOL_VERSION {
+            return Err(de::Error::custom(format!(
+                "unsupported file preview protocol version {}",
+                header.protocol_version
+            )));
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawFilePreviewEnvelope {
+            protocol_version: u32,
+            sequence: u64,
+            state: FilePreviewState,
+        }
+
+        let raw: RawFilePreviewEnvelope =
+            serde_json::from_str(json.get()).map_err(de::Error::custom)?;
+        if let FilePreviewState::File {
+            path, nvim_view, ..
+        } = &raw.state
+        {
+            if !is_absolute_protocol_path(path) {
+                return Err(de::Error::custom(
+                    "file preview paths must be nonempty and absolute",
+                ));
+            }
+            if let Some(view) = nvim_view {
+                validate_nvim_views(std::slice::from_ref(view.as_ref()))
+                    .map_err(de::Error::custom)?;
+            }
+        }
+        Ok(Self {
+            protocol_version: raw.protocol_version,
+            sequence: raw.sequence,
+            state: raw.state,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FilePreviewState {
+    Hidden,
+    Empty,
+    File {
+        project: Project,
+        path: PathBuf,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nvim_view: Option<Box<NvimView>>,
+    },
+}
+
+impl<'de> Deserialize<'de> for FilePreviewState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+        enum RawFilePreviewState {
+            Hidden {},
+            Empty {},
+            File {
+                project: Project,
+                path: PathBuf,
+                nvim_view: Option<Box<NvimView>>,
+            },
+        }
+
+        match RawFilePreviewState::deserialize(deserializer)? {
+            RawFilePreviewState::Hidden {} => Ok(Self::Hidden),
+            RawFilePreviewState::Empty {} => Ok(Self::Empty),
+            RawFilePreviewState::File {
+                project,
+                path,
+                nvim_view,
+            } => Ok(Self::File {
+                project,
+                path,
+                nvim_view,
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Selection {
@@ -429,6 +674,10 @@ pub enum Selection {
         path: PathBuf,
         #[serde(skip_serializing_if = "Option::is_none")]
         opener: Option<Vec<String>>,
+        open_target: FileOpenTarget,
+        reuse_existing: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        host_target: Option<FileHostTarget>,
     },
     CloseProject {
         project: Project,

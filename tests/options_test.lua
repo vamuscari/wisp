@@ -73,3 +73,37 @@ helper.test("project policy hooks must be functions", function()
   assert_config_error({ workspace_for_project = "wisp" }, "workspace_for_project")
   assert_config_error({ domain_for_project = {} }, "domain_for_project")
 end)
+
+helper.test("file open target is strict and defaults to window", function()
+  local wezterm = helper.fake_wezterm()
+  local wisp = helper.load_wezterm_adapter(wezterm)
+  for _, target in ipairs { "window", "right_pane", "bottom_pane" } do
+    wisp.apply_to_config({}, { file_open = { default = target } })
+  end
+
+  assert_config_error({ file_open = "window" }, "file_open")
+  assert_config_error({ file_open = {} }, "file_open")
+  assert_config_error({ file_open = { default = "tab" } }, "file_open")
+  assert_config_error({ file_open = { default = "window", unknown = true } }, "file_open")
+end)
+
+helper.test("file preview requires an exact command direction and size", function()
+  local wezterm = helper.fake_wezterm()
+  local wisp = helper.load_wezterm_adapter(wezterm)
+  wisp.apply_to_config({}, {
+    file_preview = { command = { "nvim", "--clean" }, direction = "Right", size = 0.5 },
+  })
+
+  assert_config_error({ file_preview = {} }, "file_preview")
+  assert_config_error({ file_preview = { command = {}, direction = "Right", size = 0.5 } }, "command")
+  assert_config_error({ file_preview = { command = { "nvim", "" }, direction = "Right", size = 0.5 } }, "command")
+  local sparse = { "nvim", "--clean" }
+  sparse[1] = nil
+  assert_config_error({ file_preview = { command = sparse, direction = "Right", size = 0.5 } }, "command")
+  assert_config_error({ file_preview = { command = { "nvim" }, direction = "Center", size = 0.5 } }, "direction")
+  assert_config_error({ file_preview = { command = { "nvim" }, direction = "Right", size = 0 } }, "size")
+  assert_config_error(
+    { file_preview = { command = { "nvim" }, direction = "Right", size = 0.5, script = "x" } },
+    "unknown"
+  )
+end)

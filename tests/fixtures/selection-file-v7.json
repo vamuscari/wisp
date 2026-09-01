@@ -1,5 +1,5 @@
 {
-  "protocol_version": 6,
+  "protocol_version": 7,
   "status": "selected",
   "selection": {
     "kind": "file",
@@ -11,6 +11,12 @@
       "display_name": "API"
     },
     "path": "/home/user/Repos/api/src/main.rs",
-    "opener": ["nvim", "/home/user/Repos/api/src/main.rs"]
+    "opener": ["nvim", "/home/user/Repos/api/src/main.rs"],
+    "open_target": "right_pane",
+    "reuse_existing": true,
+    "host_target": {
+      "window_id": "17",
+      "pane_id": "42"
+    }
   }
 }

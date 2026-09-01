@@ -98,7 +98,7 @@ Set `WISP_CONFIG_FILE` or pass the global `--config <path>` option to use a
 different file.
 
 ```toml
-version = 6
+version = 7
 cache_ttl_seconds = 60
 follow_symlinks = false
 
@@ -128,7 +128,8 @@ session_limit = 100
 
 Each immediate directory under a root becomes a project. Fixed projects need
 only `path`; `id`, `group`, `name`, and `display_name` are optional. Repeated
-native paths are coalesced, while duplicate explicit IDs are rejected.
+native paths are coalesced, while duplicate explicit IDs are rejected. Root and
+fixed-project paths must be absolute after optional `~` expansion.
 
 Openers are argv arrays, never shell strings. Supported placeholders are:
 
@@ -182,6 +183,8 @@ Running `wisp` without a subcommand is equivalent to `wisp pick`.
 wisp pick
 wisp pick --result-file <path> --host-context-file <path> \
   [--active-project-path <path>] [--active-file <path>] \
+  [--file-open-target window|right-pane|bottom-pane] \
+  [--file-preview-state-file <path>] [--file-preview] \
   --initial-view projects|windows|sessions [--disable-sessions]
 wisp projects --json
 wisp refresh
@@ -222,13 +225,16 @@ wisp open "$(cat /tmp/wisp-selection.json)"
 | --- | --- |
 | `Up` / `Down`, `j` / `k` | Move in the focused pane |
 | `Left` / `Right`, `h` / `l`, `Tab` | Move through the Project, Window, Pane, or directory hierarchy |
-| `Enter` | Descend into a project, window, or directory; select a pane, file, or session |
+| `Enter` | Descend into a project, window, or directory; select a pane or session; reuse a visible matching file or use the configured default target |
+| `Ctrl-T` | Open the selected file in a new Window, even when it is already visible |
+| `Ctrl-V` | Open the selected file in a new right Pane, even when it is already visible |
+| `Ctrl-X` | Open the selected file in a new bottom Pane, even when it is already visible |
 | `o` | Directly activate the selected project or host workspace |
 | `w` | Show Windows and focus the detail pane |
 | `f` | Show Files and focus the detail pane |
 | `s` | Show OpenCode Sessions and focus the detail pane |
 | `x` | Close the selected open project or host workspace from the Projects pane and exit |
-| `p` | Toggle the window Preview pane |
+| `p` | Toggle terminal-text Preview in Windows or live file Preview in Files |
 | `?` | Toggle the Commands pane |
 | `/` | Enter fuzzy search for the focused pane |
 | `Backspace` | Go to the parent directory; at the project root focus Projects |
@@ -268,6 +274,10 @@ four hierarchy levels including Projects, medium layouts show three, and narrow
 layouts recycle the focused directory while retaining the full breadcrumb.
 Directory reads use a debounced background worker, and request IDs discard
 results superseded by a newer highlight.
+Files already visible in a Neovim window have a `◆` marker. `Enter` revalidates
+and reuses the best marked project target when possible. The three Ctrl keys
+always create a duplicate in their explicit target and do nothing on a
+directory.
 There is no application title bar. A white-bordered utility bar at the bottom
 shows the current mode and view, becomes the focused query input during search,
 and reports status errors. Command hints live in the `?` Commands pane, which
@@ -311,6 +321,12 @@ wisp.apply_to_config(config, {
   },
   popup = { direction = "Bottom", size = 0.65 },
   window_preview = true,
+  file_open = { default = "window" },
+  file_preview = {
+    command = { "nvim" },
+    direction = "Right",
+    size = 0.5,
+  },
 })
 
 config.keys = config.keys or {}
@@ -363,11 +379,22 @@ text while Preview is hidden or Commands is visible. It runs a bounded
 cached, and is discarded when the target changes, Preview is hidden, or the
 picker exits.
 
-When the original pane is running Neovim with Wisp configured, the adapter
-reads Neovim's pane-local current-file variable before launching the picker.
-A known non-Neovim foreground process rejects stale values; mux panes where
-process inspection is unavailable use the pane variable directly. In an
-unmanaged workspace, the active file can still identify its containing Wisp
+File Preview is disabled unless `file_preview` is configured. It starts visible
+when Files mode is entered, follows the highlighted file in one owned Neovim
+split, and closes when Files mode is left or `p` toggles it off. The command is
+an argv array launched directly without a shell; add user-owned startup flags
+such as `--clean` when desired. Preview reads at most 1 MiB or 10,000 lines,
+rejects binary NUL content, and uses an isolated read-only scratch buffer with
+normal filetype detection and the active color scheme. When a matching live
+editor view exists, the preview restores its captured cursor and viewport and
+shows the source line range and dimensions.
+
+When a pane is running Neovim with Wisp configured, the adapter reads its
+strict `WISP_NVIM_STATE` payload before launching the picker. The state contains
+every normal file window in the displayed Neovim tab, including viewport
+metadata. A known non-Neovim foreground process rejects stale values; mux panes
+where process inspection is unavailable use pane state directly. In an
+unmanaged workspace, the active view can still identify its containing Wisp
 project.
 
 ### WezTerm Options
@@ -389,6 +416,8 @@ project.
 | `status_colors` | built-in OldBook palette | Partial semantic status color table |
 | `popup` | `{ direction = "Bottom", size = 0.65 }` | Top-level popup split placement and size |
 | `window_preview` | `false` | Start with window Preview visible instead of on demand |
+| `file_open` | `{ default = "window" }` | Default file target: `window`, `right_pane`, or `bottom_pane` |
+| `file_preview` | none | Live preview command, split direction, and positive split size |
 | `single_pane_behavior` | `"show"` | Show a one-pane Window's Pane column, or use `"activate"` to select it immediately |
 
 `status_colors` accepts only `foreground`, `opencode_background`,
@@ -406,6 +435,10 @@ does not load provider modules or execute user-supplied commands.
 `popup.direction` accepts `Top`, `Bottom`, `Left`, or `Right`. A `popup.size`
 below `1` is a fraction of the available space; a value of `1` or greater is a
 cell count, matching `pane:split` semantics.
+
+`file_preview.command` must be a dense non-empty argv array.
+`file_preview.direction` accepts the same four directions as `popup`, and
+`file_preview.size` follows the same positive fraction-or-cell split semantics.
 
 Mux workspace names and domains remain host policy:
 
@@ -439,9 +472,13 @@ provider clicks.
 
 Project workspaces and project-aware tabs/splits set `WISP_PROJECT_DIR` and
 `WISP_PROJECT_NAME`. Tabs and splits preserve pane directories after converting
-WezTerm file URLs to native drive or UNC paths on Windows. File selections
-launch `wisp open` as the initial process in a new workspace or a new tab in an
-existing workspace; the adapter never executes opener argv itself. Pane
+WezTerm file URLs to native drive or UNC paths on Windows. `Enter` first
+revalidates the exact captured workspace, Window, Pane, and visible file. A live
+target is activated without running an opener; a stale target falls back to the
+configured default. Window targets launch `wisp open` in the first project
+Window or a new Window in an existing workspace. Pane targets split the active
+project Window right or bottom, but create the first Window when the project is
+closed. The adapter never executes opener argv itself. Pane
 selections validate and activate the exact workspace, tab, and pane captured
 when the picker launched. Host-only
 workspace selections use WezTerm's existing-workspace API, so a stale selection
@@ -504,28 +541,43 @@ vim.opt.runtimepath:prepend(wisp_root .. "/nvim")
 
 require("wisp").setup {
   keymap = "<leader>wp",
+  file_open = { default = "window" },
+  file_preview = { width = 0.5 },
 }
 ```
 
-`:Wisp` opens `wisp pick` in a centered floating terminal. Results are applied
-to the tab that launched the picker, even if another tab becomes active:
+`:Wisp` opens `wisp pick` in a centered floating terminal. Project and new-file
+results are applied relative to the tab that launched the picker, even if
+another tab becomes active:
 
 - Project selection sets tab-local cwd with `:tcd`.
-- File selection sets tab-local cwd and edits the file.
+- `Enter` focuses a visible matching normal-file window before opening another.
+- `window` creates a tab page; `right_pane` and `bottom_pane` create vertical
+  and horizontal splits in the originating tab.
+- The explicit Ctrl file targets always create their requested tab or split.
 - `vim.t.wisp_project_dir` and `vim.t.wisp_project_name` store project metadata.
 - Initial metadata is seeded from `WISP_PROJECT_DIR` and `WISP_PROJECT_NAME`.
 - The originating normal-file buffer is shown inline on the current project.
 
-Inside WezTerm, the adapter publishes the active normal-file path as a
-pane-local user variable. Unnamed buffers and tool buffers such as terminals,
-quickfix lists, and file trees clear it, so they are never shown as the current
-file. The same context is passed directly when `:Wisp` opens the picker.
+When `file_preview` is configured, Files mode starts with a companion scratch
+float to the right of the picker within its configured footprint. It uses the
+same bounded renderer as WezTerm, retains focus in the picker terminal, and
+restores the original picker dimensions when hidden. Selection, cancellation,
+and failure stop the watcher and remove the temporary sidecar before applying a
+result.
+
+Inside WezTerm, the adapter publishes every normal file shown in the current
+Neovim tab as strict protocol-v7 pane state. Unnamed, hidden, terminal,
+quickfix, help, and other non-file buffers are omitted. Cursor and scroll-only
+updates are debounced; tab, window, and buffer changes publish immediately. The
+active view is also passed directly when `:Wisp` opens the picker.
 
 The Neovim adapter disables OpenCode session mode because this first release
 implements session focus and attach behavior only in the WezTerm adapter.
 
 Setup options are `config_file`, `command`, `keymap`, `keymap_options`,
-`width`, `height`, and `border`. See `:help wisp` for the compact reference.
+`width`, `height`, `border`, `file_open`, and `file_preview`. See `:help wisp`
+for the compact reference.
 
 ## Protocol
 
@@ -534,7 +586,7 @@ executables reject mismatched schemas:
 
 ```json
 {
-  "protocol_version": 6,
+  "protocol_version": 7,
   "projects": [
     {
       "id": "api",
@@ -547,11 +599,12 @@ executables reject mismatched schemas:
 }
 ```
 
-Selection protocol version 6 embeds the owning project and resolved opener:
+Selection protocol version 7 embeds the owning project, resolved opener, and
+file-placement policy:
 
 ```json
 {
-  "protocol_version": 6,
+  "protocol_version": 7,
   "status": "selected",
   "selection": {
     "kind": "file",
@@ -563,7 +616,13 @@ Selection protocol version 6 embeds the owning project and resolved opener:
       "display_name": "API"
     },
     "path": "/home/user/Repos/api/src/main.rs",
-    "opener": ["nvim", "/home/user/Repos/api/src/main.rs"]
+    "opener": ["nvim", "/home/user/Repos/api/src/main.rs"],
+    "open_target": "right_pane",
+    "reuse_existing": true,
+    "host_target": {
+      "window_id": "17",
+      "pane_id": "42"
+    }
   }
 }
 ```
@@ -573,7 +632,7 @@ renderer:
 
 ```json
 {
-  "protocol_version": 6,
+  "protocol_version": 7,
   "sessions": {
     "waiting": 1,
     "running": 2,
@@ -605,7 +664,7 @@ Preview target the exact split captured at launch:
 
 ```json
 {
-  "protocol_version": 6,
+  "protocol_version": 7,
   "projects": {
     "api": {
       "labels": ["current", "open"],
@@ -620,7 +679,27 @@ Preview target the exact split captured at launch:
               "id": "42",
               "label": "nvim",
               "detail": "src/main.rs",
-              "active": true
+              "active": true,
+              "nvim_views": [
+                {
+                  "window_id": "1001",
+                  "path": "/home/user/Repos/api/src/main.rs",
+                  "active": true,
+                  "width": 120,
+                  "height": 40,
+                  "bottomline": 30,
+                  "view": {
+                    "lnum": 12,
+                    "col": 0,
+                    "coladd": 0,
+                    "curswant": 0,
+                    "topline": 4,
+                    "topfill": 0,
+                    "leftcol": 0,
+                    "skipcol": 0
+                  }
+                }
+              ]
             }
           ]
         }
@@ -657,7 +736,7 @@ The `workspaces` map is required; each key exists only while that workspace is
 open, and `current` selects the current row. Omitted `windows` and
 `session_items` fields are empty, while every window must contain at least one
 pane. Window and pane IDs are opaque to the Rust picker. Adapters reject
-protocol versions other than 6 rather than attempting compatibility. Canonical
+protocol versions other than 7 rather than attempting compatibility. Canonical
 examples live in [`tests/fixtures`](tests/fixtures).
 
 ## Cache And Limits

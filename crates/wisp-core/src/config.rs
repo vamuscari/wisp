@@ -316,16 +316,30 @@ fn validated_path(value: &str, home: &Path, field: &str) -> Result<PathBuf, Conf
             "{field} must not be empty"
         )));
     }
-    if value == "~" {
-        return Ok(home.to_path_buf());
-    }
-    if let Some(rest) = value
+    let path = if value == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = value
         .strip_prefix("~/")
         .or_else(|| value.strip_prefix("~\\"))
     {
-        return Ok(home.join(rest));
+        home.join(rest)
+    } else {
+        PathBuf::from(value)
+    };
+    let bytes = path.to_string_lossy();
+    let bytes = bytes.as_bytes();
+    let absolute = bytes.first() == Some(&b'/')
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
+        || (bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'\\');
+    if !absolute {
+        return Err(ConfigError::Validation(format!(
+            "{field} must be an absolute path"
+        )));
     }
-    Ok(PathBuf::from(value))
+    Ok(path)
 }
 
 fn validated_optional_text(

@@ -24,6 +24,7 @@ const WEZTERM_PICKER: &[u8] = include_bytes!("../../../wezterm/picker.lua");
 const WEZTERM_STATUS: &[u8] = include_bytes!("../../../wezterm/status.lua");
 const WEZTERM_STATUS_ITEMS: &[u8] = include_bytes!("../../../wezterm/status_items.lua");
 const NVIM_ADAPTER: &[u8] = include_bytes!("../../../nvim/lua/wisp/init.lua");
+const NVIM_FILE_PREVIEW: &[u8] = include_bytes!("../../../nvim/lua/wisp/file_preview.lua");
 const NVIM_HELP: &[u8] = include_bytes!("../../../nvim/doc/wisp.txt");
 const OPENCODE_PLUGIN: &[u8] = include_bytes!("../../../opencode/wisp.js");
 const PRUNE_TOMBSTONE_PREFIX: &str = ".prune-";
@@ -127,6 +128,7 @@ pub fn deploy(replace_incompatible: bool) -> Result<PathBuf, DeployError> {
         ("wezterm/status.lua", WEZTERM_STATUS),
         ("wezterm/status_items.lua", WEZTERM_STATUS_ITEMS),
         ("nvim/lua/wisp/init.lua", NVIM_ADAPTER),
+        ("nvim/lua/wisp/file_preview.lua", NVIM_FILE_PREVIEW),
         ("nvim/doc/wisp.txt", NVIM_HELP),
         ("opencode/wisp.js", OPENCODE_PLUGIN),
     ];
@@ -462,6 +464,7 @@ fn verify_bundle(path: &Path, expected_id: &str) -> Result<Manifest, DeployError
         "wezterm/status.lua",
         "wezterm/status_items.lua",
         "nvim/lua/wisp/init.lua",
+        "nvim/lua/wisp/file_preview.lua",
         "nvim/doc/wisp.txt",
         "opencode/wisp.js",
     ];
@@ -630,7 +633,7 @@ local verification = vim.system({{
 }}, {{ text = true }}):wait()
 assert(verification.code == 0, "Wisp bundle verification failed: " .. (verification.stderr or "unknown error"))
 local chunk = assert(loadfile(bundle .. "/nvim/lua/wisp/init.lua"))
-return chunk(binary, "wisp-deployment-v{PROTOCOL_VERSION}")
+return chunk(binary, "wisp-deployment-v{PROTOCOL_VERSION}", bundle .. "/nvim/lua/wisp/file_preview.lua")
 "#
     );
     Ok((wezterm_loader, nvim_loader))

@@ -115,12 +115,12 @@ normal tab formatting.
   colors, freshness behavior, and event ownership in `README.md`.
 - [ ] Enable `opencode_tab_colors = true` in
   `~/Artifacts/wezterm/wezterm.lua` after adapter tests pass.
-- [ ] Bump the workspace package from `0.9.0` to `0.10.0` because this is a new
+- [ ] Bump the workspace package from `0.10.0` to `0.11.0` because this is a new
   public option and substantial bundled capability.
 - [ ] Synchronize `Cargo.toml`, Wisp workspace entries in `Cargo.lock`, and exact
   package-version assertions.
 - [ ] Keep protocol, config, cache, registry, and deployment schemas at version
-  6. The plugin and adapter ship in the same content-addressed bundle, so this
+  7. The plugin and adapter ship in the same content-addressed bundle, so this
   internal user-variable contract does not require a protocol change.
 - [ ] Do not modify native WezTerm source; documented pane user variables and
   `format-tab-title` already provide the required host APIs.
@@ -135,14 +135,14 @@ normal tab formatting.
 - [ ] Run the OpenCode plugin Node test suites.
 - [ ] Run `lua tests/run.lua` and `stylua --check .`.
 - [ ] Run the focused managed WezTerm configuration test in `~/Artifacts`.
-- [ ] Install Wisp `0.10.0`, confirm `wisp --version`, and deploy the new bundle
-  without `--replace-incompatible` because deployment schema v6 is unchanged.
+- [ ] Install Wisp `0.11.0`, confirm `wisp --version`, and deploy the new bundle
+  without `--replace-incompatible` because deployment schema v7 is unchanged.
 - [ ] Refresh the stable OpenCode loader with `wisp opencode install` and restart
   OpenCode so the new bundled plugin publishes pane state.
 - [ ] Dry-run and push only the managed WezTerm configuration through a reduced
   `~/Artifacts` manifest.
 - [ ] Run `wisp deploy verify`, validate the live Wisp config, and confirm
-  `wisp projects --json` still returns protocol v6.
+  `wisp projects --json` still returns protocol v7.
 - [ ] Manually verify split-pane tab coloring, priority changes, pane moves,
   normal OpenCode exit, and unaffected tabs without automating the host GUI.
 
@@ -156,12 +156,12 @@ normal tab formatting.
 - Normal OpenCode shutdown clears the color; stale state is ignored after 90
   seconds following an abnormal shutdown.
 - Tabs without OpenCode remain visually identical to the existing theme.
-- The aggregate right status, picker session behavior, and strict protocol v6
+- The aggregate right status, picker session behavior, and strict protocol v7
   contracts remain unchanged.
 
 ### Live Neovim File Preview And Editor Reuse
 
-- [ ] Extend Files mode with a live Neovim preview, configurable Window or Pane
+- [x] Extend Files mode with a live Neovim preview, configurable Window or Pane
   opening, and exact reuse of files already visible in Neovim.
 
 #### Goal
@@ -242,30 +242,30 @@ require("wisp").setup({
 
 #### Neovim Pane State
 
-- [ ] Replace the plain `WISP_NVIM_FILE` pane variable with a strict,
+- [x] Replace the plain `WISP_NVIM_FILE` pane variable with a strict,
   versioned `WISP_NVIM_STATE` JSON payload encoded through OSC 1337.
-- [ ] Publish every normal file shown by a Neovim window in the currently
+- [x] Publish every normal file shown by a Neovim window in the currently
   displayed Neovim tab page. Do not publish hidden buffers, unnamed buffers,
   terminal buffers, quickfix windows, help, or other non-file buffers.
-- [ ] Include the exact absolute path, opaque Neovim window ID, active-window
+- [x] Include the exact absolute path, opaque Neovim window ID, active-window
   flag, source window width and height, visible bottom line, and these
   `winsaveview()` fields for every published view:
   `lnum`, `col`, `coladd`, `curswant`, `topline`, `topfill`, `leftcol`, and
   `skipcol`.
-- [ ] Require the payload's exact protocol version and exact fields before any
+- [x] Require the payload's exact protocol version and exact fields before any
   adapter uses it. Reject empty paths, invalid IDs, negative view values,
   invalid dimensions, unknown fields, and malformed JSON.
-- [ ] Publish immediately on setup and after `BufEnter`, `BufFilePost`,
+- [x] Publish immediately on setup and after `BufEnter`, `BufFilePost`,
   `BufWinEnter`, `TabEnter`, `WinEnter`, `WinNew`, `WinClosed`, and UI attach.
-- [ ] Refresh viewport state after `CursorMoved`, `WinScrolled`, and resize
+- [x] Refresh viewport state after `CursorMoved`, `WinScrolled`, and resize
   events through one short debounce so ordinary scrolling does not emit an OSC
   sequence for every intermediate movement.
-- [ ] Clear the pane variable immediately on `VimLeavePre` and whenever no
+- [x] Clear the pane variable immediately on `VimLeavePre` and whenever no
   qualifying file view remains.
-- [ ] When foreground-process inspection is available, ignore a stale pane
+- [x] When foreground-process inspection is available, ignore a stale pane
   variable unless the pane is still running Neovim. Preserve the existing rule
   that mux panes may use pane state when process inspection is unavailable.
-- [ ] Do not retain a reader for `WISP_NVIM_FILE`; the protocol bump replaces
+- [x] Do not retain a reader for `WISP_NVIM_FILE`; the protocol bump replaces
   the old pane-state contract outright.
 
 The decoded pane value should have this conceptual shape:
@@ -298,222 +298,222 @@ The decoded pane value should have this conceptual shape:
 
 #### Host Context And Matching
 
-- [ ] Extend protocol `HostPane` with optional strict Neovim view metadata.
+- [x] Extend protocol `HostPane` with optional strict Neovim view metadata.
   Keep WezTerm Window and Pane IDs opaque strings.
-- [ ] Have `wezterm/picker.lua` decode `WISP_NVIM_STATE` for every captured
+- [x] Have `wezterm/picker.lua` decode `WISP_NVIM_STATE` for every captured
   Pane and attach valid views to that Pane's host-context entry.
-- [ ] Continue passing the originating active file to Wisp, but derive it from
+- [x] Continue passing the originating active file to Wisp, but derive it from
   the active published Neovim view rather than a separate pane variable.
-- [ ] Match a selected file to editor views with Wisp's normalized path identity
+- [x] Match a selected file to editor views with Wisp's normalized path identity
   so Windows drive paths, UNC paths, separator differences, and case rules
   behave consistently with project discovery.
-- [ ] Consider only views owned by the selected project's exact workspace.
+- [x] Consider only views owned by the selected project's exact workspace.
   Host-only workspaces and another project's panes must never satisfy a match.
-- [ ] If several panes show the same file, rank the originating active Pane
+- [x] If several panes show the same file, rank the originating active Pane
   first, then an active Window and Pane, then an active internal Neovim view,
   and finally stable host snapshot order.
-- [ ] Show a concise marker or detail on file rows that already have a live
+- [x] Show a concise marker or detail on file rows that already have a live
   editor target so users can predict that `Enter` will jump rather than open.
 
 #### Preview State Protocol
 
-- [ ] Add an adapter-created temporary preview-state path passed to
+- [x] Add an adapter-created temporary preview-state path passed to
   `wisp pick`. Standalone Wisp without that path must keep preview unavailable.
-- [ ] Define a strict protocol-v7 preview envelope with a monotonically
+- [x] Define a strict protocol-v7 preview envelope with a monotonically
   increasing sequence and exactly one of these states:
   - `hidden`: preview is disabled or Files mode is not active.
   - `empty`: preview is visible but the highlighted entry is not a file.
   - `file`: includes the selected project, absolute path, and optional matched
     Neovim view state.
-- [ ] Atomically replace the sidecar in its own directory. Readers must never
+- [x] Atomically replace the sidecar in its own directory. Readers must never
   interpret a partial write, mismatched version, duplicate field, unknown
   field, or invalid state/field combination.
-- [ ] Publish only when the effective preview state changes and debounce rapid
+- [x] Publish only when the effective preview state changes and debounce rapid
   file highlights so the preview renders the newest path rather than every
   intermediate row.
-- [ ] Remove the sidecar after selection, cancellation, picker failure,
+- [x] Remove the sidecar after selection, cancellation, picker failure,
   timeout, popup replacement, and normal adapter cleanup.
 
 #### Neovim Preview Renderer
 
-- [ ] Add one canonical bundled Neovim preview module used by both host
+- [x] Add one canonical bundled Neovim preview module used by both host
   integrations.
-- [ ] Render into an isolated scratch buffer rather than loading highlighted
+- [x] Render into an isolated scratch buffer rather than loading highlighted
   paths into the user's normal buffer list.
-- [ ] Read at most 1 MiB or 10,000 lines, whichever limit is reached first.
+- [x] Read at most 1 MiB or 10,000 lines, whichever limit is reached first.
   Render a clear truncation message and reject binary content containing NUL.
-- [ ] Report unreadable, deleted, directory, binary, and oversized inputs in
+- [x] Report unreadable, deleted, directory, binary, and oversized inputs in
   the preview without failing or closing the picker.
-- [ ] Detect filetype from the path and let Neovim apply its normal syntax and
+- [x] Detect filetype from the path and let Neovim apply its normal syntax and
   active color scheme. Do not use `--clean` by default; users may add it to the
   configured WezTerm preview argv when they prefer isolation over their theme.
-- [ ] Keep the preview buffer non-modifiable, read-only, unswapped, and excluded
+- [x] Keep the preview buffer non-modifiable, read-only, unswapped, and excluded
   from ShaDa and ordinary buffer history.
-- [ ] When matched live view state exists, apply its cursor, top line,
+- [x] When matched live view state exists, apply its cursor, top line,
   horizontal scroll, fill, and skip offsets with `winrestview()` after loading
   the scratch content.
-- [ ] Display the source viewport line range and source dimensions so a preview
+- [x] Display the source viewport line range and source dimensions so a preview
   with different dimensions still communicates the original scroll height and
   location.
-- [ ] Prefer the active internal Neovim view when one pane publishes the same
+- [x] Prefer the active internal Neovim view when one pane publishes the same
   file in multiple visible windows.
-- [ ] Fall back to the beginning of the file when no matching live view exists
+- [x] Fall back to the beginning of the file when no matching live view exists
   or the captured view lies beyond the bounded preview content.
 
 #### TUI And Selection Contract
 
-- [ ] Add a strict `FileOpenTarget` enum with serialized values `window`,
+- [x] Add a strict `FileOpenTarget` enum with serialized values `window`,
   `right_pane`, and `bottom_pane`.
-- [ ] Extend `Selection::File` with required `open_target` and
+- [x] Extend `Selection::File` with required `open_target` and
   `reuse_existing` fields plus an optional nested host target containing exact
   WezTerm `window_id` and `pane_id`.
-- [ ] `Enter` must set `reuse_existing = true`, carry the configured default
+- [x] `Enter` must set `reuse_existing = true`, carry the configured default
   target for stale-target fallback, and include the best matching host target
   when one exists.
-- [ ] `Ctrl-T`, `Ctrl-V`, and `Ctrl-X` must set `reuse_existing = false`, set
+- [x] `Ctrl-T`, `Ctrl-V`, and `Ctrl-X` must set `reuse_existing = false`, set
   their explicit target, and omit a host target so they always create another
   editor.
-- [ ] Keep `wisp open` placement-agnostic. It must validate the complete v7
+- [x] Keep `wisp open` placement-agnostic. It must validate the complete v7
   selection, ignore host placement fields, and execute only the resolved opener
   argv directly.
-- [ ] Extend the Commands pane and README key table with the default and forced
+- [x] Extend the Commands pane and README key table with the default and forced
   file-open actions without obscuring the existing project, Window, Pane,
   search, and preview commands.
 
 #### WezTerm Application
 
-- [ ] Before applying a reusable file selection, resolve the captured Pane ID
+- [x] Before applying a reusable file selection, resolve the captured Pane ID
   and verify that it still belongs to the captured Window and selected project
   workspace.
-- [ ] Read and strictly validate the Pane's fresh `WISP_NVIM_STATE`, normalize
+- [x] Read and strictly validate the Pane's fresh `WISP_NVIM_STATE`, normalize
   its paths, and confirm the selected file is still visible before activation.
-- [ ] For a valid target, reuse `Workspace:activate_host_pane` to activate the
+- [x] For a valid target, reuse `Workspace:activate_host_pane` to activate the
   exact project workspace, Window, and Pane. Do not run `wisp open`, spawn a
   tab, split a Pane, or try to focus an internal Neovim window.
-- [ ] If the Pane disappeared, moved, stopped running Neovim, published invalid
+- [x] If the Pane disappeared, moved, stopped running Neovim, published invalid
   state, or changed files, fall back to the selection's configured
   `open_target`. Report an error only if that fallback also fails.
-- [ ] For `window`, retain the existing behavior: create the project workspace
+- [x] For `window`, retain the existing behavior: create the project workspace
   with `wisp open` as its initial process or spawn a new tab in an existing
   project workspace.
-- [ ] For `right_pane` and `bottom_pane`, split the active Pane of the selected
+- [x] For `right_pane` and `bottom_pane`, split the active Pane of the selected
   project's active Window, run `wisp open` as the new Pane's initial process,
   activate the new Pane, and switch to the project workspace.
-- [ ] If the target workspace has no mux Window, create its first Window for all
+- [x] If the target workspace has no mux Window, create its first Window for all
   three targets rather than splitting the originating workspace or rejecting
   the selection.
-- [ ] Keep cwd, configured domain, `WISP_PROJECT_DIR`, and
+- [x] Keep cwd, configured domain, `WISP_PROJECT_DIR`, and
   `WISP_PROJECT_NAME` on every new Window or Pane command.
 
 #### WezTerm Preview Lifecycle
 
-- [ ] Extend the picker result poller to read strict preview-state updates and
+- [x] Extend the picker result poller to read strict preview-state updates and
   create the configured Neovim preview split only while state is visible.
-- [ ] Split the owned picker Pane, not an arbitrary project Pane. Keep preview
+- [x] Split the owned picker Pane, not an arbitrary project Pane. Keep preview
   execution in the same host-neutral local domain as the picker.
-- [ ] Pass the sidecar path, protocol version, and canonical bundled preview
+- [x] Pass the sidecar path, protocol version, and canonical bundled preview
   module path without constructing a shell command.
-- [ ] Track the preview Pane as part of picker ownership. Temporary-tab,
+- [x] Track the preview Pane as part of picker ownership. Temporary-tab,
   top-level-popup, cancellation, timeout, process-exit, result-error, and popup
   replacement paths must close every owned preview Pane.
-- [ ] If preview Neovim exits unexpectedly, report one actionable toast and do
+- [x] If preview Neovim exits unexpectedly, report one actionable toast and do
   not respawn continuously until preview is toggled or Files mode is re-entered.
-- [ ] Keep one preview per picker. Rapid state changes must update the existing
+- [x] Keep one preview per picker. Rapid state changes must update the existing
   Neovim process rather than create additional Panes.
 
 #### Neovim Adapter
 
-- [ ] Pass the file-open default and preview sidecar path to the picker through
+- [x] Pass the file-open default and preview sidecar path to the picker through
   explicit CLI arguments.
-- [ ] When preview becomes visible, resize and move the picker float within its
+- [x] When preview becomes visible, resize and move the picker float within its
   configured footprint and create a companion preview float to its right.
   Closing preview must restore the picker to its original dimensions.
-- [ ] Use the canonical scratch renderer for sidecar updates and keep focus in
+- [x] Use the canonical scratch renderer for sidecar updates and keep focus in
   the picker terminal while preview follows the highlighted file.
-- [ ] Close the preview float, stop timers/watchers, and remove temporary state
+- [x] Close the preview float, stop timers/watchers, and remove temporary state
   before applying a selection or reporting picker failure.
-- [ ] For `reuse_existing = true`, scan visible normal-file Neovim windows for
+- [x] For `reuse_existing = true`, scan visible normal-file Neovim windows for
   the selected normalized path and focus the best live match before opening a
   new target.
-- [ ] Map `window` to a new Neovim tab page, `right_pane` to a vertical split,
+- [x] Map `window` to a new Neovim tab page, `right_pane` to a vertical split,
   and `bottom_pane` to a horizontal split. Pane targets must operate in the
   originating tab, then set its tab-local project cwd and Wisp metadata.
-- [ ] Use structured `nvim_cmd` arguments for paths. Do not interpolate file or
+- [x] Use structured `nvim_cmd` arguments for paths. Do not interpolate file or
   project paths into Ex command strings.
-- [ ] Preserve the existing error when the originating tab no longer exists,
+- [x] Preserve the existing error when the originating tab no longer exists,
   unless a valid existing file Window can be focused without that tab.
 
 #### Protocol And Deployment
 
-- [ ] Bump strict protocol 6 to 7 because `Selection::File`, `HostPane`, the
+- [x] Bump strict protocol 6 to 7 because `Selection::File`, `HostPane`, the
   pane user variable, and the preview sidecar all change their contracts.
-- [ ] Update `PROTOCOL_VERSION`, both Lua adapter versions and deployment
+- [x] Update `PROTOCOL_VERSION`, both Lua adapter versions and deployment
   tokens, every strict validator, protocol fixture, adapter test, and canonical
   JSON example together.
-- [ ] Rename all canonical `tests/fixtures/*-v6.json` files to v7, add the
+- [x] Rename all canonical `tests/fixtures/*-v6.json` files to v7, add the
   required file-open fields, and add valid hidden, empty, and matched-view
   preview fixtures.
-- [ ] Accept no v6 selection, host context, pane state, preview state, cache,
+- [x] Accept no v6 selection, host context, pane state, preview state, cache,
   registry, config, or deployment state after the bump. Do not add fallback
   readers or migrations.
-- [ ] Account for current version coupling: config, cache, OpenCode registry,
+- [x] Account for current version coupling: config, cache, OpenCode registry,
   and deployment schema constants follow the protocol and therefore also move
   to 7. Old cache and registry state must be discarded and rebuilt; v6 shared
   TOML must be rejected clearly.
-- [ ] Add the canonical preview module to the content-addressed deployment
+- [x] Add the canonical preview module to the content-addressed deployment
   assets, manifest verification, stable loader arguments, bundle hash tests,
   and exact-file assertions.
-- [ ] Treat this as a substantial capability and breaking protocol change. If
+- [x] Treat this as a substantial capability and breaking protocol change. If
   it lands before the planned OpenCode tab-color feature, use package `0.10.0`
   here and move that later feature to `0.11.0`. If they ship together, update
   the tab-color plan to protocol/schema 7 and let package `0.10.0` cover both.
   If tab colors ship first as `0.10.0`, use `0.11.0` here.
-- [ ] Synchronize `Cargo.toml`, the three Wisp workspace entries in
+- [x] Synchronize `Cargo.toml`, the three Wisp workspace entries in
   `Cargo.lock`, exact package assertions, and release/deployment expectations
   for the selected package version.
 
 #### Tests
 
-- [ ] Extend `crates/wisp-core/tests/navigation_protocol_test.rs` for every
+- [x] Extend `crates/wisp-core/tests/navigation_protocol_test.rs` for every
   `FileOpenTarget`, required reuse fields, optional host target, strict unknown
   fields, missing fields, invalid targets, and v6 rejection.
-- [ ] Extend TUI tests for Enter defaults, `Ctrl-T`, `Ctrl-V`, `Ctrl-X`, normal
+- [x] Extend TUI tests for Enter defaults, `Ctrl-T`, `Ctrl-V`, `Ctrl-X`, normal
   and search modes, directory no-ops, matching-path ranking, open-file markers,
   preview toggling, and Commands guidance.
-- [ ] Cover normalized Unix, Windows drive, and UNC matches, including case and
+- [x] Cover normalized Unix, Windows drive, and UNC matches, including case and
   separator differences and files with spaces.
-- [ ] Add CLI tests for atomic preview sidecar replacement, sequence ordering,
+- [x] Add CLI tests for atomic preview sidecar replacement, sequence ordering,
   debounce-to-latest behavior, all strict states, cleanup, and `wisp open`
   ignoring placement while preserving opener argv.
-- [ ] Extend `tests/nvim_adapter_test.lua` for multi-window state publication,
+- [x] Extend `tests/nvim_adapter_test.lua` for multi-window state publication,
   exact `winsaveview()` fields, viewport debounce, clear-on-exit, companion
   preview layout, scratch limits, syntax detection, view restoration, existing
   Window focus, and all three open targets.
-- [ ] Extend `tests/process_adapter_test.lua` for pane-state decoding, host
+- [x] Extend `tests/process_adapter_test.lua` for pane-state decoding, host
   context propagation, multiple matching panes, exact reuse without an opener
   process, strict live revalidation, stale fallback, forced duplicates, and
   closed-project first-Window behavior.
-- [ ] Add focused WezTerm preview lifecycle tests for temporary tabs, popups,
+- [x] Add focused WezTerm preview lifecycle tests for temporary tabs, popups,
   toggle-off, cancellation, timeout, malformed state, preview-process exit,
   replacement, and orphan prevention. Add any new Lua test file to
   `tests/run.lua` explicitly.
-- [ ] Extend options tests for strict nested option fields, dense preview argv,
+- [x] Extend options tests for strict nested option fields, dense preview argv,
   valid defaults, directions, sizes, widths, unknown fields, and disabled
   defaults in both adapters.
-- [ ] Extend deployment tests to hash, install, verify, and load the canonical
+- [x] Extend deployment tests to hash, install, verify, and load the canonical
   preview module from the active bundle.
 - [ ] Keep the real CI smoke tests passing on minimum WezTerm and Neovim 0.10.4
   so no newer host API becomes an accidental requirement.
 
 #### Verification And Deployment
 
-- [ ] Run `cargo fmt --all -- --check`.
-- [ ] Run `cargo clippy --workspace --all-targets --locked -- -D warnings`.
-- [ ] Run `cargo test --workspace --locked`.
-- [ ] Run `cargo +1.85.0 check --workspace --locked`.
-- [ ] Run `node --check opencode/wisp.js` and both OpenCode plugin test suites
+- [x] Run `cargo fmt --all -- --check`.
+- [x] Run `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+- [x] Run `cargo test --workspace --locked`.
+- [x] Run `cargo +1.85.0 check --workspace --locked`.
+- [x] Run `node --check opencode/wisp.js` and both OpenCode plugin test suites
   because the protocol-coupled registry version changes.
-- [ ] Run `lua tests/run.lua` and `stylua --check .`.
+- [x] Run `lua tests/run.lua` and `stylua --check .`.
 - [ ] Parse the minimum WezTerm test configuration and load the deployed adapter
   in Neovim 0.10.4 through the existing CI smoke tests.
 - [ ] Update `~/Artifacts/wisp/config.toml` to config version 7, then use the
@@ -649,10 +649,10 @@ selection, but it is missing from the on-screen Commands pane.
 - [ ] Document that a direct project selection switches to an existing project
   workspace or creates one default-shell Window at the project directory.
 - [ ] Keep protocol, config, cache, registry, and deployment schemas at version
-  6; this reuses the existing project selection and adapter contract.
+  7; this reuses the existing project selection and adapter contract.
 - [ ] Ship the runtime change under the next undeployed package version. If it
-  lands before the OpenCode tab-color feature, bump `0.9.0` to `0.9.1` and
-  update that feature's version baseline; if they ship together, `0.10.0`
+  lands before the OpenCode tab-color feature, bump `0.10.0` to `0.10.1` and
+  update that feature's version baseline; if they ship together, `0.11.0`
   covers both changes.
 - [ ] Synchronize `Cargo.toml`, the three Wisp workspace entries in
   `Cargo.lock`, and the exact package-version assertion in
@@ -682,7 +682,7 @@ selection, but it is missing from the on-screen Commands pane.
 - `o` directly jumps into a new or existing project without Window or Pane
   selection and is visible in the Commands pane.
 - Existing open-project Window and Pane navigation remains exact and unchanged.
-- File, session, host-only workspace, opener, and strict protocol v6 behavior
+- File, session, host-only workspace, opener, and strict protocol v7 behavior
   remain unchanged.
 
 <!--

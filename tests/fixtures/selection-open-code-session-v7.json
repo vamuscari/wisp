@@ -1,5 +1,5 @@
 {
-  "protocol_version": 6,
+  "protocol_version": 7,
   "status": "selected",
   "selection": {
     "kind": "open_code_session",

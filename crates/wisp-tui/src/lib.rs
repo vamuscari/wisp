@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossterm::{
@@ -27,7 +27,11 @@ use wisp_core::{
     model::{DirectoryEntry, Project},
     navigation::{NavigationError, NavigationOutcome, Navigator, Screen},
     opencode::{OpenCodeSession, OpenCodeSnapshot, SessionDisplayState},
-    protocol::{HostContext, HostWorkspaceContext, Selection},
+    path::comparison_key,
+    protocol::{
+        FileHostTarget, FileOpenTarget, FilePreviewState, HostContext, HostWorkspaceContext,
+        NvimView, Selection,
+    },
 };
 
 const THEME: Theme = Theme {
@@ -197,6 +201,9 @@ pub trait DataSource {
     fn window_preview_update(&mut self) -> Option<WindowPreviewUpdate> {
         None
     }
+    fn publish_file_preview(&mut self, _state: FilePreviewState) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub trait Input {
@@ -232,6 +239,9 @@ pub enum TuiError {
 pub struct App {
     navigator: Navigator,
     openers: Openers,
+    file_open_target: FileOpenTarget,
+    file_preview_available: bool,
+    file_preview_visible: bool,
     follow_symlinks: bool,
     context: HostContext,
     file_columns: Vec<FileColumn>,
@@ -316,6 +326,9 @@ impl App {
         let mut app = Self {
             navigator: Navigator::new(projects, follow_symlinks),
             openers,
+            file_open_target: FileOpenTarget::Window,
+            file_preview_available: false,
+            file_preview_visible: false,
             follow_symlinks,
             context: context.unwrap_or_default(),
             file_columns: Vec::new(),
@@ -457,6 +470,34 @@ impl App {
 
     pub fn configure_single_pane_behavior(&mut self, behavior: SinglePaneBehavior) {
         self.single_pane_behavior = behavior;
+    }
+
+    pub fn configure_file_open_target(&mut self, target: FileOpenTarget) {
+        self.file_open_target = target;
+    }
+
+    pub fn configure_file_preview(&mut self, available: bool, initially_visible: bool) {
+        self.file_preview_available = available;
+        self.file_preview_visible = available && initially_visible;
+    }
+
+    pub fn file_preview_state(&self) -> FilePreviewState {
+        if self.right_mode != RightMode::Files
+            || !self.file_preview_available
+            || !self.file_preview_visible
+        {
+            return FilePreviewState::Hidden;
+        }
+        let Some((project, entry)) = self.selected_regular_file() else {
+            return FilePreviewState::Empty;
+        };
+        FilePreviewState::File {
+            project,
+            path: entry.path.clone(),
+            nvim_view: self
+                .best_nvim_target(&entry.path)
+                .map(|(_, nvim_view)| Box::new(nvim_view)),
+        }
     }
 
     pub fn current_directory(&self) -> Option<&Path> {
@@ -859,6 +900,9 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return match key.code {
                 KeyCode::Char('c') => Ok(Command::Cancel),
+                KeyCode::Char('t') => self.select_file_open_target(FileOpenTarget::Window),
+                KeyCode::Char('v') => self.select_file_open_target(FileOpenTarget::RightPane),
+                KeyCode::Char('x') => self.select_file_open_target(FileOpenTarget::BottomPane),
                 KeyCode::Char('r') => {
                     if self.window_preview_visible() {
                         self.window_preview_refresh = self.window_preview_refresh.wrapping_add(1);
@@ -944,7 +988,15 @@ impl App {
             }
             KeyCode::Char('x') => self.close_selected_project(),
             KeyCode::Char('p') => {
-                self.toggle_window_preview();
+                match self.right_mode {
+                    RightMode::Windows => self.toggle_window_preview(),
+                    RightMode::Files if self.file_preview_available => {
+                        self.file_preview_visible = !self.file_preview_visible;
+                    }
+                    RightMode::Files | RightMode::Sessions => {
+                        self.status = Some("File preview is unavailable".into());
+                    }
+                }
                 Ok(Command::None)
             }
             KeyCode::Char('?') => {
@@ -1138,16 +1190,29 @@ impl App {
             DetailTarget::Entry(entry) => {
                 self.queued_file_preview = None;
                 if !entry.kind.is_directory(self.follow_symlinks) {
-                    return command_for_outcome(
-                        self.navigator.select_entry(&entry, &self.openers)?,
-                    );
+                    let host_target = self
+                        .best_nvim_target(&entry.path)
+                        .map(|(host_target, _)| host_target);
+                    return command_for_outcome(self.navigator.select_entry(
+                        &entry,
+                        &self.openers,
+                        self.file_open_target,
+                        true,
+                        host_target,
+                    )?);
                 }
                 let child_depth = self.file_focus.saturating_add(1);
                 let child_loaded = self
                     .file_columns
                     .get(child_depth)
                     .is_some_and(|column| column.path == entry.path);
-                let outcome = self.navigator.select_entry(&entry, &self.openers)?;
+                let outcome = self.navigator.select_entry(
+                    &entry,
+                    &self.openers,
+                    self.file_open_target,
+                    true,
+                    None,
+                )?;
                 if child_loaded {
                     self.file_focus = child_depth;
                     Ok(self.preview_selected_file())
@@ -1192,6 +1257,30 @@ impl App {
                 )?)
             }
         }
+    }
+
+    fn select_file_open_target(
+        &mut self,
+        open_target: FileOpenTarget,
+    ) -> Result<Command, NavigationError> {
+        let entry = if self.focus == Focus::Detail && self.right_mode == RightMode::Files {
+            self.selected_regular_file().map(|(_, entry)| entry)
+        } else {
+            None
+        };
+        let Some(entry) = entry else {
+            if self.right_mode == RightMode::Files {
+                self.status = Some("Select a file before choosing an open target".into());
+            }
+            return Ok(Command::None);
+        };
+        command_for_outcome(self.navigator.select_entry(
+            &entry,
+            &self.openers,
+            open_target,
+            false,
+            None,
+        )?)
     }
 
     fn finish_host_pane(&self, window_id: &str, pane_id: &str) -> Result<Command, NavigationError> {
@@ -1697,6 +1786,52 @@ impl App {
             });
         }
         items
+    }
+
+    fn selected_regular_file(&self) -> Option<(Project, DirectoryEntry)> {
+        let ProjectTarget::Project(project) = self.selected_target()? else {
+            return None;
+        };
+        let DetailTarget::Entry(entry) = self
+            .visible_file_items(self.file_focus)
+            .get(self.detail_cursor())?
+            .target
+            .clone()
+        else {
+            return None;
+        };
+        (entry.kind == wisp_core::model::EntryKind::File).then_some((project, entry))
+    }
+
+    fn best_nvim_target(&self, path: &Path) -> Option<(FileHostTarget, NvimView)> {
+        let project_id = self.selected_project_id()?;
+        let selected_key = comparison_key(&path.to_string_lossy());
+        let mut best = None;
+        for window in self.context.windows(project_id) {
+            for pane in &window.panes {
+                for view in &pane.nvim_views {
+                    if comparison_key(&view.path.to_string_lossy()) != selected_key {
+                        continue;
+                    }
+                    let rank = (window.active, pane.active, view.active);
+                    if best
+                        .as_ref()
+                        .is_some_and(|(best_rank, _, _)| rank <= *best_rank)
+                    {
+                        continue;
+                    }
+                    best = Some((
+                        rank,
+                        FileHostTarget {
+                            window_id: window.id.clone(),
+                            pane_id: pane.id.clone(),
+                        },
+                        view.clone(),
+                    ));
+                }
+            }
+        }
+        best.map(|(_, host_target, view)| (host_target, view))
     }
 
     fn visible_pane_items(&self) -> Vec<DetailItem> {
@@ -2454,7 +2589,22 @@ fn render_file_column(frame: &mut Frame, app: &App, depth: usize, area: Rect) {
     let rows = app
         .visible_file_items(depth)
         .into_iter()
-        .map(|item| ListItem::new(Line::from(vec![Span::raw("  "), Span::raw(item.label)])))
+        .map(|item| {
+            let live = match &item.target {
+                DetailTarget::Entry(entry) if entry.kind == wisp_core::model::EntryKind::File => {
+                    app.best_nvim_target(&entry.path).is_some()
+                }
+                _ => false,
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if live { "◆" } else { " " },
+                    Style::default().fg(if live { THEME.active } else { THEME.muted }),
+                ),
+                Span::raw(" "),
+                Span::raw(item.label),
+            ]))
+        })
         .collect::<Vec<_>>();
     if rows.is_empty() {
         frame.render_widget(
@@ -2713,10 +2863,12 @@ pub fn render(frame: &mut Frame, app: &App) {
             frame.render_widget(
                 Paragraph::new(
                     "↑/↓ j/k Move   h/l Tab Focus\n\
-                     Enter Select   w/f/s View\n\
-                     / Search   Backspace Parent\n\
-                     p Preview   Ctrl-R Refresh\n\
-                     x Close   q/Ctrl-C Cancel   ?/Esc Close Help",
+                     Enter Default/Select   Ctrl-T Window\n\
+                     Ctrl-V Right   Ctrl-X Bottom\n\
+                     w/f/s View   / Search\n\
+                     Backspace Parent   p File/Window Preview\n\
+                     Ctrl-R Refresh   x Close\n\
+                     q/Ctrl-C Cancel   ?/Esc Close Help",
                 )
                 .style(Style::default().fg(THEME.muted))
                 .block(Block::default().borders(Borders::ALL).title(" Commands ")),
@@ -2837,6 +2989,60 @@ fn issue_directory_request<D: DataSource>(
     }
 }
 
+const FILE_PREVIEW_DEBOUNCE: Duration = Duration::from_millis(40);
+const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Default)]
+struct FilePreviewPublication {
+    published: Option<FilePreviewState>,
+    pending: Option<(FilePreviewState, Instant)>,
+}
+
+impl FilePreviewPublication {
+    fn observe(&mut self, state: FilePreviewState, now: Instant) -> Option<FilePreviewState> {
+        if self.published.as_ref() == Some(&state) {
+            self.pending = None;
+            return None;
+        }
+        if matches!(state, FilePreviewState::File { .. }) {
+            if self
+                .pending
+                .as_ref()
+                .is_none_or(|(pending, _)| pending != &state)
+            {
+                self.pending = Some((state, now + FILE_PREVIEW_DEBOUNCE));
+            }
+            return None;
+        }
+        self.pending = None;
+        self.published = Some(state.clone());
+        Some(state)
+    }
+
+    fn take_due(&mut self, now: Instant) -> Option<FilePreviewState> {
+        if self
+            .pending
+            .as_ref()
+            .is_none_or(|(_, deadline)| *deadline > now)
+        {
+            return None;
+        }
+        let (state, _) = self.pending.take()?;
+        self.published = Some(state.clone());
+        Some(state)
+    }
+
+    fn input_timeout(&self, now: Instant) -> Duration {
+        self.pending
+            .as_ref()
+            .map_or(INPUT_POLL_INTERVAL, |(_, deadline)| {
+                deadline
+                    .saturating_duration_since(now)
+                    .min(INPUT_POLL_INTERVAL)
+            })
+    }
+}
+
 pub fn run_with_terminal<B, D, I>(
     terminal: &mut Terminal<B>,
     app: &mut App,
@@ -2849,6 +3055,7 @@ where
     I: Input,
 {
     let mut mouse_capture_enabled = false;
+    let mut file_preview_publication = FilePreviewPublication::default();
     let result = (|| -> Result<Option<Selection>, TuiError> {
         let mut requested_preview_target = None;
         let mut preview_request_id = 0_u64;
@@ -2860,6 +3067,16 @@ where
             }
         }
         loop {
+            let file_preview = app.file_preview_state();
+            let now = Instant::now();
+            let publication = file_preview_publication
+                .observe(file_preview, now)
+                .or_else(|| file_preview_publication.take_due(now));
+            if let Some(publication) = publication {
+                if let Err(error) = data.publish_file_preview(publication) {
+                    app.set_status(error);
+                }
+            }
             while let Some(update) = data.directory_update() {
                 app.apply_directory_update(update);
             }
@@ -2904,7 +3121,9 @@ where
                 }
             }
             terminal.draw(|frame| render(frame, app))?;
-            let Some(event) = input.read_event_timeout(Duration::from_millis(250))? else {
+            let Some(event) =
+                input.read_event_timeout(file_preview_publication.input_timeout(Instant::now()))?
+            else {
                 continue;
             };
             let command = match event {
@@ -2958,6 +3177,9 @@ where
     } else {
         Ok(())
     };
+    if file_preview_publication.published.as_ref() != Some(&FilePreviewState::Hidden) {
+        let _ = data.publish_file_preview(FilePreviewState::Hidden);
+    }
     match result {
         Err(error) => Err(error),
         Ok(selection) => {

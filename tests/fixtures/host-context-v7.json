@@ -1,5 +1,5 @@
 {
-  "protocol_version": 6,
+  "protocol_version": 7,
   "projects": {
     "api": {
       "labels": ["current", "open"],
@@ -14,7 +14,27 @@
               "id": "42",
               "label": "nvim",
               "detail": "src/main.rs",
-              "active": true
+              "active": true,
+              "nvim_views": [
+                {
+                  "window_id": "1001",
+                  "path": "/home/user/Repos/api/src/main.rs",
+                  "active": true,
+                  "width": 120,
+                  "height": 40,
+                  "bottomline": 30,
+                  "view": {
+                    "lnum": 12,
+                    "col": 0,
+                    "coladd": 0,
+                    "curswant": 0,
+                    "topline": 4,
+                    "topfill": 0,
+                    "leftcol": 0,
+                    "skipcol": 0
+                  }
+                }
+              ]
             }
           ]
         }
