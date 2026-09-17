@@ -150,7 +150,7 @@ normal tab formatting.
 - [x] Install Wisp `0.11.1`, confirm `wisp --version`, and deploy the corrected
   bundle without `--replace-incompatible`.
 - [x] Refresh the stable OpenCode loader after deploying `0.11.1`.
-- [ ] Restart OpenCode so the new bundled plugin publishes pane state.
+- [x] Restart OpenCode so the new bundled plugin publishes pane state.
 - [x] Dry-run and push only the managed WezTerm configuration through a reduced
   `~/Artifacts` manifest.
 - [x] Run `wisp deploy verify`, validate the live Wisp config, and confirm
