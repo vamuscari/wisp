@@ -1,6 +1,7 @@
 local tests = {
   "tests/wezterm_api_test.lua",
   "tests/wezterm_status_test.lua",
+  "tests/wezterm_tab_status_test.lua",
   "tests/options_test.lua",
   "tests/client_protocol_test.lua",
   "tests/wezterm_file_feature_test.lua",

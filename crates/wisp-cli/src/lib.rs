@@ -1988,7 +1988,7 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let target = read_target(&mut stream);
                 let body = if target.starts_with("/global/health") {
-                    r#"{"healthy":true,"version":"1.18.15"}"#
+                    r#"{"healthy":true,"version":"1.18.31"}"#
                 } else if target.starts_with("/session/status") {
                     "{}"
                 } else if target.starts_with("/session?") {

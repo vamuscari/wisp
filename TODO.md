@@ -18,6 +18,10 @@ normal tab formatting.
 #### Behavior
 
 - Add a strict `opencode_tab_colors` WezTerm option that defaults to `false`.
+- Require `status_bar = true` when tab colors are enabled. A changing zero-width
+  status format attribute must trigger tab-title recomputation without changing
+  visible right-status content, because WezTerm has no direct tab-bar
+  invalidation API.
 - When enabled, color every tracked OpenCode state using the existing semantic
   `status_colors` entries:
   - `waiting` uses `waiting_background`.
@@ -58,41 +62,43 @@ normal tab formatting.
 
 #### WezTerm Adapter
 
-- [ ] Add `opencode_tab_colors` to the strict option allowlist, validation,
+- [x] Add `opencode_tab_colors` to the strict option allowlist, validation,
   defaults, public option table, and option tests in `wezterm/options.lua`.
-- [ ] Add synchronous tab-state parsing and formatting to `wezterm/status.lua`.
-- [ ] Register `format-tab-title` from `wezterm/init.lua` only when the option is
+- [x] Add synchronous tab-state parsing and formatting to `wezterm/status.lua`.
+- [x] Register `format-tab-title` from `wezterm/init.lua` only when the option is
   enabled.
-- [ ] Keep the formatter entirely in memory: no child processes, filesystem
+- [x] Keep the formatter entirely in memory: no child processes, filesystem
   reads, server requests, or yielding calls are allowed in the synchronous
   event.
-- [ ] Compare pane IDs only through each `TabInformation.panes` snapshot and its
+- [x] Compare pane IDs only through each `TabInformation.panes` snapshot and its
   pane-local user variables; do not infer OpenCode state from pane titles,
   process names, or working directories.
-- [ ] Log malformed callback failures without replacing the default tab title.
-- [ ] Document that WezTerm executes only the first `format-tab-title` handler,
+- [x] Keep the invisible refresh marker independent per WezTerm window so
+  interleaved status callbacks continue invalidating every tab bar.
+- [x] Log malformed callback failures without replacing the default tab title.
+- [x] Document that WezTerm executes only the first `format-tab-title` handler,
   so enabling this option gives Wisp ownership of that handler.
 
 #### OpenCode Plugin
 
-- [ ] Add one status-derivation function so registry registration and pane-user
+- [x] Add one status-derivation function so registry registration and pane-user
   variable publication use the same event-backed state.
-- [ ] Publish the initial idle state after the supported OpenCode version check.
-- [ ] Publish updates after activity, permission, question, error, session, and
+- [x] Publish the initial idle state after the supported OpenCode version check.
+- [x] Publish updates after activity, permission, question, error, session, and
   heartbeat reconciliation changes.
-- [ ] Clear the user variable before unregistering during disposal.
-- [ ] Keep publishing failures isolated from registration so terminal signaling
+- [x] Clear the user variable before unregistering during disposal.
+- [x] Keep publishing failures isolated from registration so terminal signaling
   cannot break OpenCode status tracking.
-- [ ] Do not emit WezTerm control sequences when the process has no valid
+- [x] Do not emit WezTerm control sequences when the process has no valid
   `WEZTERM_PANE` environment value.
 
 #### Tests
 
-- [ ] Extend `tests/opencode_plugin_test.mjs` to capture and decode OSC user-var
+- [x] Extend `tests/opencode_plugin_test.mjs` to capture and decode OSC user-var
   writes for idle, running, waiting, failure, heartbeat renewal, and disposal.
-- [ ] Extend `tests/opencode_plugin_process_test.mjs` to verify a real bundled
+- [x] Extend `tests/opencode_plugin_process_test.mjs` to verify a real bundled
   plugin process publishes for pane `42` and clears its value on disposal.
-- [ ] Add `tests/wezterm_tab_status_test.lua` covering:
+- [x] Add `tests/wezterm_tab_status_test.lua` covering:
   - Default-disabled and explicit opt-in behavior.
   - Strict boolean option validation.
   - Status in an inactive pane coloring its containing tab.
@@ -103,45 +109,51 @@ normal tab formatting.
   - Explicit-title and active-pane-title fallback behavior.
   - Width truncation, custom semantic colors, and active-tab emphasis.
   - Returning default formatting for tabs without OpenCode.
-- [ ] Add the new Lua test file to the manually maintained `tests/run.lua` list.
-- [ ] Extend `tests/options_test.lua`, `tests/wezterm_config.lua`, and test helpers
+  - Independent freshness redraw markers across multiple WezTerm windows.
+- [x] Add the new Lua test file to the manually maintained `tests/run.lua` list.
+- [x] Extend `tests/options_test.lua`, `tests/wezterm_config.lua`, and test helpers
   for the option and synchronous formatter APIs.
-- [ ] Update `~/Artifacts/wezterm/wezterm_test.lua` to assert that the managed
+- [x] Update `~/Artifacts/wezterm/wezterm_test.lua` to assert that the managed
   consumer enables the option and owns one `format-tab-title` handler.
 
 #### Documentation And Versioning
 
-- [ ] Document `opencode_tab_colors`, its default, state priority, semantic
+- [x] Document `opencode_tab_colors`, its default, state priority, semantic
   colors, freshness behavior, and event ownership in `README.md`.
-- [ ] Enable `opencode_tab_colors = true` in
+- [x] Enable `opencode_tab_colors = true` in
   `~/Artifacts/wezterm/wezterm.lua` after adapter tests pass.
-- [ ] Bump the workspace package from `0.10.0` to `0.11.0` because this is a new
+- [x] Bump the workspace package from `0.10.4` to `0.11.0` because this is a new
   public option and substantial bundled capability.
-- [ ] Synchronize `Cargo.toml`, Wisp workspace entries in `Cargo.lock`, and exact
-  package-version assertions.
-- [ ] Keep protocol, config, cache, registry, and deployment schemas at version
+- [x] Bump the workspace package to `0.11.1` before correcting the already
+  deployed `0.11.0` bundle.
+- [x] Synchronize `Cargo.toml`, Wisp workspace entries in `Cargo.lock`, and exact
+  package-version assertions at `0.11.1`.
+- [x] Keep protocol, config, cache, registry, and deployment schemas at version
   7. The plugin and adapter ship in the same content-addressed bundle, so this
   internal user-variable contract does not require a protocol change.
-- [ ] Do not modify native WezTerm source; documented pane user variables and
+- [x] Do not modify native WezTerm source; documented pane user variables and
   `format-tab-title` already provide the required host APIs.
 
 #### Verification And Deployment
 
-- [ ] Run `cargo fmt --all -- --check`.
-- [ ] Run `cargo clippy --workspace --all-targets --locked -- -D warnings`.
-- [ ] Run `cargo test --workspace --locked`.
-- [ ] Run `rustup run 1.85.0 cargo check --workspace --locked`.
-- [ ] Run `node --check opencode/wisp.js`.
-- [ ] Run the OpenCode plugin Node test suites.
-- [ ] Run `lua tests/run.lua` and `stylua --check .`.
-- [ ] Run the focused managed WezTerm configuration test in `~/Artifacts`.
-- [ ] Install Wisp `0.11.0`, confirm `wisp --version`, and deploy the new bundle
+- [x] Run `cargo fmt --all -- --check`.
+- [x] Run `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+- [x] Run `cargo test --workspace --locked`.
+- [x] Run `rustup run 1.85.0 cargo check --workspace --locked`.
+- [x] Run `node --check opencode/wisp.js`.
+- [x] Run the OpenCode plugin Node test suites.
+- [x] Run `lua tests/run.lua` and `stylua --check .`.
+- [x] Run the focused managed WezTerm configuration test in `~/Artifacts`.
+- [x] Install Wisp `0.11.0`, confirm `wisp --version`, and deploy the new bundle
   without `--replace-incompatible` because deployment schema v7 is unchanged.
-- [ ] Refresh the stable OpenCode loader with `wisp opencode install` and restart
-  OpenCode so the new bundled plugin publishes pane state.
-- [ ] Dry-run and push only the managed WezTerm configuration through a reduced
+- [x] Refresh the stable OpenCode loader with `wisp opencode install`.
+- [ ] Install Wisp `0.11.1`, confirm `wisp --version`, and deploy the corrected
+  bundle without `--replace-incompatible`.
+- [ ] Refresh the stable OpenCode loader after deploying `0.11.1`.
+- [ ] Restart OpenCode so the new bundled plugin publishes pane state.
+- [x] Dry-run and push only the managed WezTerm configuration through a reduced
   `~/Artifacts` manifest.
-- [ ] Run `wisp deploy verify`, validate the live Wisp config, and confirm
+- [x] Run `wisp deploy verify`, validate the live Wisp config, and confirm
   `wisp projects --json` still returns protocol v7.
 - [ ] Manually verify split-pane tab coloring, priority changes, pane moves,
   normal OpenCode exit, and unaffected tabs without automating the host GUI.
@@ -502,9 +514,6 @@ The decoded pane value should have this conceptual shape:
   defaults in both adapters.
 - [x] Extend deployment tests to hash, install, verify, and load the canonical
   preview module from the active bundle.
-- [ ] Keep the real CI smoke tests passing on minimum WezTerm and Neovim 0.10.4
-  so no newer host API becomes an accidental requirement.
-
 #### Verification And Deployment
 
 - [x] Run `cargo fmt --all -- --check`.
@@ -514,19 +523,21 @@ The decoded pane value should have this conceptual shape:
 - [x] Run `node --check opencode/wisp.js` and both OpenCode plugin test suites
   because the protocol-coupled registry version changes.
 - [x] Run `lua tests/run.lua` and `stylua --check .`.
-- [ ] Parse the minimum WezTerm test configuration and load the deployed adapter
-  in Neovim 0.10.4 through the existing CI smoke tests.
-- [ ] Update `~/Artifacts/wisp/config.toml` to config version 7, then use the
+- [x] Parse the minimum WezTerm test configuration and load the deployed adapter
+  in Neovim 0.10.4 locally with the existing CI smoke commands.
+- [ ] Run the minimum WezTerm and Neovim smoke jobs in CI after the `0.11.1`
+  changes are committed and pushed.
+- [x] Update `~/Artifacts/wisp/config.toml` to config version 7, then use the
   reduced `~/Artifacts` manifest to dry-run and push only the managed Wisp TOML
   to `$HOME/.config/wisp/config.toml`.
-- [ ] Install the selected package version, confirm `wisp --version`, and run
+- [x] Install the selected package version, confirm `wisp --version`, and run
   `wisp deploy --replace-incompatible` because deployment schema 7 intentionally
   replaces schema 6.
-- [ ] Run `wisp deploy verify`.
-- [ ] Run both consumer checks with
+- [x] Run `wisp deploy verify`.
+- [x] Run both consumer checks with
   `WISP_CONFIG_FILE="$HOME/.config/wisp/config.toml"`: `wisp config validate`
   and `wisp projects --json`.
-- [ ] Refresh the OpenCode loader if the protocol-coupled registry or bundled
+- [x] Refresh the OpenCode loader if the protocol-coupled registry or bundled
   plugin changed, then restart WezTerm, Neovim, and OpenCode as required.
 - [ ] Manually verify live syntax preview and viewport restoration from multiple
   Neovim splits, exact Enter reuse across workspace/Window/Pane, forced
@@ -564,7 +575,7 @@ The decoded pane value should have this conceptual shape:
 
 ### Open Unopened Projects Directly
 
-- [ ] Open an unopened project with no host windows instead of focusing an
+- [x] Open an unopened project with no host windows instead of focusing an
   empty Windows pane.
 
 #### Problem
@@ -599,79 +610,77 @@ selection, but it is missing from the on-screen Commands pane.
 
 #### TUI Implementation
 
-- [ ] Update `App::drill_project` in `crates/wisp-tui/src/lib.rs` to return the
+- [x] Update `App::drill_project` in `crates/wisp-tui/src/lib.rs` to return the
   existing `Selection::Project` before changing focus when all direct-open
   conditions are true: Windows mode, configured project target, not host-open,
   and an empty raw `HostContext::windows` list.
-- [ ] Check the raw host window list rather than filtered visible rows so an
+- [x] Check the raw host window list rather than filtered visible rows so an
   active detail query cannot turn `No matching windows` into a project-open
   action.
-- [ ] Reuse `App::select_project`; do not add a command, selection variant,
+- [x] Reuse `App::select_project`; do not add a command, selection variant,
   protocol field, or adapter-specific branch to the host-neutral TUI.
-- [ ] Keep the existing normal-mode `o` handler and add a concise `o Jump
+- [x] Keep the existing normal-mode `o` handler and add a concise `o Jump
   Project` hint to the Commands pane without increasing its required height.
 
 #### WezTerm Adapter
 
-- [ ] Keep `Picker:apply_result` routing `Selection::Project` through
+- [x] Keep `Picker:apply_result` routing `Selection::Project` through
   `Workspace:switch_to_project`.
-- [ ] Keep `Workspace:switch_to_project` based on `SwitchToWorkspace` and
+- [x] Keep `Workspace:switch_to_project` based on `SwitchToWorkspace` and
   `spawn_command(project)`. Do not pre-create a tab, run `wisp open`, or execute
   opener argv for direct project activation.
-- [ ] Preserve `cwd`, `domain`, `WISP_PROJECT_DIR`, and `WISP_PROJECT_NAME` in
+- [x] Preserve `cwd`, `domain`, `WISP_PROJECT_DIR`, and `WISP_PROJECT_NAME` in
   the default-shell spawn.
-- [ ] Do not add a default global WezTerm mapping. Host bindings remain
+- [x] Do not add a default global WezTerm mapping. Host bindings remain
   consumer-owned; `o` is an in-picker command.
-- [ ] Do not modify native WezTerm source. Its documented `SwitchToWorkspace`
+- [x] Do not modify native WezTerm source. Its documented `SwitchToWorkspace`
   behavior already creates a window when the target workspace has none.
 
 #### Tests
 
-- [ ] Add a focused `crates/wisp-tui/tests/two_pane_test.rs` case proving that
+- [x] Add a focused `crates/wisp-tui/tests/two_pane_test.rs` case proving that
   `Enter` on a configured, not-host-open project with zero raw windows finishes
   with that project's `Selection::Project`.
-- [ ] Cover the same direct-open result after project search and verify that
+- [x] Cover the same direct-open result after project search and verify that
   `o` remains search text while search mode is active.
-- [ ] Preserve or add coverage proving that `Enter` still drills when a raw host
+- [x] Preserve or add coverage proving that `Enter` still drills when a raw host
   window exists and that exact pane selection is unchanged.
-- [ ] Preserve Files and Sessions mode Enter coverage.
-- [ ] Extend the Commands renderer test to require the `o` project-jump hint.
-- [ ] Extend `tests/process_adapter_test.lua` or
+- [x] Preserve Files and Sessions mode Enter coverage.
+- [x] Extend the Commands renderer test to require the `o` project-jump hint.
+- [x] Extend `tests/process_adapter_test.lua` or
   `tests/workspace_action_test.lua` to assert that a direct project action has
   the expected workspace, cwd, domain, and Wisp environment, with no `args` so
   WezTerm launches its default program.
 
 #### Documentation And Versioning
 
-- [ ] Update the `README.md` picker key table so `Enter` documents the
+- [x] Update the `README.md` picker key table so `Enter` documents the
   unopened-project exception and `o` explicitly says it jumps directly without
   selecting a Window or Pane.
-- [ ] Document that a direct project selection switches to an existing project
+- [x] Document that a direct project selection switches to an existing project
   workspace or creates one default-shell Window at the project directory.
-- [ ] Keep protocol, config, cache, registry, and deployment schemas at version
+- [x] Keep protocol, config, cache, registry, and deployment schemas at version
   7; this reuses the existing project selection and adapter contract.
-- [ ] Ship the runtime change under the next undeployed package version. If it
-  lands before the OpenCode tab-color feature, bump `0.10.0` to `0.10.1` and
-  update that feature's version baseline; if they ship together, `0.11.0`
-  covers both changes.
-- [ ] Synchronize `Cargo.toml`, the three Wisp workspace entries in
+- [x] Ship the runtime change under package version `0.10.4`, which was the next
+  undeployed version after the prerequisite picker lifecycle fixes.
+- [x] Synchronize `Cargo.toml`, the three Wisp workspace entries in
   `Cargo.lock`, and the exact package-version assertion in
   `crates/wisp-cli/tests/cli_test.rs` for the selected release version.
 
 #### Verification
 
-- [ ] Run `cargo fmt --all -- --check`.
-- [ ] Run `cargo clippy --workspace --all-targets --locked -- -D warnings`.
-- [ ] Run `cargo test --workspace --locked`.
-- [ ] Run `cargo +1.85.0 check --workspace --locked`.
-- [ ] Run `lua tests/run.lua` and `stylua --check .`.
-- [ ] Manually open the project picker in WezTerm, highlight a `○` project, and
+- [x] Run `cargo fmt --all -- --check`.
+- [x] Run `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+- [x] Run `cargo test --workspace --locked`.
+- [x] Run `cargo +1.85.0 check --workspace --locked`.
+- [x] Run `lua tests/run.lua` and `stylua --check .`.
+- [x] Manually open the project picker in WezTerm, highlight a `○` project, and
   verify that `Enter` closes the picker and creates one default-shell project
   Window at the configured directory.
 - [ ] Manually verify that `o` jumps to both new and existing projects without
   selecting a Window or Pane, while `Enter` still drills into an open project's
   existing windows.
-- [ ] Before a live deployment, install the selected package version, confirm
+- [x] Before a live deployment, install the selected package version, confirm
   `wisp --version`, run `wisp deploy`, then run `wisp deploy verify`, live config
   validation, and `wisp projects --json` against the consumer config.
 

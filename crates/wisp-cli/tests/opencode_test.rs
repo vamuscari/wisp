@@ -124,7 +124,7 @@ fn config(server: &FakeServer) -> OpenCodeConfig {
 
 fn routes(sessions: &'static str) -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
-        ("/global/health", r#"{"healthy":true,"version":"1.18.15"}"#),
+        ("/global/health", r#"{"healthy":true,"version":"1.18.31"}"#),
         ("/session/status", r#"{}"#),
         ("/session", sessions),
         ("/permission", r#"[]"#),
@@ -144,7 +144,7 @@ fn now_millis() -> u64 {
 #[test]
 fn snapshot_combines_activity_permissions_questions_agent_and_hierarchy() {
     let server = FakeServer::new(BTreeMap::from([
-        ("/global/health", r#"{"healthy":true,"version":"1.18.15"}"#),
+        ("/global/health", r#"{"healthy":true,"version":"1.18.31"}"#),
         (
             "/session/status",
             r#"{
@@ -157,12 +157,12 @@ fn snapshot_combines_activity_permissions_questions_agent_and_hierarchy() {
             r#"[
                 {
                     "id":"ses_root","projectID":"project","directory":"/repos/wisp",
-                    "title":"Root task","agent":"build","version":"1.18.15",
+                    "title":"Root task","agent":"build","version":"1.18.31",
                     "time":{"created":1,"updated":20}
                 },
                 {
                     "id":"ses_child","projectID":"project","directory":"/repos/wisp",
-                    "parentID":"ses_root","title":"Research","agent":"explore","version":"1.18.15",
+                    "parentID":"ses_root","title":"Research","agent":"explore","version":"1.18.31",
                     "time":{"created":2,"updated":21}
                 }
             ]"#,
@@ -223,7 +223,7 @@ fn snapshot_combines_activity_permissions_questions_agent_and_hierarchy() {
 fn server_version_is_checked_before_session_schema() {
     let server = FakeServer::new(BTreeMap::from([(
         "/global/health",
-        r#"{"healthy":true,"version":"1.18.14"}"#,
+        r#"{"healthy":true,"version":"1.18.30"}"#,
     )]));
     let registry = TempDir::new().unwrap();
     let client = OpenCodeClient::with_registry_dir(config(&server), registry.path().to_path_buf());
@@ -232,7 +232,7 @@ fn server_version_is_checked_before_session_schema() {
 
     assert!(matches!(
         error,
-        OpenCodeError::UnsupportedVersion { ref found } if found == "1.18.14"
+        OpenCodeError::UnsupportedVersion { ref found } if found == "1.18.30"
     ));
     assert_eq!(server.requests(), vec!["/global/health"]);
 }
@@ -241,7 +241,7 @@ fn server_version_is_checked_before_session_schema() {
 fn server_version_is_checked_before_the_strict_health_schema() {
     let server = FakeServer::new(BTreeMap::from([(
         "/global/health",
-        r#"{"healthy":false,"version":"1.18.16","future_health_field":true}"#,
+        r#"{"healthy":false,"version":"1.18.32","future_health_field":true}"#,
     )]));
     let registry = TempDir::new().unwrap();
     let client = OpenCodeClient::with_registry_dir(config(&server), registry.path().to_path_buf());
@@ -250,7 +250,7 @@ fn server_version_is_checked_before_the_strict_health_schema() {
 
     assert!(matches!(
         error,
-        OpenCodeError::UnsupportedVersion { ref found } if found == "1.18.16"
+        OpenCodeError::UnsupportedVersion { ref found } if found == "1.18.32"
     ));
     assert_eq!(server.requests(), vec!["/global/health"]);
 }
@@ -261,7 +261,7 @@ fn registry_adds_unmanaged_servers_and_exact_pane_mappings() {
     let unmanaged = FakeServer::new(routes(
         r#"[{
             "id":"ses_unmanaged","projectID":"project","directory":"/repos/wisp",
-            "title":"Unmanaged task","agent":"plan","version":"1.18.15",
+            "title":"Unmanaged task","agent":"plan","version":"1.18.31",
             "time":{"created":1,"updated":5}
         }]"#,
     ));
@@ -302,7 +302,7 @@ fn registered_session_errors_are_reflected_in_picker_snapshots() {
     let unmanaged = FakeServer::new(routes(
         r#"[{
             "id":"ses_error","projectID":"project","directory":"/repos/wisp",
-            "title":"Failed task","agent":"build","version":"1.18.15",
+            "title":"Failed task","agent":"build","version":"1.18.31",
             "time":{"created":1,"updated":5}
         }]"#,
     ));
@@ -340,7 +340,7 @@ fn registry_project_matching_uses_windows_path_identity_rules() {
     let unmanaged = FakeServer::new(routes(
         r#"[{
             "id":"ses_windows","projectID":"project","directory":"c:\\repos\\wisp",
-            "title":"Windows task","agent":"build","version":"1.18.15",
+            "title":"Windows task","agent":"build","version":"1.18.31",
             "time":{"created":1,"updated":5}
         }]"#,
     ));
@@ -407,7 +407,7 @@ fn stale_registry_entries_are_discarded_before_session_aggregation() {
     let stale = FakeServer::new(routes(
         r#"[{
             "id":"ses_stale","projectID":"project","directory":"/repos/wisp",
-            "title":"Stale task","agent":"build","version":"1.18.15",
+            "title":"Stale task","agent":"build","version":"1.18.31",
             "time":{"created":1,"updated":5}
         }]"#,
     ));
@@ -542,7 +542,7 @@ fn registry_entries_from_the_future_are_discarded() {
 fn duplicate_live_session_ids_from_different_servers_are_marked_as_conflicts() {
     let duplicate = r#"[{
         "id":"ses_duplicate","projectID":"project","directory":"/repos/wisp",
-        "title":"Duplicate task","agent":"build","version":"1.18.15",
+        "title":"Duplicate task","agent":"build","version":"1.18.31",
         "time":{"created":1,"updated":5}
     }]"#;
     let shared = FakeServer::new(routes(duplicate));
@@ -842,7 +842,7 @@ fn live_status_counts_a_launch_before_opencode_exposes_its_session() {
 #[test]
 fn shared_server_watcher_reports_relevant_sse_events() {
     let server = FakeServer::new(BTreeMap::from([
-        ("/global/health", r#"{"healthy":true,"version":"1.18.15"}"#),
+        ("/global/health", r#"{"healthy":true,"version":"1.18.31"}"#),
         (
             "/global/event",
             "data: {\"directory\":\"/repos/wisp\",\"payload\":{\"type\":\"session.status\",\"properties\":{\"sessionID\":\"ses_123\",\"status\":{\"type\":\"busy\"}}}}\n\n",
@@ -867,7 +867,7 @@ fn shared_server_error_events_are_reflected_in_the_next_snapshot() {
     let mut server_routes = routes(
         r#"[{
             "id":"ses_error","projectID":"project","directory":"/repos/wisp",
-            "title":"Failed task","agent":"build","version":"1.18.15",
+            "title":"Failed task","agent":"build","version":"1.18.31",
             "time":{"created":1,"updated":5}
         }]"#,
     );
@@ -896,7 +896,7 @@ fn a_later_running_event_clears_a_retained_session_error() {
     let mut server_routes = routes(
         r#"[{
             "id":"ses_recovered","projectID":"project","directory":"/repos/wisp",
-            "title":"Recovered task","agent":"build","version":"1.18.15",
+            "title":"Recovered task","agent":"build","version":"1.18.31",
             "time":{"created":1,"updated":5}
         }]"#,
     );
@@ -926,7 +926,7 @@ fn shared_server_watcher_keeps_idle_streams_open_until_an_event_arrives() {
     let server = thread::spawn(move || {
         let (mut health, _) = listener.accept().unwrap();
         read_request(&mut health);
-        let body = r#"{"healthy":true,"version":"1.18.15"}"#;
+        let body = r#"{"healthy":true,"version":"1.18.31"}"#;
         write!(
             health,
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

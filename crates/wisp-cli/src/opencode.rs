@@ -28,7 +28,7 @@ use wisp_core::{
     protocol::PROTOCOL_VERSION,
 };
 
-pub const SUPPORTED_OPENCODE_VERSION: &str = "1.18.15";
+pub const SUPPORTED_OPENCODE_VERSION: &str = "1.18.31";
 const REGISTRY_VERSION: u32 = PROTOCOL_VERSION;
 const REGISTRY_STALE_AFTER_MILLIS: u64 = 90_000;
 
@@ -1053,7 +1053,7 @@ mod tests {
                         .and_then(|line| line.split_whitespace().nth(1))
                         .unwrap();
                     let body = if target.starts_with("/global/health") {
-                        r#"{"healthy":true,"version":"1.18.15"}"#
+                        r#"{"healthy":true,"version":"1.18.31"}"#
                     } else if target.starts_with("/session/status") {
                         "{}"
                     } else {

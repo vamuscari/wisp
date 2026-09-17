@@ -56,6 +56,7 @@ local function fixture(surface, timeout, overrides)
   }
   local next_pane_id = 80
   local picker_args = {}
+  local picker_activations = 0
   local function new_picker_pane(args)
     next_pane_id = next_pane_id + 1
     local pane_id = next_pane_id
@@ -65,6 +66,9 @@ local function fixture(surface, timeout, overrides)
       end,
       get_foreground_process_info = function()
         return { executable = "/opt/bin/wisp" }
+      end,
+      activate = function()
+        picker_activations = picker_activations + 1
       end,
     }
     function picker_pane:split(spec)
@@ -173,6 +177,9 @@ local function fixture(surface, timeout, overrides)
     killed = killed,
     launch = launch,
     panes = panes,
+    picker_activations = function()
+      return picker_activations
+    end,
     picker_args = picker_args,
     poll = poll,
     preview_specs = preview_specs,
@@ -220,6 +227,17 @@ helper.test("file preview launch passes target and sidecar flags and spawns exac
   test.write(state_path, "HIDDEN3")
   test.poll()
   helper.assert_equal(#test.killed, 1, "hidden preview close count")
+end)
+
+helper.test("file preview returns focus to the picker", function()
+  local test = fixture()
+  local args = test.launch()
+  local state_path = assert(argument_after(args, "--file-preview-state-file"))
+
+  test.write(state_path, "EMPTY1")
+  test.poll()
+
+  helper.assert_equal(test.picker_activations(), 1, "picker pane activation")
 end)
 
 helper.test("unexpected preview exit blocks respawn until hidden then visible", function()

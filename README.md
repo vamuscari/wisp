@@ -15,7 +15,7 @@ its own picker UI.
 - The `wisp` executable on `PATH`
 - WezTerm `20240127-113634-bbcac864` or newer for the WezTerm adapter
 - Neovim `0.10.4` or newer for the Neovim adapter
-- OpenCode `1.18.15` for optional session tracking
+- OpenCode `1.18.31` for optional session tracking
 
 Clickable right-status providers additionally require a WezTerm build where
 `wezterm.format` accepts `Hyperlink` and `EndHyperlink` items and linked status
@@ -225,11 +225,11 @@ wisp open "$(cat /tmp/wisp-selection.json)"
 | --- | --- |
 | `Up` / `Down`, `j` / `k` | Move in the focused pane |
 | `Left` / `Right`, `h` / `l`, `Tab` | Move through the Project, Window, Pane, or directory hierarchy |
-| `Enter` | Descend into a project, window, or directory; select a pane or session; reuse a visible matching file or use the configured default target |
+| `Enter` | Open an unopened project with no host windows; otherwise descend into a project, window, or directory, or select the focused item |
 | `Ctrl-T` | Open the selected file in a new Window, even when it is already visible |
 | `Ctrl-V` | Open the selected file in a new right Pane, even when it is already visible |
 | `Ctrl-X` | Open the selected file in a new bottom Pane, even when it is already visible |
-| `o` | Directly activate the selected project or host workspace |
+| `o` | Jump directly to the selected project or host workspace without selecting a window or pane |
 | `w` | Show Windows and focus the detail pane |
 | `f` | Show Files and focus the detail pane |
 | `s` | Show OpenCode Sessions and focus the detail pane |
@@ -242,10 +242,16 @@ wisp open "$(cat /tmp/wisp-selection.json)"
 | `Esc` | Close Commands when visible; otherwise cancel |
 | `q`, `Ctrl-C` | Cancel |
 
-In search mode, printable characters, including `p` and `?`, update the focused pane's query,
-`Backspace` edits it, `Esc` returns to normal mode while retaining the query,
-and `Enter` selects the current match. Project and detail queries are
-independent.
+In search mode, printable characters, including `p`, `?`, and `o`, update the
+focused pane's query, `Backspace` edits it, `Esc` returns to normal mode while
+retaining the query, and `Enter` selects the current match. Project and detail
+queries are independent.
+
+In Windows mode, `Enter` on a configured project that is not host-open and has
+no host windows switches directly to its workspace. WezTerm creates one
+default-shell window at the project directory when that workspace does not yet
+exist. `o` always bypasses window and pane selection for direct project or host
+workspace activation.
 
 Projects and live host-only workspaces are grouped by status: `◆` current, `●`
 open, then `○` new. Editor context can make a discovered project current for
@@ -315,6 +321,7 @@ local wisp = dofile(wezterm.config_dir .. "/wisp/init.lua")
 
 wisp.apply_to_config(config, {
   spawn_domain = { DomainName = "local" },
+  opencode_tab_colors = true,
   status_items = {
     { name = "opencode", action = "sessions" },
     { name = "directory", action = "projects" },
@@ -356,6 +363,25 @@ every two seconds and retain their last valid values across transient failures.
 the default providers opens Sessions or Projects in Wisp's popup. Set
 `status_bar = false` to leave the right status area untouched.
 
+Set `opencode_tab_colors = true` to color each tab containing a fresh OpenCode
+pane. Wisp inspects every pane snapshot in that tab and uses the most urgent
+state in `waiting > failure > running > idle` order. Those states use
+`waiting_background`, `failure_background`, `running_background`, and
+`idle_background` from `status_colors`; colors are steady even when the matching
+right-status counts flash. Active colored tabs use bold titles. Explicit tab
+titles are preserved, with the active pane title as fallback, and unaffected
+tabs retain WezTerm's configured active, inactive, and hover formatting.
+
+The bundled OpenCode plugin publishes pane-local state on events and renews it
+every 30 seconds. Wisp ignores malformed values, future timestamps, and state
+older than 90 seconds, while normal plugin shutdown clears the state
+immediately. The option defaults to `false`. WezTerm executes only its first
+`format-tab-title` handler, so enabling this option gives Wisp ownership of that
+event and any other tab-title customization must be incorporated into Wisp.
+The option requires `status_bar = true`: Wisp varies a zero-width status format
+attribute on each update so WezTerm recomputes tab freshness without changing
+the visible right status.
+
 The picker actions query `wisp projects --json`, snapshot every live workspace,
 tab, and pane, map configured project workspaces to `current`, `open`, and `new`
 labels, and include unmatched workspaces as host-only rows. The standard
@@ -382,8 +408,10 @@ picker exits.
 File Preview is disabled unless `file_preview` is configured. It starts visible
 when Files mode is entered, follows the highlighted file in one owned Neovim
 split, and closes when Files mode is left or `p` toggles it off. The command is
-an argv array launched directly without a shell; add user-owned startup flags
-such as `--clean` when desired. Preview reads at most 1 MiB or 10,000 lines,
+an argv array launched directly without a shell; use an absolute executable
+path when the mux server's `PATH` does not include Neovim, and add user-owned
+startup flags such as `--clean` when desired. Preview reads at most 1 MiB or
+10,000 lines,
 rejects binary NUL content, and uses an isolated read-only scratch buffer with
 normal filetype detection and the active color scheme. When a matching live
 editor view exists, the preview restores its captured cursor and viewport and
@@ -414,6 +442,7 @@ project.
 | `status_items` | `opencode`, `directory` | Ordered bundled status providers and optional picker actions |
 | `status_interval_seconds` | `2` | Minimum interval between OpenCode status queries |
 | `status_colors` | built-in OldBook palette | Partial semantic status color table |
+| `opencode_tab_colors` | `false` | Color tab backgrounds from fresh pane-local OpenCode state |
 | `popup` | `{ direction = "Bottom", size = 0.65 }` | Top-level popup split placement and size |
 | `window_preview` | `false` | Start with window Preview visible instead of on demand |
 | `file_open` | `{ default = "window" }` | Default file target: `window`, `right_pane`, or `bottom_pane` |
@@ -523,7 +552,7 @@ private to its process. Conflicting live registrations count as errors. The
 command does not require an `[opencode]` shared-server configuration.
 
 Selecting a session first tries its recorded WezTerm tab or pane. OpenCode
-1.18.15 does not expose later in-TUI session switches to v1 plugins, so this
+1.18.31 does not expose later in-TUI session switches to v1 plugins, so this
 focus mapping is best effort and can become stale after switching sessions
 inside OpenCode. If the recorded target is missing, Wisp opens a new project tab
 and runs the resolved `opencode attach ... --session ...` argv through

@@ -1,8 +1,10 @@
 import { spawnSync } from "node:child_process"
+import { Buffer } from "node:buffer"
 import { fileURLToPath } from "node:url"
 
 const executable = fileURLToPath(new URL(process.platform === "win32" ? "../bin/wisp.exe" : "../bin/wisp", import.meta.url))
-const SUPPORTED_OPENCODE_VERSION = "1.18.15"
+const SUPPORTED_OPENCODE_VERSION = "1.18.31"
+const STATUS_USER_VAR = "WISP_OPENCODE_STATUS"
 
 async function supportedServer(client) {
   try {
@@ -56,6 +58,7 @@ export default async function WispPlugin({ client, serverUrl, directory, worktre
   const sessionParents = new Map()
   let revision = 0
   let refreshGeneration = 0
+  let disposed = false
   const projectPath = worktree === "/" ? directory : worktree
 
   function run(args) {
@@ -66,7 +69,42 @@ export default async function WispPlugin({ client, serverUrl, directory, worktre
     })
   }
 
+  function currentState() {
+    let semantic = "idle"
+    if (permissions.size > 0 || questions.size > 0) semantic = "waiting"
+    else if (sessionStatus?.type === "retry" || sessionError) semantic = "failure"
+    else if (sessionStatus?.type === "busy") semantic = "running"
+    return {
+      semantic,
+      status: sessionStatus ?? { type: "idle" },
+      error: sessionError,
+      waitingPermissions: permissions.size,
+      waitingQuestions: questions.size,
+    }
+  }
+
+  function validPane() {
+    const pane = process.env.WEZTERM_PANE
+    return typeof pane === "string"
+      && /^(0|[1-9]\d*)$/.test(pane)
+      && Number.isSafeInteger(Number(pane))
+      ? pane
+      : undefined
+  }
+
+  function setStatusUserVar(value) {
+    if (!validPane()) return
+    process.stdout.write(`\x1b]1337;SetUserVar=${STATUS_USER_VAR}=${value}\x1b\\`)
+  }
+
+  function publishStatus(state) {
+    const payload = `${state}:${Math.floor(Date.now() / 1000)}`
+    setStatusUserVar(Buffer.from(payload, "utf8").toString("base64"))
+  }
+
   function register() {
+    if (disposed) return
+    const state = currentState()
     const args = [
       "opencode", "register",
       "--server-url", serverUrl.toString().replace(/\/$/, ""),
@@ -77,10 +115,15 @@ export default async function WispPlugin({ client, serverUrl, directory, worktre
     if (process.env.WEZTERM_PANE) args.push("--pane-id", process.env.WEZTERM_PANE)
     if (sessionID) {
       args.push("--session-id", sessionID)
-      args.push("--session-status", JSON.stringify(sessionStatus ?? { type: "idle" }))
-      args.push("--waiting-permissions", String(permissions.size))
-      args.push("--waiting-questions", String(questions.size))
-      if (sessionError) args.push("--session-error", sessionError)
+      args.push("--session-status", JSON.stringify(state.status))
+      args.push("--waiting-permissions", String(state.waitingPermissions))
+      args.push("--waiting-questions", String(state.waitingQuestions))
+      if (state.error) args.push("--session-error", state.error)
+    }
+    try {
+      publishStatus(state.semantic)
+    } catch {
+      // Registry state remains available when the terminal output stream fails.
     }
     run(args)
   }
@@ -310,7 +353,14 @@ export default async function WispPlugin({ client, serverUrl, directory, worktre
       }
     },
     dispose: async () => {
+      disposed = true
+      refreshGeneration += 1
       clearInterval(heartbeat)
+      try {
+        setStatusUserVar("")
+      } catch {
+        // Unregister even when the terminal output stream fails.
+      }
       unregister()
     },
   }

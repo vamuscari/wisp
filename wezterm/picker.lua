@@ -220,7 +220,7 @@ function Picker:close(window, tab, pane)
   if not closed then
     if identified then
       local inspected, live_tab = pcall(self.wezterm.mux.get_tab, tab_id)
-      if inspected and not live_tab then
+      if not inspected or not live_tab then
         return true
       end
     end
@@ -439,6 +439,12 @@ function Picker:poll_result(window, original_pane, owner, result_path, host_cont
     end
     preview.pane = preview_pane
     preview.pane_id = pane_id
+    local focused, focus_error = pcall(function()
+      owner.pane:activate()
+    end)
+    if not focused then
+      return nil, "wisp could not restore picker focus: " .. tostring(focus_error)
+    end
     return true
   end
 

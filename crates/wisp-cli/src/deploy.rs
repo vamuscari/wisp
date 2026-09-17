@@ -583,7 +583,9 @@ local function read_json(path)
   return wezterm.json_parse(encoded)
 end
 
-local active = read_json(root .. "/active.json")
+local active_path = root .. "/active.json"
+wezterm.add_to_config_reload_watch_list(active_path)
+local active = read_json(active_path)
 assert(active.deployment_schema_version == {DEPLOYMENT_SCHEMA_VERSION}, "unsupported Wisp deployment version")
 assert(type(active.current_bundle_id) == "string" and active.current_bundle_id:match "^[0-9a-f]+$" and #active.current_bundle_id == 64, "invalid Wisp bundle ID")
 local bundle = root .. "/deployments/" .. active.current_bundle_id

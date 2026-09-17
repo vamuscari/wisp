@@ -145,6 +145,10 @@ function wisp.apply_to_config(config, configured_options)
     status:install(safely)
   end
 
+  if values.opencode_tab_colors then
+    status:install_tab_colors()
+  end
+
   if values.picker_binding then
     local binding = {}
     for key, value in pairs(values.picker_binding) do

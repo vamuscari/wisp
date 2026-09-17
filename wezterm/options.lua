@@ -49,6 +49,7 @@ local function validate(configured)
     domain_for_project = true,
     file_open = true,
     file_preview = true,
+    opencode_tab_colors = true,
     picker_binding = true,
     picker_domain = true,
     picker_timeout_seconds = true,
@@ -99,6 +100,12 @@ local function validate(configured)
   end
   if configured.status_bar ~= nil and type(configured.status_bar) ~= "boolean" then
     error "wisp status_bar must be a boolean"
+  end
+  if configured.opencode_tab_colors ~= nil and type(configured.opencode_tab_colors) ~= "boolean" then
+    error "wisp opencode_tab_colors must be a boolean"
+  end
+  if configured.opencode_tab_colors == true and configured.status_bar == false then
+    error "wisp opencode_tab_colors requires status_bar"
   end
   if configured.file_open ~= nil then
     if type(configured.file_open) ~= "table" then
@@ -255,6 +262,7 @@ function Options:configure(configured)
     domain_for_project = configured.domain_for_project,
     file_open = { default = configured.file_open and configured.file_open.default or "window" },
     file_preview = file_preview,
+    opencode_tab_colors = configured.opencode_tab_colors == true,
     picker_binding = configured.picker_binding,
     picker_domain = configured.picker_domain or spawn_domain,
     picker_timeout_seconds = configured.picker_timeout_seconds or 3600,

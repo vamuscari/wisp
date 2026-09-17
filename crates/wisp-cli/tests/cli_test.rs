@@ -312,7 +312,7 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
         serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["deployment_schema_version"], 7);
     assert_eq!(manifest["bundle_id"], bundle_id);
-    assert_eq!(manifest["package_version"], "0.10.0");
+    assert_eq!(manifest["package_version"], "0.11.1");
     assert_eq!(manifest["protocol_version"], 7);
     assert!(manifest["files"][executable].is_string());
     assert!(manifest["files"]["wezterm/popup.lua"].is_string());
@@ -325,6 +325,13 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
     let wezterm_loader = fs::read_to_string(config_home.join("wezterm/wisp/init.lua")).unwrap();
     assert!(wezterm_loader.contains("wezterm.run_child_process"));
     assert!(wezterm_loader.contains("wisp-deployment-v7"));
+    let active_watch = wezterm_loader
+        .find("wezterm.add_to_config_reload_watch_list(active_path)")
+        .expect("WezTerm loader should watch the active bundle pointer");
+    let active_read = wezterm_loader
+        .find("local active = read_json(active_path)")
+        .expect("WezTerm loader should read the watched active bundle pointer");
+    assert!(active_watch < active_read);
     let nvim_loader = fs::read_to_string(deployment_root.join("nvim/lua/wisp/init.lua")).unwrap();
     assert!(nvim_loader.contains("vim.system"));
     assert!(nvim_loader.contains("nvim/lua/wisp/file_preview.lua"));

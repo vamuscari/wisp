@@ -2,6 +2,35 @@ local Status = {}
 Status.__index = Status
 local FLASH_INTERVAL_SECONDS = 0.25
 local FLASH_TRANSITIONS = 6
+local OPENCODE_STATUS_MAX_AGE_SECONDS = 90
+local OPENCODE_STATUS_USER_VAR = "WISP_OPENCODE_STATUS"
+local TAB_REFRESH_MARKER = "\u{200b}"
+local OPENCODE_STATE_PRIORITY = { idle = 1, running = 2, failure = 3, waiting = 4 }
+local OPENCODE_STATE_COLOR = {
+  idle = "idle_background",
+  running = "running_background",
+  failure = "failure_background",
+  waiting = "waiting_background",
+}
+
+local function parse_pane_status(value, now)
+  if type(value) ~= "string" then
+    return
+  end
+  local state, updated = value:match "^(%l+):(%d+)$"
+  local priority = OPENCODE_STATE_PRIORITY[state]
+  updated = tonumber(updated)
+  if
+    not priority
+    or not updated
+    or updated ~= math.floor(updated)
+    or updated > now
+    or now - updated > OPENCODE_STATUS_MAX_AGE_SECONDS
+  then
+    return
+  end
+  return state, priority
+end
 
 function Status.new(wezterm, options, client, providers, activate)
   local clickable = pcall(function()
@@ -25,6 +54,7 @@ function Status.new(wezterm, options, client, providers, activate)
       failure = { active = false, generation = 0, visible = true },
     },
     refreshing = false,
+    tab_refresh_markers = setmetatable({}, { __mode = "k" }),
     last_error = nil,
     targets = setmetatable({}, { __mode = "k" }),
   }, Status)
@@ -158,7 +188,45 @@ function Status:render(window, pane)
     project = project,
     workspace_color = workspace_color,
   }, self.clickable)
+  if self.options:get().opencode_tab_colors then
+    -- WezTerm has no tab-bar invalidation API, so vary an invisible status marker to force a freshness redraw.
+    local tab_refresh_marker = not self.tab_refresh_markers[window]
+    self.tab_refresh_markers[window] = tab_refresh_marker
+    table.insert(items, { Attribute = { Intensity = tab_refresh_marker and "Bold" or "Normal" } })
+    table.insert(items, { Text = TAB_REFRESH_MARKER })
+  end
   window:set_right_status(self.wezterm.format(items))
+end
+
+function Status:format_tab_title(tab, max_width)
+  local state
+  local priority = 0
+  local now = os.time()
+  for _, pane in ipairs(tab.panes) do
+    local user_vars = pane.user_vars
+    local pane_state, pane_priority =
+      parse_pane_status(type(user_vars) == "table" and user_vars[OPENCODE_STATUS_USER_VAR] or nil, now)
+    if pane_priority and pane_priority > priority then
+      state = pane_state
+      priority = pane_priority
+    end
+  end
+  if not state then
+    return
+  end
+
+  local title = tab.tab_title
+  if type(title) ~= "string" or title == "" then
+    title = tab.active_pane.title
+  end
+  title = self.wezterm.truncate_right(title, max_width)
+  local colors = self.options:get().status_colors
+  return {
+    { Background = { Color = colors[OPENCODE_STATE_COLOR[state]] } },
+    { Foreground = { Color = colors.foreground } },
+    { Attribute = { Intensity = tab.is_active and "Bold" or "Normal" } },
+    { Text = title },
+  }
 end
 
 function Status:activate_provider(window, pane, provider_name)
@@ -190,6 +258,19 @@ function Status:install(safely)
       self:report_error("wisp status action failed: " .. tostring(activate_error))
     end
     return false
+  end)
+end
+
+function Status:install_tab_colors()
+  self.wezterm.on("format-tab-title", function(tab, _, _, _, _, max_width)
+    local formatted, result = pcall(function()
+      return self:format_tab_title(tab, max_width)
+    end)
+    if not formatted then
+      self.wezterm.log_error("wisp tab status format failed: " .. tostring(result))
+      return
+    end
+    return result
   end)
 end
 

@@ -738,7 +738,7 @@ helper.test("picker cleanup accepts a temporary tab that already exited", functi
   local test = fixture({ protocol_version = 7, status = "cancelled" }, {
     picker_activate_error = "tab id 1 not found in mux",
     get_tab = function()
-      return nil
+      error "tab id 1 not found in mux"
     end,
   })
 

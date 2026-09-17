@@ -483,6 +483,109 @@ fn o_on_the_project_pane_returns_the_selected_project() {
 }
 
 #[test]
+fn enter_opens_an_unopened_project_without_windows() {
+    let context: HostContext = serde_json::from_value(serde_json::json!({
+        "protocol_version": 7,
+        "projects": {
+            "api": { "labels": ["new"], "windows": [] },
+            "web": { "labels": ["open"], "windows": [] },
+            "docs": { "labels": ["current", "open"], "windows": [] }
+        },
+        "workspaces": {}
+    }))
+    .unwrap();
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Down)).unwrap();
+    app.handle_key(key(KeyCode::Down)).unwrap();
+
+    let Command::Finish(Selection::Project { project, opener }) =
+        app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("unopened project enter should finish with a project selection");
+    };
+    assert_eq!(project.id, "api");
+    assert_eq!(opener, None);
+}
+
+#[test]
+fn search_enter_opens_an_unopened_project_without_windows() {
+    let context: HostContext = serde_json::from_value(serde_json::json!({
+        "protocol_version": 7,
+        "projects": {
+            "api": { "labels": ["new"], "windows": [] },
+            "web": { "labels": ["open"], "windows": [] },
+            "docs": { "labels": ["current", "open"], "windows": [] }
+        },
+        "workspaces": {}
+    }))
+    .unwrap();
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('/'))).unwrap();
+    for character in "api".chars() {
+        app.handle_key(key(KeyCode::Char(character))).unwrap();
+    }
+
+    let Command::Finish(Selection::Project { project, .. }) =
+        app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("searched unopened project enter should finish with a project selection");
+    };
+    assert_eq!(project.id, "api");
+}
+
+#[test]
+fn enter_on_a_project_with_raw_windows_still_drills_into_windows() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Down)).unwrap();
+    app.handle_key(key(KeyCode::Down)).unwrap();
+
+    assert_eq!(app.handle_key(key(KeyCode::Enter)).unwrap(), Command::None);
+    assert_eq!(app.focus(), Focus::Detail);
+    assert_eq!(app.visible_detail_labels(), vec!["api-shell"]);
+}
+
+#[test]
+fn enter_on_an_open_project_without_windows_still_drills() {
+    let context: HostContext = serde_json::from_value(serde_json::json!({
+        "protocol_version": 7,
+        "projects": {
+            "docs": { "labels": ["current", "open"], "windows": [] }
+        },
+        "workspaces": {}
+    }))
+    .unwrap();
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context),
+        InitialView::Projects,
+    );
+
+    assert_eq!(app.handle_key(key(KeyCode::Enter)).unwrap(), Command::None);
+    assert_eq!(app.focus(), Focus::Detail);
+    assert!(app.visible_detail_labels().is_empty());
+}
+
+#[test]
 fn o_on_a_host_workspace_returns_the_exact_workspace() {
     let mut app = App::new(
         projects(),
@@ -1344,7 +1447,7 @@ fn commands_restore_the_previous_auxiliary_pane() {
 }
 
 #[test]
-fn preview_and_commands_keys_are_search_text_in_search_mode() {
+fn command_keys_are_search_text_in_search_mode() {
     let mut app = App::new(
         projects(),
         Openers::default(),
@@ -1357,8 +1460,9 @@ fn preview_and_commands_keys_are_search_text_in_search_mode() {
     app.handle_key(key(KeyCode::Char('/'))).unwrap();
     app.handle_key(key(KeyCode::Char('p'))).unwrap();
     app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    app.handle_key(key(KeyCode::Char('o'))).unwrap();
 
-    assert_eq!(app.project_query(), "p?");
+    assert_eq!(app.project_query(), "p?o");
     assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Hidden);
 }
 
@@ -1647,6 +1751,7 @@ fn commands_render_in_the_preview_slot() {
     assert!(rendered.contains("Commands"));
     assert!(rendered.contains("p File/Window Preview"));
     assert!(rendered.contains("Ctrl-R Refresh"));
+    assert!(rendered.contains("o Jump Project"));
     assert!(!rendered.contains("Preview unavailable"));
 }
 

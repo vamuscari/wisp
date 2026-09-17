@@ -73,6 +73,10 @@ function helper.fake_wezterm(overrides)
     return items
   end
 
+  wezterm.truncate_right = overrides.truncate_right or function(value, width)
+    return value:sub(1, width)
+  end
+
   wezterm.run_child_process = overrides.run_child_process
     or function()
       return false, "", "run_child_process is not configured in this test"

@@ -40,10 +40,16 @@ helper.test("a project id creates a reusable direct workspace action", function(
   helper.assert_equal(switch.value.name, "wisp:Home/Artifacts", "direct workspace")
   helper.assert_equal(switch.value.spawn.cwd, "/Users/test/Artifacts", "direct cwd")
   helper.assert_equal(switch.value.spawn.domain.DomainName, "local", "direct domain")
+  helper.assert_equal(switch.value.spawn.args, nil, "direct default program")
   helper.assert_equal(
     switch.value.spawn.set_environment_variables.WISP_PROJECT_DIR,
     "/Users/test/Artifacts",
     "direct project directory"
+  )
+  helper.assert_equal(
+    switch.value.spawn.set_environment_variables.WISP_PROJECT_NAME,
+    "Artifacts",
+    "direct project name"
   )
 
   local missing_window = helper.fake_window()

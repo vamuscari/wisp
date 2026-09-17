@@ -1138,8 +1138,17 @@ impl App {
     }
 
     fn drill_project(&mut self) -> Result<Command, NavigationError> {
-        if self.selected_target().is_none() {
+        let Some(target) = self.selected_target() else {
             return Ok(Command::None);
+        };
+        let should_open_project = self.right_mode == RightMode::Windows
+            && !self.selected_project_is_open()
+            && match target {
+                ProjectTarget::Project(project) => self.context.windows(&project.id).is_empty(),
+                ProjectTarget::Workspace { .. } => false,
+            };
+        if should_open_project {
+            return self.select_project();
         }
         self.focus = Focus::Detail;
         self.pane_focus = false;
@@ -2865,7 +2874,7 @@ pub fn render(frame: &mut Frame, app: &App) {
                     "↑/↓ j/k Move   h/l Tab Focus\n\
                      Enter Default/Select   Ctrl-T Window\n\
                      Ctrl-V Right   Ctrl-X Bottom\n\
-                     w/f/s View   / Search\n\
+                     w/f/s View   o Jump Project   / Search\n\
                      Backspace Parent   p File/Window Preview\n\
                      Ctrl-R Refresh   x Close\n\
                      q/Ctrl-C Cancel   ?/Esc Close Help",

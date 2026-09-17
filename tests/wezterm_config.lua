@@ -6,11 +6,22 @@ assert(type(wezterm.format {
   { Text = "status" },
   { Attribute = { Invisible = false } },
 }) == "string", "minimum WezTerm must support status visibility attributes")
+local tab_refresh_marker = "\u{200b}"
+assert(
+  wezterm.column_width(tab_refresh_marker) == 0,
+  "minimum WezTerm must render the tab refresh marker at zero width"
+)
+assert(
+  wezterm.format { { Attribute = { Intensity = "Bold" } }, { Text = tab_refresh_marker } }
+    ~= wezterm.format { { Attribute = { Intensity = "Normal" } }, { Text = tab_refresh_marker } },
+  "minimum WezTerm must preserve zero-width status refresh attributes"
+)
 
 local root = assert(wezterm.config_dir:match "^(.*)[/\\]tests$", "could not resolve the Wisp test root")
 local wisp = assert(loadfile(root .. "/wezterm/init.lua"))("wisp", "wisp-deployment-v7", root .. "/wezterm")
 
 wisp.apply_to_config(config, {
+  opencode_tab_colors = true,
   picker_binding = { key = "f", mods = "CTRL|SHIFT" },
   spawn_domain = { DomainName = "local" },
 })
