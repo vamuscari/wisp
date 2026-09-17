@@ -175,7 +175,7 @@ fn opencode_status_emits_a_versioned_empty_summary_without_registrations() {
 
 #[test]
 fn canonical_opencode_plugin_uses_in_process_state_and_argv_registrations() {
-    let plugin = include_str!("../../../opencode/wisp.js");
+    let plugin = include_str!("../../../opencode/wisp.js").replace("\r\n", "\n");
 
     assert!(plugin.contains("spawnSync"));
     assert!(plugin.contains("shell: false"));
@@ -433,7 +433,8 @@ fn opencode_install_writes_a_stable_loader_for_the_active_bundle() {
     );
 
     let loader = fs::read_to_string(opencode_config.join("plugins/wisp.js")).unwrap();
-    assert!(loader.contains(&deployment_root.to_string_lossy().into_owned()));
+    let encoded_root = serde_json::to_string(&deployment_root.to_string_lossy()).unwrap();
+    assert!(loader.contains(&encoded_root));
     assert!(loader.contains("opencode/wisp.js"));
     assert!(loader.contains("shell: false"));
     assert!(
