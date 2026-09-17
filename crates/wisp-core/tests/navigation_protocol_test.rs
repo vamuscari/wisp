@@ -6,9 +6,9 @@ use wisp_core::{
     navigation::{NavigationOutcome, Navigator, Screen},
     opencode::{OpenCodeSession, SessionActivity, SessionWaiting},
     protocol::{
-        FileHostTarget, FileOpenTarget, FilePreviewEnvelope, FilePreviewState, HostContext,
-        NvimPaneStateEnvelope, NvimView, NvimViewport, OpenCodeStatusEnvelope, PROTOCOL_VERSION,
-        ProjectsEnvelope, Selection, SelectionEnvelope, SelectionStatus,
+        FileHostTarget, FileOpenTarget, HostContext, NvimPaneStateEnvelope, NvimView, NvimViewport,
+        OpenCodeStatusEnvelope, PROTOCOL_VERSION, ProjectsEnvelope, Selection, SelectionEnvelope,
+        SelectionStatus,
     },
 };
 
@@ -195,7 +195,7 @@ fn opencode_session_selection_carries_resolved_attach_argv_and_optional_host_ite
     };
 
     let encoded = serde_json::to_value(SelectionEnvelope::selected(selection.clone())).unwrap();
-    assert_eq!(encoded["protocol_version"], 7);
+    assert_eq!(encoded["protocol_version"], 8);
     assert_eq!(encoded["selection"]["kind"], "open_code_session");
     assert_eq!(encoded["selection"]["session_id"], "ses_123");
     assert_eq!(encoded["selection"]["host_item_id"], "17");
@@ -248,7 +248,7 @@ fn navigator_builds_an_opencode_attach_selection_without_a_shell() {
 #[test]
 fn host_context_maps_opencode_sessions_to_exact_host_items() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -299,7 +299,7 @@ fn selection_envelope_round_trips_as_versioned_json() {
 #[test]
 fn host_context_contains_nested_windows_and_panes_keyed_by_project_id() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -352,7 +352,7 @@ fn host_context_contains_nested_windows_and_panes_keyed_by_project_id() {
 #[test]
 fn host_context_contains_open_host_workspaces() {
     let context = serde_json::from_value::<HostContext>(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {},
         "workspaces": {
             "default": {
@@ -379,19 +379,19 @@ fn host_context_contains_open_host_workspaces() {
 }
 
 #[test]
-fn host_context_requires_the_v7_workspace_collection() {
+fn host_context_requires_the_v8_workspace_collection() {
     let context = serde_json::from_value::<HostContext>(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {}
     }));
 
-    assert!(context.is_err(), "v7 host context must include workspaces");
+    assert!(context.is_err(), "v8 host context must include workspaces");
 }
 
 #[test]
 fn host_context_defaults_omitted_windows_to_empty() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": { "labels": ["new"] }
         },
@@ -418,7 +418,7 @@ fn host_context_rejects_unsupported_versions_and_invalid_hierarchy() {
     );
 
     let empty = serde_json::from_value::<HostContext>(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["open"],
@@ -434,7 +434,7 @@ fn host_context_rejects_unsupported_versions_and_invalid_hierarchy() {
     assert!(empty.is_err());
 
     let duplicate = serde_json::from_value::<HostContext>(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["open"],
@@ -449,7 +449,7 @@ fn host_context_rejects_unsupported_versions_and_invalid_hierarchy() {
     assert!(duplicate.is_err());
 
     let empty_pane = serde_json::from_value::<HostContext>(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["open"],
@@ -465,12 +465,12 @@ fn host_context_rejects_unsupported_versions_and_invalid_hierarchy() {
     assert!(empty_pane.is_err());
 
     let duplicate_project = serde_json::from_str::<HostContext>(
-        r#"{"protocol_version":7,"projects":{"api":{"labels":["new"]},"api":{"labels":["open"]}},"workspaces":{}}"#,
+        r#"{"protocol_version":8,"projects":{"api":{"labels":["new"]},"api":{"labels":["open"]}},"workspaces":{}}"#,
     );
     assert!(duplicate_project.is_err());
 
     let duplicate_workspace = serde_json::from_str::<HostContext>(
-        r#"{"protocol_version":7,"projects":{},"workspaces":{"default":{"current":true},"default":{"current":false}}}"#,
+        r#"{"protocol_version":8,"projects":{},"workspaces":{"default":{"current":true},"default":{"current":false}}}"#,
     );
     assert!(duplicate_workspace.is_err());
 }
@@ -478,25 +478,25 @@ fn host_context_rejects_unsupported_versions_and_invalid_hierarchy() {
 #[test]
 fn public_protocol_fixtures_decode_with_the_current_models() {
     let selection: SelectionEnvelope = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/selection-file-v7.json"
+        "../../../tests/fixtures/selection-file-v8.json"
     ))
     .unwrap();
     assert_eq!(selection.protocol_version, PROTOCOL_VERSION);
     assert_eq!(selection.status, SelectionStatus::Selected);
 
     let context: HostContext =
-        serde_json::from_str(include_str!("../../../tests/fixtures/host-context-v7.json")).unwrap();
+        serde_json::from_str(include_str!("../../../tests/fixtures/host-context-v8.json")).unwrap();
     assert_eq!(context.labels("api"), &["current", "open"]);
     assert_eq!(context.windows("api")[0].id, "17");
     assert_eq!(context.windows("api")[0].panes[0].nvim_views.len(), 1);
     assert!(context.workspaces().contains_key("default"));
 
     let projects: ProjectsEnvelope =
-        serde_json::from_str(include_str!("../../../tests/fixtures/projects-v7.json")).unwrap();
+        serde_json::from_str(include_str!("../../../tests/fixtures/projects-v8.json")).unwrap();
     assert_eq!(projects.projects[0].id, "api");
 
     let session: SelectionEnvelope = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/selection-open-code-session-v7.json"
+        "../../../tests/fixtures/selection-open-code-session-v8.json"
     ))
     .unwrap();
     assert!(matches!(
@@ -505,34 +505,10 @@ fn public_protocol_fixtures_decode_with_the_current_models() {
     ));
 
     let status: OpenCodeStatusEnvelope = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/opencode-status-v7.json"
+        "../../../tests/fixtures/opencode-status-v8.json"
     ))
     .unwrap();
     assert_eq!(status.sessions.waiting, 1);
-
-    let hidden: FilePreviewEnvelope = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/file-preview-hidden-v7.json"
-    ))
-    .unwrap();
-    assert!(matches!(hidden.state, FilePreviewState::Hidden));
-
-    let empty: FilePreviewEnvelope = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/file-preview-empty-v7.json"
-    ))
-    .unwrap();
-    assert!(matches!(empty.state, FilePreviewState::Empty));
-
-    let matched: FilePreviewEnvelope = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/file-preview-matched-v7.json"
-    ))
-    .unwrap();
-    assert!(matches!(
-        matched.state,
-        FilePreviewState::File {
-            nvim_view: Some(_),
-            ..
-        }
-    ));
 }
 
 #[test]
@@ -551,7 +527,7 @@ fn opencode_status_envelope_is_strict_and_checks_version_first() {
     );
 
     let unknown = serde_json::from_value::<OpenCodeStatusEnvelope>(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "sessions": {
             "waiting": 0,
             "running": 0,
@@ -580,7 +556,7 @@ fn projects_envelope_checks_version_before_the_project_schema() {
     );
 
     let current = serde_json::from_value::<ProjectsEnvelope>(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": [project()]
     }))
     .unwrap();
@@ -590,7 +566,7 @@ fn projects_envelope_checks_version_before_the_project_schema() {
 #[test]
 fn selection_protocol_rejects_unknown_project_fields() {
     let selection = serde_json::from_value::<SelectionEnvelope>(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "status": "selected",
         "selection": {
             "kind": "project",
@@ -611,7 +587,7 @@ fn selection_protocol_rejects_unknown_project_fields() {
 #[test]
 fn selection_protocol_rejects_unknown_selection_fields() {
     let selection = serde_json::from_value::<SelectionEnvelope>(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "status": "selected",
         "selection": {
             "kind": "project",
@@ -626,7 +602,7 @@ fn selection_protocol_rejects_unknown_selection_fields() {
 #[test]
 fn selection_protocol_rejects_duplicate_envelope_fields() {
     let duplicate = serde_json::from_str::<SelectionEnvelope>(
-        r#"{"protocol_version":7,"protocol_version":7,"status":"cancelled"}"#,
+        r#"{"protocol_version":8,"protocol_version":8,"status":"cancelled"}"#,
     )
     .unwrap_err();
 
@@ -639,9 +615,9 @@ fn selection_protocol_rejects_duplicate_envelope_fields() {
 #[test]
 fn selection_protocol_rejects_inconsistent_status_fields() {
     for json in [
-        r#"{"protocol_version":7,"status":"selected"}"#,
-        r#"{"protocol_version":7,"status":"cancelled","selection":{"kind":"project","project":{"id":"api","path":"/repos/api","group":"Repos","name":"api","display_name":"API"}}}"#,
-        r#"{"protocol_version":7,"status":"error"}"#,
+        r#"{"protocol_version":8,"status":"selected"}"#,
+        r#"{"protocol_version":8,"status":"cancelled","selection":{"kind":"project","project":{"id":"api","path":"/repos/api","group":"Repos","name":"api","display_name":"API"}}}"#,
+        r#"{"protocol_version":8,"status":"error"}"#,
     ] {
         assert!(
             serde_json::from_str::<SelectionEnvelope>(json).is_err(),
@@ -659,7 +635,7 @@ fn close_project_is_a_versioned_host_action_selection() {
 
     assert!(
         decoded.is_ok(),
-        "close_project should be part of protocol v7"
+        "close_project should be part of protocol v8"
     );
     let encoded = serde_json::to_value(SelectionEnvelope::selected(decoded.unwrap())).unwrap();
     assert_eq!(encoded["selection"]["kind"], "close_project");
@@ -674,7 +650,7 @@ fn host_pane_is_a_versioned_selection_with_opaque_ids() {
     };
 
     let encoded = serde_json::to_value(SelectionEnvelope::selected(selection.clone())).unwrap();
-    assert_eq!(encoded["protocol_version"], 7);
+    assert_eq!(encoded["protocol_version"], 8);
     assert_eq!(encoded["selection"]["kind"], "host_pane");
     assert_eq!(encoded["selection"]["window_id"], "17");
     assert_eq!(encoded["selection"]["pane_id"], "42");
@@ -715,8 +691,8 @@ fn host_workspace_actions_are_versioned_selections() {
 }
 
 #[test]
-fn protocol_v7_file_selection_carries_all_open_targets_and_optional_host_target() {
-    assert_eq!(PROTOCOL_VERSION, 7);
+fn protocol_v8_file_selection_carries_all_open_targets_and_optional_host_target() {
+    assert_eq!(PROTOCOL_VERSION, 8);
 
     for (target, encoded_target) in [
         (FileOpenTarget::Window, "window"),
@@ -760,9 +736,9 @@ fn protocol_v7_file_selection_carries_all_open_targets_and_optional_host_target(
 }
 
 #[test]
-fn protocol_v7_file_selection_requires_open_policy_fields() {
+fn protocol_v8_file_selection_requires_open_policy_fields() {
     let mut selection = serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "status": "selected",
         "selection": {
             "kind": "file",
@@ -797,7 +773,7 @@ fn protocol_v7_file_selection_requires_open_policy_fields() {
 
     for field in ["window_id", "pane_id"] {
         let mut selection = serde_json::json!({
-            "protocol_version": 7,
+            "protocol_version": 8,
             "status": "selected",
             "selection": {
                 "kind": "file",
@@ -817,9 +793,9 @@ fn protocol_v7_file_selection_requires_open_policy_fields() {
 }
 
 #[test]
-fn protocol_v7_rejects_v6_envelopes_before_decoding_their_payloads() {
+fn protocol_v8_rejects_v7_envelopes_before_decoding_their_payloads() {
     let selection = serde_json::from_value::<SelectionEnvelope>(serde_json::json!({
-        "protocol_version": 6,
+        "protocol_version": 7,
         "status": "future status",
         "future_field": true
     }))
@@ -827,11 +803,11 @@ fn protocol_v7_rejects_v6_envelopes_before_decoding_their_payloads() {
     assert!(
         selection
             .to_string()
-            .contains("unsupported selection protocol version 6")
+            .contains("unsupported selection protocol version 7")
     );
 
     let pane_state = serde_json::from_value::<NvimPaneStateEnvelope>(serde_json::json!({
-        "protocol_version": 6,
+        "protocol_version": 7,
         "views": "future schema",
         "future_field": true
     }))
@@ -839,26 +815,14 @@ fn protocol_v7_rejects_v6_envelopes_before_decoding_their_payloads() {
     assert!(
         pane_state
             .to_string()
-            .contains("unsupported Neovim pane state protocol version 6")
-    );
-
-    let preview = serde_json::from_value::<FilePreviewEnvelope>(serde_json::json!({
-        "protocol_version": 6,
-        "sequence": "future schema",
-        "state": "future schema"
-    }))
-    .unwrap_err();
-    assert!(
-        preview
-            .to_string()
-            .contains("unsupported file preview protocol version 6")
+            .contains("unsupported Neovim pane state protocol version 7")
     );
 }
 
 #[test]
 fn nvim_pane_state_round_trips_and_requires_view_activity() {
     let mut json = serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "views": [{
             "window_id": "1001",
             "path": "/repos/api/src/main.rs",
@@ -902,7 +866,7 @@ fn nvim_pane_state_round_trips_and_requires_view_activity() {
 #[test]
 fn nvim_pane_state_accepts_cross_platform_absolute_paths() {
     let state = serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "views": [
             nvim_view("1001", "/repos/api/src/main.rs"),
             nvim_view("1002", r"C:\repos\api\src\lib.rs"),
@@ -917,13 +881,13 @@ fn nvim_pane_state_accepts_cross_platform_absolute_paths() {
 fn nvim_pane_state_rejects_unknown_duplicate_and_invalid_views() {
     let valid_view = serde_json::to_value(nvim_view("1001", "/repos/api/src/main.rs")).unwrap();
     let mut unknown = serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "views": [valid_view.clone()]
     });
     unknown["views"][0]["future_field"] = true.into();
     assert!(serde_json::from_value::<NvimPaneStateEnvelope>(unknown).is_err());
 
-    let duplicate = r#"{"protocol_version":7,"views":[],"views":[]}"#;
+    let duplicate = r#"{"protocol_version":8,"views":[],"views":[]}"#;
     assert!(serde_json::from_str::<NvimPaneStateEnvelope>(duplicate).is_err());
 
     for (field, invalid) in [
@@ -936,7 +900,7 @@ fn nvim_pane_state_rejects_unknown_duplicate_and_invalid_views() {
     ] {
         let mut view = valid_view.clone();
         view[field] = invalid;
-        let envelope = serde_json::json!({"protocol_version": 7, "views": [view]});
+        let envelope = serde_json::json!({"protocol_version": 8, "views": [view]});
         assert!(
             serde_json::from_value::<NvimPaneStateEnvelope>(envelope).is_err(),
             "invalid {field} should fail"
@@ -950,7 +914,7 @@ fn nvim_pane_state_rejects_unknown_duplicate_and_invalid_views() {
     ] {
         let mut view = valid_view.clone();
         view["view"][field] = invalid;
-        let envelope = serde_json::json!({"protocol_version": 7, "views": [view]});
+        let envelope = serde_json::json!({"protocol_version": 8, "views": [view]});
         assert!(
             serde_json::from_value::<NvimPaneStateEnvelope>(envelope).is_err(),
             "invalid view {field} should fail"
@@ -962,7 +926,7 @@ fn nvim_pane_state_rejects_unknown_duplicate_and_invalid_views() {
     reversed_range["bottomline"] = 19.into();
     assert!(
         serde_json::from_value::<NvimPaneStateEnvelope>(serde_json::json!({
-            "protocol_version": 7,
+            "protocol_version": 8,
             "views": [reversed_range]
         }))
         .is_err()
@@ -970,7 +934,7 @@ fn nvim_pane_state_rejects_unknown_duplicate_and_invalid_views() {
 
     assert!(
         serde_json::from_value::<NvimPaneStateEnvelope>(serde_json::json!({
-            "protocol_version": 7,
+            "protocol_version": 8,
             "views": [valid_view.clone(), valid_view]
         }))
         .is_err(),
@@ -981,7 +945,7 @@ fn nvim_pane_state_rejects_unknown_duplicate_and_invalid_views() {
 #[test]
 fn host_pane_nvim_views_are_optional_strict_and_semantically_validated() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["open"],
@@ -1003,7 +967,7 @@ fn host_pane_nvim_views_are_optional_strict_and_semantically_validated() {
 
     let encoded = serde_json::to_value(
         serde_json::from_value::<HostContext>(serde_json::json!({
-            "protocol_version": 7,
+            "protocol_version": 8,
             "projects": {"api": {"labels": ["new"]}},
             "workspaces": {}
         }))
@@ -1025,7 +989,7 @@ fn host_pane_nvim_views_are_optional_strict_and_semantically_validated() {
         ],
     ] {
         let invalid = serde_json::json!({
-            "protocol_version": 7,
+            "protocol_version": 8,
             "projects": {
                 "api": {
                     "labels": ["open"],
@@ -1039,88 +1003,5 @@ fn host_pane_nvim_views_are_optional_strict_and_semantically_validated() {
             "workspaces": {}
         });
         assert!(serde_json::from_value::<HostContext>(invalid).is_err());
-    }
-}
-
-#[test]
-fn file_preview_hidden_empty_and_file_states_round_trip() {
-    let states = [
-        FilePreviewState::Hidden,
-        FilePreviewState::Empty,
-        FilePreviewState::File {
-            project: project(),
-            path: "/repos/api/src/main.rs".into(),
-            nvim_view: None,
-        },
-        FilePreviewState::File {
-            project: project(),
-            path: "/repos/api/src/main.rs".into(),
-            nvim_view: Some(Box::new(nvim_view("1001", "/repos/api/src/main.rs"))),
-        },
-    ];
-
-    for (sequence, state) in states.into_iter().enumerate() {
-        let envelope = FilePreviewEnvelope {
-            protocol_version: PROTOCOL_VERSION,
-            sequence: sequence as u64,
-            state,
-        };
-        let encoded = serde_json::to_value(&envelope).unwrap();
-        if matches!(
-            envelope.state,
-            FilePreviewState::File {
-                nvim_view: None,
-                ..
-            }
-        ) {
-            assert!(encoded["state"].get("nvim_view").is_none());
-        }
-        assert_eq!(
-            serde_json::from_value::<FilePreviewEnvelope>(encoded).unwrap(),
-            envelope
-        );
-    }
-}
-
-#[test]
-fn file_preview_is_strict_and_validates_file_state() {
-    for invalid in [
-        serde_json::json!({
-            "protocol_version": 7,
-            "sequence": 1,
-            "state": {"state": "hidden", "path": "/unexpected"}
-        }),
-        serde_json::json!({
-            "protocol_version": 7,
-            "sequence": 1,
-            "state": {"state": "empty", "future_field": true}
-        }),
-        serde_json::json!({
-            "protocol_version": 7,
-            "sequence": 1,
-            "state": {"state": "file", "project": project(), "path": "relative/file.rs"}
-        }),
-        serde_json::json!({
-            "protocol_version": 7,
-            "sequence": 1,
-            "state": {
-                "state": "file",
-                "project": project(),
-                "path": "/repos/api/src/main.rs",
-                "nvim_view": nvim_view("", "/repos/api/src/main.rs")
-            }
-        }),
-    ] {
-        assert!(
-            serde_json::from_value::<FilePreviewEnvelope>(invalid.clone()).is_err(),
-            "invalid preview should fail: {invalid}"
-        );
-    }
-
-    for duplicate in [
-        r#"{"protocol_version":7,"protocol_version":7,"sequence":1,"state":{"state":"hidden"}}"#,
-        r#"{"protocol_version":7,"sequence":1,"state":{"state":"hidden","state":"empty"}}"#,
-    ] {
-        assert!(serde_json::from_str::<FilePreviewEnvelope>(duplicate).is_err());
     }
 }

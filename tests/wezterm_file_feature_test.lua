@@ -64,7 +64,7 @@ local function components(overrides)
     end,
   }
   local errors = {}
-  local client = Client.new(wezterm, options, 7)
+  local client = Client.new(wezterm, options, 8)
   local workspace = Workspace.new(wezterm, options, client, function(_, message)
     table.insert(errors, message)
   end)
@@ -73,7 +73,7 @@ end
 
 helper.test("host pane publishes all valid Neovim views and active file comes from active view", function()
   local state = {
-    protocol_version = 7,
+    protocol_version = 8,
     views = {
       nvim_view("/Users/test/Repos/api/src/first.rs", "1001", false),
       nvim_view("/Users/test/Repos/api/src/active.rs", "1002", true),
@@ -104,7 +104,7 @@ end)
 
 local function file_result(open_target, reuse_existing, host_target)
   return {
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = {
       kind = "file",
@@ -175,7 +175,7 @@ local function open_workspace_fixture(options)
   local open = options.open ~= false
   local parsed = {
     STATE = {
-      protocol_version = 7,
+      protocol_version = 8,
       views = { nvim_view(options.path or "/Users/test/Repos/api/src/main.rs", "1001", true) },
     },
   }

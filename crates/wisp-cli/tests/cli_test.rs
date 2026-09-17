@@ -30,7 +30,7 @@ impl Fixture {
         fs::write(
             &config,
             r#"
-version = 7
+version = 8
 cache_ttl_seconds = 60
 
 [[roots]]
@@ -260,7 +260,7 @@ fn validates_configuration_and_lists_discovered_projects_as_json() {
             .unwrap(),
     );
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(envelope["protocol_version"], 7);
+    assert_eq!(envelope["protocol_version"], 8);
     let projects: Vec<Project> = serde_json::from_value(envelope["projects"].clone()).unwrap();
 
     assert_eq!(projects.len(), 2);
@@ -283,7 +283,7 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
 
     let active: serde_json::Value =
         serde_json::from_slice(&fs::read(deployment_root.join("active.json")).unwrap()).unwrap();
-    assert_eq!(active["deployment_schema_version"], 7);
+    assert_eq!(active["deployment_schema_version"], 8);
     let bundle_id = active["current_bundle_id"].as_str().unwrap();
     assert_eq!(bundle_id.len(), 64);
     assert!(active["previous_bundle_id"].is_null());
@@ -304,27 +304,27 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
     assert!(bundle.join("wezterm/status.lua").is_file());
     assert!(bundle.join("wezterm/status_items.lua").is_file());
     assert!(bundle.join("nvim/lua/wisp/init.lua").is_file());
-    assert!(bundle.join("nvim/lua/wisp/file_preview.lua").is_file());
+    assert!(bundle.join("nvim/lua/wisp/json.lua").is_file());
     assert!(bundle.join("nvim/doc/wisp.txt").is_file());
     assert!(bundle.join("opencode/wisp.js").is_file());
 
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["deployment_schema_version"], 7);
+    assert_eq!(manifest["deployment_schema_version"], 8);
     assert_eq!(manifest["bundle_id"], bundle_id);
-    assert_eq!(manifest["package_version"], "0.11.1");
-    assert_eq!(manifest["protocol_version"], 7);
+    assert_eq!(manifest["package_version"], "0.12.0");
+    assert_eq!(manifest["protocol_version"], 8);
     assert!(manifest["files"][executable].is_string());
     assert!(manifest["files"]["wezterm/popup.lua"].is_string());
     assert!(manifest["files"]["wezterm/status.lua"].is_string());
     assert!(manifest["files"]["wezterm/status_items.lua"].is_string());
-    assert!(manifest["files"]["nvim/lua/wisp/file_preview.lua"].is_string());
+    assert!(manifest["files"]["nvim/lua/wisp/json.lua"].is_string());
     assert!(manifest["files"]["opencode/wisp.js"].is_string());
 
     let config_home = fixture.config.parent().unwrap().parent().unwrap();
     let wezterm_loader = fs::read_to_string(config_home.join("wezterm/wisp/init.lua")).unwrap();
     assert!(wezterm_loader.contains("wezterm.run_child_process"));
-    assert!(wezterm_loader.contains("wisp-deployment-v7"));
+    assert!(wezterm_loader.contains("wisp-deployment-v8"));
     let active_watch = wezterm_loader
         .find("wezterm.add_to_config_reload_watch_list(active_path)")
         .expect("WezTerm loader should watch the active bundle pointer");
@@ -334,7 +334,7 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
     assert!(active_watch < active_read);
     let nvim_loader = fs::read_to_string(deployment_root.join("nvim/lua/wisp/init.lua")).unwrap();
     assert!(nvim_loader.contains("vim.system"));
-    assert!(nvim_loader.contains("nvim/lua/wisp/file_preview.lua"));
+    assert!(nvim_loader.contains("nvim/lua/wisp/json.lua"));
 }
 
 #[test]
@@ -351,7 +351,7 @@ fn deploy_replaces_an_incompatible_active_schema_only_when_explicitly_requested(
     );
     fs::write(
         deployment_root.join("active.json"),
-        r#"{"deployment_schema_version":3,"future_active_shape":true}"#,
+        r#"{"deployment_schema_version":7,"future_active_shape":true}"#,
     )
     .unwrap();
 
@@ -374,7 +374,7 @@ fn deploy_replaces_an_incompatible_active_schema_only_when_explicitly_requested(
     );
     let active: serde_json::Value =
         serde_json::from_slice(&fs::read(deployment_root.join("active.json")).unwrap()).unwrap();
-    assert_eq!(active["deployment_schema_version"], 7);
+    assert_eq!(active["deployment_schema_version"], 8);
     assert!(active["current_bundle_id"].is_string());
     assert!(active["previous_bundle_id"].is_null());
 }
@@ -393,7 +393,7 @@ fn deploy_replacement_does_not_discard_invalid_current_schema_state() {
     );
     fs::write(
         deployment_root.join("active.json"),
-        r#"{"deployment_schema_version":7,"future_active_shape":true}"#,
+        r#"{"deployment_schema_version":8,"future_active_shape":true}"#,
     )
     .unwrap();
 
@@ -465,7 +465,7 @@ fn deploy_verify_and_status_detect_bundle_corruption() {
             .unwrap(),
     );
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(status["deployment_schema_version"], 7);
+    assert_eq!(status["deployment_schema_version"], 8);
     assert_eq!(status["valid"], true);
     assert!(status["bundle_id"].is_string());
 
@@ -687,7 +687,7 @@ fn deploy_prune_keeps_a_valid_previous_release() {
         "wezterm/status.lua",
         "wezterm/status_items.lua",
         "nvim/lua/wisp/init.lua",
-        "nvim/lua/wisp/file_preview.lua",
+        "nvim/lua/wisp/json.lua",
         "nvim/doc/wisp.txt",
         "opencode/wisp.js",
     ];
@@ -695,7 +695,7 @@ fn deploy_prune_keeps_a_valid_previous_release() {
     assets[3].1.extend_from_slice(b"\nprevious release\n");
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"wisp-deployment-v7\0");
+    hasher.update(b"wisp-deployment-v8\0");
     for (relative, contents) in &assets {
         hasher.update(relative.as_bytes());
         hasher.update(b"\0");
@@ -902,7 +902,7 @@ fn pick_writes_a_versioned_error_atomically_when_setup_fails() {
     assert!(output.stdout.is_empty());
     let envelope: SelectionEnvelope =
         serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
-    assert_eq!(envelope.protocol_version, 7);
+    assert_eq!(envelope.protocol_version, 8);
     assert_eq!(envelope.status, SelectionStatus::Error);
     assert!(envelope.error.unwrap().contains("missing.toml"));
     assert_eq!(
@@ -926,7 +926,7 @@ fn pick_help_exposes_host_context_and_initial_view_options() {
     assert!(stdout.contains("--active-file"));
     assert!(stdout.contains("--wezterm-executable"));
     assert!(stdout.contains("--window-preview"));
-    assert!(stdout.contains("--file-preview-state-file"));
+    assert!(!stdout.contains("--file-preview-state-file"));
     assert!(stdout.contains("--file-preview"));
     assert!(stdout.contains("--file-open-target"));
     assert!(stdout.contains("--single-pane-behavior"));
@@ -935,7 +935,7 @@ fn pick_help_exposes_host_context_and_initial_view_options() {
 }
 
 #[test]
-fn pick_writes_a_v7_error_envelope_for_a_v1_host_context() {
+fn pick_writes_a_v8_error_envelope_for_a_v1_host_context() {
     let fixture = Fixture::new();
     let context_path = fixture.home.join("context.json");
     let result_path = fixture.home.join("result.json");
@@ -954,7 +954,7 @@ fn pick_writes_a_v7_error_envelope_for_a_v1_host_context() {
     assert!(!output.status.success());
     let envelope: SelectionEnvelope =
         serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
-    assert_eq!(envelope.protocol_version, 7);
+    assert_eq!(envelope.protocol_version, 8);
     assert_eq!(envelope.status, SelectionStatus::Error);
     assert!(
         envelope

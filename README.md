@@ -98,7 +98,7 @@ Set `WISP_CONFIG_FILE` or pass the global `--config <path>` option to use a
 different file.
 
 ```toml
-version = 7
+version = 8
 cache_ttl_seconds = 60
 follow_symlinks = false
 
@@ -184,7 +184,7 @@ wisp pick
 wisp pick --result-file <path> --host-context-file <path> \
   [--active-project-path <path>] [--active-file <path>] \
   [--file-open-target window|right-pane|bottom-pane] \
-  [--file-preview-state-file <path>] [--file-preview] \
+  [--file-preview] \
   --initial-view projects|windows|sessions [--disable-sessions]
 wisp projects --json
 wisp refresh
@@ -234,11 +234,11 @@ wisp open "$(cat /tmp/wisp-selection.json)"
 | `f` | Show Files and focus the detail pane |
 | `s` | Show OpenCode Sessions and focus the detail pane |
 | `x` | Close the selected open project or host workspace from the Projects pane and exit |
-| `p` | Toggle terminal-text Preview in Windows or live file Preview in Files |
+| `p` | Toggle terminal-text Preview in Windows or file Preview in Files |
 | `?` | Toggle the Commands pane |
 | `/` | Enter fuzzy search for the focused pane |
 | `Backspace` | Go to the parent directory; at the project root focus Projects |
-| `Ctrl-R` | Force-refresh projects and open-project Git, or the active detail listing; Windows also refreshes a visible Preview |
+| `Ctrl-R` | Force-refresh projects and open-project Git, or the active detail listing; also refresh a visible Preview |
 | `Esc` | Close Commands when visible; otherwise cancel |
 | `q`, `Ctrl-C` | Cancel |
 
@@ -303,6 +303,8 @@ idle, then error. OpenCode has no terminal completed state: an idle session can
 receive another prompt later. Pending questions take display precedence over
 permissions, and both counts are shown when both exist. Error events remain
 visible until that session starts running or retrying again.
+Attached-session markers use semantic terminal colors: waiting is yellow,
+retrying and error are red, running is green, and idle is muted.
 
 ## WezTerm
 
@@ -329,11 +331,7 @@ wisp.apply_to_config(config, {
   popup = { direction = "Bottom", size = 0.65 },
   window_preview = true,
   file_open = { default = "window" },
-  file_preview = {
-    command = { "nvim" },
-    direction = "Right",
-    size = 0.5,
-  },
+  file_preview = true,
 })
 
 config.keys = config.keys or {}
@@ -405,17 +403,13 @@ text while Preview is hidden or Commands is visible. It runs a bounded
 cached, and is discarded when the target changes, Preview is hidden, or the
 picker exits.
 
-File Preview is disabled unless `file_preview` is configured. It starts visible
-when Files mode is entered, follows the highlighted file in one owned Neovim
-split, and closes when Files mode is left or `p` toggles it off. The command is
-an argv array launched directly without a shell; use an absolute executable
-path when the mux server's `PATH` does not include Neovim, and add user-owned
-startup flags such as `--clean` when desired. Preview reads at most 1 MiB or
-10,000 lines,
-rejects binary NUL content, and uses an isolated read-only scratch buffer with
-normal filetype detection and the active color scheme. When a matching live
-editor view exists, the preview restores its captured cursor and viewport and
-shows the source line range and dimensions.
+File Preview is available on demand through `p` and starts hidden by default.
+Set `file_preview = true` to start with it visible when Files mode is entered.
+Wisp loads the highlighted file on a debounced background worker and renders
+plain UTF-8 text in its own auxiliary pane, without creating another WezTerm
+pane or process. Reads stop at 1 MiB or 10,000 lines and show a truncation
+marker; binary, non-UTF-8, missing, and unreadable files produce an inline
+message without closing the picker.
 
 When a pane is running Neovim with Wisp configured, the adapter reads its
 strict `WISP_NVIM_STATE` payload before launching the picker. The state contains
@@ -446,7 +440,7 @@ project.
 | `popup` | `{ direction = "Bottom", size = 0.65 }` | Top-level popup split placement and size |
 | `window_preview` | `false` | Start with window Preview visible instead of on demand |
 | `file_open` | `{ default = "window" }` | Default file target: `window`, `right_pane`, or `bottom_pane` |
-| `file_preview` | none | Live preview command, split direction, and positive split size |
+| `file_preview` | `false` | Start with Wisp's internal file Preview visible |
 | `single_pane_behavior` | `"show"` | Show a one-pane Window's Pane column, or use `"activate"` to select it immediately |
 
 `status_colors` accepts only `foreground`, `opencode_background`,
@@ -464,10 +458,6 @@ does not load provider modules or execute user-supplied commands.
 `popup.direction` accepts `Top`, `Bottom`, `Left`, or `Right`. A `popup.size`
 below `1` is a fraction of the available space; a value of `1` or greater is a
 cell count, matching `pane:split` semantics.
-
-`file_preview.command` must be a dense non-empty argv array.
-`file_preview.direction` accepts the same four directions as `popup`, and
-`file_preview.size` follows the same positive fraction-or-cell split semantics.
 
 Mux workspace names and domains remain host policy:
 
@@ -571,7 +561,7 @@ vim.opt.runtimepath:prepend(wisp_root .. "/nvim")
 require("wisp").setup {
   keymap = "<leader>wp",
   file_open = { default = "window" },
-  file_preview = { width = 0.5 },
+  file_preview = true,
 }
 ```
 
@@ -588,15 +578,12 @@ another tab becomes active:
 - Initial metadata is seeded from `WISP_PROJECT_DIR` and `WISP_PROJECT_NAME`.
 - The originating normal-file buffer is shown inline on the current project.
 
-When `file_preview` is configured, Files mode starts with a companion scratch
-float to the right of the picker within its configured footprint. It uses the
-same bounded renderer as WezTerm, retains focus in the picker terminal, and
-restores the original picker dimensions when hidden. Selection, cancellation,
-and failure stop the watcher and remove the temporary sidecar before applying a
-result.
+File Preview renders inside Wisp's floating terminal, so Neovim creates no
+companion float, watcher, or temporary sidecar. Set `file_preview = true` to
+start Files mode with Preview visible; `p` toggles it either way.
 
 Inside WezTerm, the adapter publishes every normal file shown in the current
-Neovim tab as strict protocol-v7 pane state. Unnamed, hidden, terminal,
+Neovim tab as strict protocol-v8 pane state. Unnamed, hidden, terminal,
 quickfix, help, and other non-file buffers are omitted. Cursor and scroll-only
 updates are debounced; tab, window, and buffer changes publish immediately. The
 active view is also passed directly when `:Wisp` opens the picker.
@@ -615,7 +602,7 @@ executables reject mismatched schemas:
 
 ```json
 {
-  "protocol_version": 7,
+  "protocol_version": 8,
   "projects": [
     {
       "id": "api",
@@ -628,12 +615,12 @@ executables reject mismatched schemas:
 }
 ```
 
-Selection protocol version 7 embeds the owning project, resolved opener, and
+Selection protocol version 8 embeds the owning project, resolved opener, and
 file-placement policy:
 
 ```json
 {
-  "protocol_version": 7,
+  "protocol_version": 8,
   "status": "selected",
   "selection": {
     "kind": "file",
@@ -661,7 +648,7 @@ renderer:
 
 ```json
 {
-  "protocol_version": 7,
+  "protocol_version": 8,
   "sessions": {
     "waiting": 1,
     "running": 2,
@@ -693,7 +680,7 @@ Preview target the exact split captured at launch:
 
 ```json
 {
-  "protocol_version": 7,
+  "protocol_version": 8,
   "projects": {
     "api": {
       "labels": ["current", "open"],
@@ -765,7 +752,7 @@ The `workspaces` map is required; each key exists only while that workspace is
 open, and `current` selects the current row. Omitted `windows` and
 `session_items` fields are empty, while every window must contain at least one
 pane. Window and pane IDs are opaque to the Rust picker. Adapters reject
-protocol versions other than 7 rather than attempting compatibility. Canonical
+protocol versions other than 8 rather than attempting compatibility. Canonical
 examples live in [`tests/fixtures`](tests/fixtures).
 
 ## Cache And Limits

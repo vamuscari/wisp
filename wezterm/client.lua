@@ -350,38 +350,6 @@ function Client:nvim_views(pane)
   return self:parse_nvim_state(encoded)
 end
 
-function Client:parse_file_preview(encoded, last_sequence)
-  local envelope = self:parse_json(encoded)
-  if
-    type(envelope) ~= "table"
-    or envelope.protocol_version ~= self.protocol_version
-    or not has_only_fields(envelope, { protocol_version = true, sequence = true, state = true })
-    or not is_integer(envelope.sequence, 0)
-    or envelope.sequence <= (last_sequence or -1)
-    or type(envelope.state) ~= "table"
-  then
-    return nil
-  end
-  local state = envelope.state
-  if state.state == "hidden" or state.state == "empty" then
-    if not has_only_fields(state, { state = true }) then
-      return nil
-    end
-  elseif state.state == "file" then
-    if
-      not has_only_fields(state, { state = true, project = true, path = true, nvim_view = true })
-      or not self:valid_project(state.project)
-      or not is_absolute_path(state.path)
-      or (state.nvim_view ~= nil and not valid_nvim_view(state.nvim_view))
-    then
-      return nil
-    end
-  else
-    return nil
-  end
-  return envelope
-end
-
 function Client:query_projects()
   local stdout, command_error = self:run("projects", "--json")
   if not stdout then

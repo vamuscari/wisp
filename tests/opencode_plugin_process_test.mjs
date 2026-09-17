@@ -68,7 +68,7 @@ test("the canonical plugin registers through the bundled platform executable", a
     const files = await readdir(registryDirectory)
     assert.equal(files.length, 1)
     const registration = JSON.parse(await readFile(path.join(registryDirectory, files[0]), "utf8"))
-    assert.equal(registration.registry_version, 7)
+    assert.equal(registration.registry_version, 8)
     assert.equal(registration.directory, directory)
     assert.equal(registration.project_path, directory)
     assert.equal(registration.pane_id, "42")

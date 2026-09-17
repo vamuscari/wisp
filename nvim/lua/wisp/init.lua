@@ -1,6 +1,6 @@
 local M = {}
-local deployed_wisp_path, deployment_token, preview_module_path = ...
-local WISP_VERSION = 7
+local deployed_wisp_path, deployment_token, json_module_path = ...
+local WISP_VERSION = 8
 
 if
   type(deployed_wisp_path) ~= "string"
@@ -9,11 +9,11 @@ if
 then
   error "Wisp's Neovim adapter must be loaded by the deployed runtime"
 end
-if type(preview_module_path) ~= "string" or preview_module_path == "" then
-  error "Wisp's Neovim adapter requires its deployed preview module"
+if type(json_module_path) ~= "string" or json_module_path == "" then
+  error "Wisp's Neovim adapter requires its deployed JSON module"
 end
 
-local FilePreview = assert(loadfile(preview_module_path)) "module"
+local Json = assert(loadfile(json_module_path)) "module"
 
 local options = {}
 local PROTOCOL_VERSION = WISP_VERSION
@@ -72,22 +72,8 @@ local function configure(configured)
       error "wisp.setup file_open default must be window, right_pane, or bottom_pane"
     end
   end
-  if configured.file_preview ~= nil then
-    if type(configured.file_preview) ~= "table" then
-      error "wisp.setup file_preview must be a table"
-    end
-    for field in pairs(configured.file_preview) do
-      if field ~= "width" then
-        error("wisp.setup file_preview contains unknown field " .. tostring(field))
-      end
-    end
-    if
-      type(configured.file_preview.width) ~= "number"
-      or configured.file_preview.width <= 0
-      or configured.file_preview.width > 1
-    then
-      error "wisp.setup file_preview width must be greater than zero and at most one"
-    end
+  if configured.file_preview ~= nil and type(configured.file_preview) ~= "boolean" then
+    error "wisp.setup file_preview must be a boolean"
   end
 
   options = {
@@ -95,7 +81,7 @@ local function configure(configured)
     command = configured.command or "Wisp",
     config_file = configured.config_file,
     file_open = { default = configured.file_open and configured.file_open.default or "window" },
-    file_preview = configured.file_preview and { width = configured.file_preview.width } or nil,
+    file_preview = configured.file_preview == true,
     height = configured.height or 0.7,
     keymap = configured.keymap,
     keymap_options = configured.keymap_options or {},
@@ -244,7 +230,7 @@ local function install_pane_context()
   publish_pane_state_now()
 end
 
-local function picker_args(result_path, active_project_path, active_file, preview_state_path)
+local function picker_args(result_path, active_project_path, active_file)
   local args = { options.executable_path }
   if options.config_file then
     table.insert(args, "--config")
@@ -254,9 +240,7 @@ local function picker_args(result_path, active_project_path, active_file, previe
   table.insert(args, "--disable-sessions")
   table.insert(args, "--file-open-target")
   table.insert(args, (options.file_open.default:gsub("_", "-")))
-  if preview_state_path then
-    table.insert(args, "--file-preview-state-file")
-    table.insert(args, preview_state_path)
+  if options.file_preview then
     table.insert(args, "--file-preview")
   end
   if active_project_path then
@@ -281,14 +265,6 @@ local function cleanup(window, buffer)
   end
 end
 
-local function copy_table(value)
-  local copied = {}
-  for key, field in pairs(value) do
-    copied[key] = field
-  end
-  return copied
-end
-
 local function read_result(path)
   local file = io.open(path, "rb")
   if not file then
@@ -297,7 +273,7 @@ local function read_result(path)
   local encoded = file:read "*a"
   file:close()
   vim.fn.delete(path)
-  local result = FilePreview.decode_json(encoded)
+  local result = Json.decode(encoded)
   if not result then
     return nil, "picker returned invalid JSON"
   end
@@ -569,10 +545,6 @@ function M.open()
   local active_file = current_file()
   local result_path = vim.fn.tempname()
   vim.fn.delete(result_path)
-  local preview_state_path = options.file_preview and vim.fn.tempname() or nil
-  if preview_state_path then
-    vim.fn.delete(preview_state_path)
-  end
 
   local width = dimension(options.width, vim.o.columns)
   local height = dimension(options.height, vim.o.lines)
@@ -590,85 +562,19 @@ function M.open()
   local buffer = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buffer })
   local window = vim.api.nvim_open_win(buffer, true, window_config)
-  local preview = preview_state_path and { path = preview_state_path } or nil
   local cleaned = false
-
-  local function close_companion(restore_picker)
-    if not preview then
-      return
-    end
-    if preview.window and vim.api.nvim_win_is_valid(preview.window) then
-      vim.api.nvim_win_close(preview.window, true)
-    end
-    if preview.buffer and vim.api.nvim_buf_is_valid(preview.buffer) then
-      vim.api.nvim_buf_delete(preview.buffer, { force = true })
-    end
-    preview.window = nil
-    preview.buffer = nil
-    preview.renderer = nil
-    if restore_picker and vim.api.nvim_win_is_valid(window) then
-      vim.api.nvim_win_set_config(window, window_config)
-    end
-  end
 
   local function cleanup_all()
     if cleaned then
       return
     end
     cleaned = true
-    if preview and preview.watcher then
-      preview.watcher:stop()
-      preview.watcher = nil
-    end
-    close_companion(false)
-    if preview then
-      vim.fn.delete(preview.path)
-    end
     cleanup(window, buffer)
   end
 
-  local function update_preview(envelope)
-    if cleaned or not preview then
-      return
-    end
-    if envelope.state.state == "hidden" then
-      close_companion(true)
-      return
-    end
-    if not preview.window then
-      local available = math.max(2, width - 2)
-      local preview_width = math.max(1, math.min(available - 1, math.floor(available * options.file_preview.width)))
-      local picker_width = math.max(1, available - preview_width)
-      local picker_config = copy_table(window_config)
-      picker_config.width = picker_width
-      vim.api.nvim_win_set_config(window, picker_config)
-
-      local preview_config = copy_table(window_config)
-      preview_config.col = window_config.col + picker_width + 2
-      preview_config.title = " Preview "
-      preview_config.width = preview_width
-      local preview_buffer = vim.api.nvim_create_buf(false, true)
-      local opened, preview_window = pcall(vim.api.nvim_open_win, preview_buffer, false, preview_config)
-      if not opened then
-        if vim.api.nvim_buf_is_valid(preview_buffer) then
-          vim.api.nvim_buf_delete(preview_buffer, { force = true })
-        end
-        vim.api.nvim_win_set_config(window, window_config)
-        notify_error("could not open file preview: " .. tostring(preview_window))
-        return
-      end
-      preview.buffer = preview_buffer
-      preview.window = preview_window
-      preview.renderer = FilePreview.new(preview_window, preview_buffer)
-    end
-    preview.renderer:render(envelope.state)
-  end
-
-  local job_exited = false
-  local job = vim.fn.jobstart(picker_args(result_path, active_project_path, active_file, preview_state_path), {
+  local job = vim.fn.jobstart(picker_args(result_path, active_project_path, active_file), {
     on_exit = function(_, exit_code)
       vim.schedule(function()
-        job_exited = true
         cleanup_all()
         local result, result_error = read_result(result_path)
         if not result then
@@ -685,11 +591,6 @@ function M.open()
     vim.fn.delete(result_path)
     notify_error "could not start the wisp executable"
     return
-  end
-  if preview and not job_exited then
-    preview.watcher = FilePreview.watch(preview.path, update_preview, function(preview_error)
-      notify_error("file preview failed: " .. tostring(preview_error))
-    end)
   end
   vim.cmd.startinsert()
 end

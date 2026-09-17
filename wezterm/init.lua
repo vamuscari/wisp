@@ -1,6 +1,6 @@
 local wezterm = require "wezterm"
 local deployed_wisp_path, deployment_token, module_directory = ...
-local WISP_VERSION = 7
+local WISP_VERSION = 8
 
 if
   type(deployed_wisp_path) ~= "string"
@@ -39,7 +39,7 @@ local function safely(callback)
   end
 end
 
-local options = Options.new(deployed_wisp_path, module_directory)
+local options = Options.new(deployed_wisp_path)
 local client = Client.new(wezterm, options, WISP_VERSION)
 local workspace = Workspace.new(wezterm, options, client, report_error)
 local popup = Popup.new(wezterm, options, workspace)

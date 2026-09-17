@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Color};
@@ -6,7 +6,7 @@ use wisp_core::{
     config::{Openers, VcsIcons},
     model::{DirectoryEntry, EntryKind, Project},
     opencode::{OpenCodeSession, OpenCodeSnapshot, SessionActivity, SessionWaiting},
-    protocol::{FileHostTarget, FilePreviewState, HostContext, Selection},
+    protocol::{FileHostTarget, HostContext, Selection},
 };
 use wisp_tui::{
     ActiveProjectContext, App, AuxiliaryPane, Command, Focus, GitSummary, InitialView, InputMode,
@@ -45,7 +45,7 @@ fn projects() -> Vec<Project> {
 
 fn context() -> HostContext {
     serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["new"],
@@ -91,7 +91,7 @@ fn context() -> HostContext {
 
 fn host_workspace_context() -> HostContext {
     serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": { "labels": ["open"] },
             "web": { "labels": ["new"] },
@@ -190,7 +190,7 @@ fn sessions_command_loads_the_selected_project_and_groups_children() {
 #[test]
 fn selecting_a_session_uses_the_exact_host_mapping_and_attach_argv() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": { "labels": ["new"] },
             "web": { "labels": ["open"] },
@@ -289,6 +289,100 @@ fn sessions_waiting_on_questions_sort_before_permissions() {
     });
 
     assert_eq!(app.visible_detail_labels(), vec!["Question", "Permission"]);
+}
+
+#[test]
+fn session_rows_use_semantic_status_colors() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+    app.handle_key(key(KeyCode::Char('s'))).unwrap();
+    let sessions = vec![
+        session(
+            "ses_waiting",
+            "Waiting task",
+            None,
+            SessionActivity::Running,
+            SessionWaiting {
+                permissions: 0,
+                questions: 1,
+            },
+        ),
+        session(
+            "ses_retrying",
+            "Retrying task",
+            None,
+            SessionActivity::Retrying {
+                attempt: 2,
+                message: "rate limited".into(),
+                next_at: 20,
+            },
+            SessionWaiting::default(),
+        ),
+        session(
+            "ses_running",
+            "Running task",
+            None,
+            SessionActivity::Running,
+            SessionWaiting::default(),
+        ),
+        session(
+            "ses_idle",
+            "Idle task",
+            None,
+            SessionActivity::Idle,
+            SessionWaiting::default(),
+        ),
+        session(
+            "ses_error",
+            "Failed task",
+            None,
+            SessionActivity::Error {
+                message: "request failed".into(),
+            },
+            SessionWaiting::default(),
+        ),
+    ];
+    app.load_sessions(OpenCodeSnapshot {
+        host_items: sessions
+            .iter()
+            .map(|session| (session.id.clone(), format!("host-{}", session.id)))
+            .collect::<BTreeMap<_, _>>(),
+        sessions,
+        ..OpenCodeSnapshot::default()
+    });
+    let backend = TestBackend::new(160, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal);
+    for (title, expected) in [
+        ("Waiting task", Color::Yellow),
+        ("Retrying task", Color::Red),
+        ("Running task", Color::Green),
+        ("Idle task", Color::DarkGray),
+        ("Failed task", Color::Red),
+    ] {
+        let row = lines
+            .iter()
+            .position(|line| line.contains(title))
+            .unwrap_or_else(|| panic!("missing session row {title}")) as u16;
+        let title_column = lines[row as usize].find(title).unwrap() as u16;
+        let marker_column = (0..title_column)
+            .rev()
+            .find(|column| terminal.backend().buffer()[(*column, row)].symbol() == "◆")
+            .unwrap_or_else(|| panic!("missing active marker for {title}"));
+        assert_eq!(
+            terminal.backend().buffer()[(marker_column, row)].fg,
+            expected,
+            "wrong semantic color for {title}"
+        );
+    }
 }
 
 #[test]
@@ -395,7 +489,7 @@ fn windows_initial_view_focuses_a_current_host_workspace() {
 #[test]
 fn windows_initial_view_falls_back_when_the_workspace_is_unmanaged() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": { "labels": ["open"], "windows": [] },
             "web": { "labels": ["new"], "windows": [] },
@@ -485,7 +579,7 @@ fn o_on_the_project_pane_returns_the_selected_project() {
 #[test]
 fn enter_opens_an_unopened_project_without_windows() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": { "labels": ["new"], "windows": [] },
             "web": { "labels": ["open"], "windows": [] },
@@ -516,7 +610,7 @@ fn enter_opens_an_unopened_project_without_windows() {
 #[test]
 fn search_enter_opens_an_unopened_project_without_windows() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": { "labels": ["new"], "windows": [] },
             "web": { "labels": ["open"], "windows": [] },
@@ -565,7 +659,7 @@ fn enter_on_a_project_with_raw_windows_still_drills_into_windows() {
 #[test]
 fn enter_on_an_open_project_without_windows_still_drills() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "docs": { "labels": ["current", "open"], "windows": [] }
         },
@@ -813,9 +907,9 @@ fn entering_a_directory_loads_it_lazily() {
 }
 
 #[test]
-fn file_preview_and_enter_use_the_exact_ranked_nvim_target() {
+fn file_enter_uses_the_exact_ranked_nvim_target() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "docs": {
                 "labels": ["current", "open"],
@@ -871,7 +965,6 @@ fn file_preview_and_enter_use_the_exact_ranked_nvim_target() {
         "workspaces": {}
     }))
     .unwrap();
-    let expected_view = context.windows("docs")[1].panes[1].nvim_views[1].clone();
     let mut app = App::new(
         projects(),
         Openers::default(),
@@ -879,21 +972,12 @@ fn file_preview_and_enter_use_the_exact_ranked_nvim_target() {
         Some(context),
         InitialView::Projects,
     );
-    app.configure_file_preview(true, true);
     app.handle_key(key(KeyCode::Char('f'))).unwrap();
     app.load_directory(vec![DirectoryEntry::new(
         PathBuf::from("/repos/docs/README.md"),
         EntryKind::File,
     )]);
 
-    assert_eq!(
-        app.file_preview_state(),
-        FilePreviewState::File {
-            project: projects()[2].clone(),
-            path: PathBuf::from("/repos/docs/README.md"),
-            nvim_view: Some(Box::new(expected_view)),
-        }
-    );
     let Command::Finish(Selection::File { host_target, .. }) =
         app.handle_key(key(KeyCode::Enter)).unwrap()
     else {
@@ -930,7 +1014,7 @@ fn file_matching_normalizes_windows_drive_and_unc_paths() {
             display_name: "Documentation".into(),
         };
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 7,
+            "protocol_version": 8,
             "projects": {
                 "docs": {
                     "labels": ["current", "open"],
@@ -957,19 +1041,23 @@ fn file_matching_normalizes_windows_drive_and_unc_paths() {
             Some(context),
             InitialView::Projects,
         );
-        app.configure_file_preview(true, true);
         app.handle_key(key(KeyCode::Char('f'))).unwrap();
         app.load_directory(vec![DirectoryEntry::new(
             PathBuf::from(entry_path),
             EntryKind::File,
         )]);
 
-        let FilePreviewState::File { nvim_view, .. } = app.file_preview_state() else {
-            panic!("selected file should be previewed");
+        let Command::Finish(Selection::File { host_target, .. }) =
+            app.handle_key(key(KeyCode::Enter)).unwrap()
+        else {
+            panic!("file enter should finish");
         };
         assert_eq!(
-            nvim_view.as_ref().map(|view| view.window_id.as_str()),
-            Some("9")
+            host_target,
+            Some(FileHostTarget {
+                window_id: "17".into(),
+                pane_id: "71".into(),
+            })
         );
     }
 }
@@ -977,7 +1065,7 @@ fn file_matching_normalizes_windows_drive_and_unc_paths() {
 #[test]
 fn file_matching_excludes_other_projects_and_host_workspaces() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "docs": { "labels": ["current", "open"] },
             "api": {
@@ -1021,17 +1109,12 @@ fn file_matching_excludes_other_projects_and_host_workspaces() {
         Some(context),
         InitialView::Projects,
     );
-    app.configure_file_preview(true, true);
     app.handle_key(key(KeyCode::Char('f'))).unwrap();
     app.load_directory(vec![DirectoryEntry::new(
         PathBuf::from("/repos/docs/README.md"),
         EntryKind::File,
     )]);
 
-    let FilePreviewState::File { nvim_view, .. } = app.file_preview_state() else {
-        panic!("selected file should be previewed");
-    };
-    assert_eq!(nvim_view, None);
     let Command::Finish(Selection::File { host_target, .. }) =
         app.handle_key(key(KeyCode::Enter)).unwrap()
     else {
@@ -1052,34 +1135,32 @@ fn file_preview_visibility_tracks_selection_toggles_and_mode_transitions() {
     );
     app.configure_file_preview(true, true);
 
-    assert_eq!(app.file_preview_state(), FilePreviewState::Hidden);
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Hidden);
     app.handle_key(key(KeyCode::Char('f'))).unwrap();
-    assert_eq!(app.file_preview_state(), FilePreviewState::Empty);
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Preview);
     app.load_directory(vec![
         DirectoryEntry::new(PathBuf::from("/repos/docs/src"), EntryKind::Directory),
         DirectoryEntry::new(PathBuf::from("/repos/docs/README.md"), EntryKind::File),
     ]);
-    assert!(matches!(
-        app.file_preview_state(),
-        FilePreviewState::File { .. }
-    ));
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Preview);
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Commands);
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Preview);
 
     app.handle_key(key(KeyCode::Char('w'))).unwrap();
-    assert_eq!(app.file_preview_state(), FilePreviewState::Hidden);
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Hidden);
     app.handle_key(key(KeyCode::Char('f'))).unwrap();
     app.load_directory(vec![DirectoryEntry::new(
         PathBuf::from("/repos/docs/README.md"),
         EntryKind::File,
     )]);
-    assert!(matches!(
-        app.file_preview_state(),
-        FilePreviewState::File { .. }
-    ));
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Preview);
 
     app.handle_key(key(KeyCode::Char('p'))).unwrap();
-    assert_eq!(app.file_preview_state(), FilePreviewState::Hidden);
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Hidden);
     app.handle_key(key(KeyCode::Char('s'))).unwrap();
-    assert_eq!(app.file_preview_state(), FilePreviewState::Hidden);
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Hidden);
     app.clear_status();
     app.handle_key(key(KeyCode::Char('p'))).unwrap();
     assert_eq!(app.status(), Some("File preview is unavailable"));
@@ -1088,7 +1169,7 @@ fn file_preview_visibility_tracks_selection_toggles_and_mode_transitions() {
         PathBuf::from("/repos/docs/README.md"),
         EntryKind::File,
     )]);
-    assert_eq!(app.file_preview_state(), FilePreviewState::Hidden);
+    assert_eq!(app.auxiliary_pane(), AuxiliaryPane::Hidden);
 }
 
 #[test]
@@ -1107,13 +1188,20 @@ fn file_preview_is_empty_for_a_highlighted_directory() {
         EntryKind::Directory,
     )]);
 
-    assert_eq!(app.file_preview_state(), FilePreviewState::Empty);
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    assert!(
+        rendered_lines(&terminal)
+            .join("\n")
+            .contains("Select a file to preview")
+    );
 }
 
 #[test]
 fn file_rows_render_a_live_target_marker_without_changing_labels() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "docs": {
                 "labels": ["current", "open"],
@@ -2277,7 +2365,7 @@ fn narrow_renderer_stacks_projects_above_windows() {
 #[test]
 fn renderer_explains_when_an_open_project_has_no_windows() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "docs": { "labels": ["current", "open"], "windows": [] }
         },
@@ -2301,7 +2389,7 @@ fn renderer_explains_when_an_open_project_has_no_windows() {
 #[test]
 fn renderer_explains_when_the_selected_project_is_not_open() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": { "labels": ["new"], "windows": [] },
             "web": { "labels": ["open"], "windows": [] },

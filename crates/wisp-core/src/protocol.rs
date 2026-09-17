@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::{model::Project, opencode::OpenCodeStatusCounts};
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Deserialize)]
 struct VersionHeader {
@@ -557,107 +557,6 @@ impl<'de> Deserialize<'de> for FileHostTarget {
             window_id: raw.window_id,
             pane_id: raw.pane_id,
         })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct FilePreviewEnvelope {
-    pub protocol_version: u32,
-    pub sequence: u64,
-    pub state: FilePreviewState,
-}
-
-impl<'de> Deserialize<'de> for FilePreviewEnvelope {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let json = Box::<RawValue>::deserialize(deserializer)?;
-        crate::strict_json::reject_duplicate_fields(json.get().as_bytes())
-            .map_err(de::Error::custom)?;
-        let header: VersionHeader = serde_json::from_str(json.get()).map_err(de::Error::custom)?;
-        if header.protocol_version != PROTOCOL_VERSION {
-            return Err(de::Error::custom(format!(
-                "unsupported file preview protocol version {}",
-                header.protocol_version
-            )));
-        }
-
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawFilePreviewEnvelope {
-            protocol_version: u32,
-            sequence: u64,
-            state: FilePreviewState,
-        }
-
-        let raw: RawFilePreviewEnvelope =
-            serde_json::from_str(json.get()).map_err(de::Error::custom)?;
-        if let FilePreviewState::File {
-            path, nvim_view, ..
-        } = &raw.state
-        {
-            if !is_absolute_protocol_path(path) {
-                return Err(de::Error::custom(
-                    "file preview paths must be nonempty and absolute",
-                ));
-            }
-            if let Some(view) = nvim_view {
-                validate_nvim_views(std::slice::from_ref(view.as_ref()))
-                    .map_err(de::Error::custom)?;
-            }
-        }
-        Ok(Self {
-            protocol_version: raw.protocol_version,
-            sequence: raw.sequence,
-            state: raw.state,
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum FilePreviewState {
-    Hidden,
-    Empty,
-    File {
-        project: Project,
-        path: PathBuf,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        nvim_view: Option<Box<NvimView>>,
-    },
-}
-
-impl<'de> Deserialize<'de> for FilePreviewState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-        enum RawFilePreviewState {
-            Hidden {},
-            Empty {},
-            File {
-                project: Project,
-                path: PathBuf,
-                nvim_view: Option<Box<NvimView>>,
-            },
-        }
-
-        match RawFilePreviewState::deserialize(deserializer)? {
-            RawFilePreviewState::Hidden {} => Ok(Self::Hidden),
-            RawFilePreviewState::Empty {} => Ok(Self::Empty),
-            RawFilePreviewState::File {
-                project,
-                path,
-                nvim_view,
-            } => Ok(Self::File {
-                project,
-                path,
-                nvim_view,
-            }),
-        }
     }
 }
 

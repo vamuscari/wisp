@@ -44,7 +44,7 @@ fn invalidates_cache_for_config_or_schema_changes() {
 
     let mut document: serde_json::Value =
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    document["version"] = 999.into();
+    document["version"] = 7.into();
     fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
     let mut changed = CacheStore::open(&path, "config-a").unwrap();
     assert!(changed.directory(directory, 100, 60).is_none());
@@ -174,17 +174,17 @@ fn current_version_cache_with_duplicate_directory_keys_is_rebuilt() {
 #[test]
 fn config_fingerprint_is_stable_and_changes_with_discovery_inputs() {
     let first = Config::parse(
-        "version = 7\n[[roots]]\npath = '/one'\n",
+        "version = 8\n[[roots]]\npath = '/one'\n",
         Path::new("/home/test"),
     )
     .unwrap();
     let same = Config::parse(
-        "version = 7\n[[roots]]\npath = '/one'\n",
+        "version = 8\n[[roots]]\npath = '/one'\n",
         Path::new("/different/home"),
     )
     .unwrap();
     let changed = Config::parse(
-        "version = 7\n[[roots]]\npath = '/two'\n",
+        "version = 8\n[[roots]]\npath = '/two'\n",
         Path::new("/home/test"),
     )
     .unwrap();

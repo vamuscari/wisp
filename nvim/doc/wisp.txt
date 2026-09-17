@@ -28,19 +28,17 @@ clean/dirty, untracked, modified, staged, conflicted, upstream, and stashed
 markers. Nonzero category counts are shown. Git metadata loads after the picker
 opens. Editor activity does not make a project host-open or closable.
 
-Inside WezTerm, Wisp publishes strict protocol-v7 viewport state for every
+Inside WezTerm, Wisp publishes strict protocol-v8 viewport state for every
 normal file window in the current Neovim tab. Unnamed and non-file buffers,
 including terminals, quickfix lists, help, and file-tree buffers, are omitted.
 Buffer, tab, and window changes publish immediately; cursor, scroll, and resize
 updates use one short debounce.
 
-When file_preview is configured, Files mode starts with a companion scratch
-float to the picker's right. It follows the highlighted file while focus remains
-in the picker terminal. Press p in Files mode to hide or show it. The renderer
-reads at most 1 MiB or 10,000 lines, rejects NUL-containing binary content,
-detects filetype normally, and restores a matching captured viewport when it is
-within the bounded content. It does not add highlighted paths to the normal
-buffer list.
+File Preview renders plain text inside Wisp's own terminal UI. Press p in Files
+mode to hide or show it. Set file_preview = true to start with it visible. Wisp
+loads files on a debounced background worker, reads at most 1 MiB or 10,000
+lines, and reports binary, non-UTF-8, missing, or unreadable files inline. The
+adapter creates no companion float or temporary sidecar.
 
 The Neovim adapter disables OpenCode session mode. Session focus and attach
 actions are currently implemented only by the WezTerm adapter.
@@ -66,7 +64,7 @@ Pass options to setup():
     height = 0.7,
     border = "rounded",
     file_open = { default = "window" },
-    file_preview = { width = 0.5 },
+    file_preview = true,
   })
 <
 `config_file`       Optional shared TOML path.
@@ -77,7 +75,7 @@ Pass options to setup():
 `border`            Border accepted by nvim_open_win().
 `file_open`         Exact table with default set to "window", "right_pane", or
                     "bottom_pane". Default: { default = "window" }.
-`file_preview`      Optional exact table with width greater than zero and at
-                    most 1. Omit it to disable live file preview.
+`file_preview`      Boolean. Start with Wisp's internal file Preview visible.
+                    Default: false; p can still show it on demand.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

@@ -26,13 +26,14 @@ use wisp_core::{
     model::{DirectoryEntry, Project},
     path::{comparison_key, normalized_path},
     protocol::{
-        FileOpenTarget, FilePreviewEnvelope, FilePreviewState, HostContext, OpenCodeStatusEnvelope,
-        PROTOCOL_VERSION, ProjectsEnvelope, Selection, SelectionEnvelope, SelectionStatus,
+        FileOpenTarget, HostContext, OpenCodeStatusEnvelope, ProjectsEnvelope, Selection,
+        SelectionEnvelope, SelectionStatus,
     },
 };
 use wisp_tui::{
-    ActiveProjectContext, App, DataSource, DirectoryRequest, DirectoryUpdate, GitSummary, TuiError,
-    WindowPreviewContent, WindowPreviewRequest, WindowPreviewUpdate,
+    ActiveProjectContext, App, DataSource, DirectoryRequest, DirectoryUpdate, FilePreviewContent,
+    FilePreviewRequest, FilePreviewUpdate, GitSummary, TuiError, WindowPreviewContent,
+    WindowPreviewRequest, WindowPreviewUpdate,
 };
 
 mod deploy;
@@ -98,8 +99,6 @@ struct PickArgs {
     wezterm_executable: Option<PathBuf>,
     #[arg(long)]
     window_preview: bool,
-    #[arg(long, value_name = "PATH")]
-    file_preview_state_file: Option<PathBuf>,
     #[arg(long)]
     file_preview: bool,
     #[arg(long, value_enum, default_value_t = PickFileOpenTarget::Window)]
@@ -486,7 +485,7 @@ fn pick(config_override: Option<&Path>, args: &PickArgs) -> Result<Option<Select
         PickFileOpenTarget::RightPane => FileOpenTarget::RightPane,
         PickFileOpenTarget::BottomPane => FileOpenTarget::BottomPane,
     });
-    app.configure_file_preview(args.file_preview_state_file.is_some(), args.file_preview);
+    app.configure_file_preview(true, args.file_preview);
     app.configure_single_pane_behavior(match args.single_pane_behavior {
         PickSinglePaneBehavior::Show => wisp_tui::SinglePaneBehavior::Show,
         PickSinglePaneBehavior::Activate => wisp_tui::SinglePaneBehavior::Activate,
@@ -511,10 +510,7 @@ fn pick(config_override: Option<&Path>, args: &PickArgs) -> Result<Option<Select
             .as_deref()
             .map(Path::to_path_buf)
             .map(WindowPreviewLoader::new),
-        file_preview: args
-            .file_preview_state_file
-            .as_ref()
-            .map(|path| FilePreviewPublisher::new(path.clone())),
+        file_preview_loader: FilePreviewLoader::new(),
     };
     Ok(wisp_tui::run(app, &mut data)?)
 }
@@ -795,6 +791,107 @@ fn load_window_preview(
         WindowPreviewContent::Unavailable,
         WindowPreviewContent::Text,
     )
+}
+
+const MAX_FILE_PREVIEW_BYTES: usize = 1024 * 1024;
+const MAX_FILE_PREVIEW_LINES: usize = 10_000;
+
+fn load_file_preview(path: &Path) -> FilePreviewContent {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            return FilePreviewContent::Unavailable(format!(
+                "could not read {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let mut bytes = Vec::new();
+    if let Err(error) = file
+        .take(MAX_FILE_PREVIEW_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+    {
+        return FilePreviewContent::Unavailable(format!(
+            "could not read {}: {error}",
+            path.display()
+        ));
+    }
+    let byte_truncated = bytes.len() > MAX_FILE_PREVIEW_BYTES;
+    bytes.truncate(MAX_FILE_PREVIEW_BYTES);
+    if bytes.contains(&0) {
+        return FilePreviewContent::Binary;
+    }
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        Err(error) if byte_truncated && error.error_len().is_none() => {
+            std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default()
+        }
+        Err(_) => return FilePreviewContent::Binary,
+    };
+    if text.is_empty() {
+        return FilePreviewContent::Empty;
+    }
+    let mut lines = text.split_inclusive('\n');
+    let preview = lines
+        .by_ref()
+        .take(MAX_FILE_PREVIEW_LINES)
+        .collect::<String>();
+    FilePreviewContent::Text {
+        text: preview,
+        truncated: byte_truncated || lines.next().is_some(),
+    }
+}
+
+const FILE_PREVIEW_DEBOUNCE: Duration = Duration::from_millis(40);
+
+struct FilePreviewLoader {
+    sender: mpsc::Sender<Option<FilePreviewRequest>>,
+    receiver: Receiver<FilePreviewUpdate>,
+}
+
+impl FilePreviewLoader {
+    fn new() -> Self {
+        let (sender, request_receiver) = mpsc::channel::<Option<FilePreviewRequest>>();
+        let (update_sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok(mut request) = request_receiver.recv() {
+                loop {
+                    match request_receiver.recv_timeout(FILE_PREVIEW_DEBOUNCE) {
+                        Ok(next) => request = next,
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                let Some(request) = request else {
+                    continue;
+                };
+                let content = load_file_preview(&request.path);
+                if update_sender
+                    .send(FilePreviewUpdate {
+                        request_id: request.request_id,
+                        path: request.path,
+                        content,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        Self { sender, receiver }
+    }
+
+    fn request(&self, request: FilePreviewRequest) {
+        let _ = self.sender.send(Some(request));
+    }
+
+    fn cancel(&self) {
+        let _ = self.sender.send(None);
+    }
+
+    fn update(&mut self) -> Option<FilePreviewUpdate> {
+        self.receiver.try_recv().ok()
+    }
 }
 
 struct PendingWindowPreview {
@@ -1084,30 +1181,7 @@ struct CatalogDataSource {
     project_git: GitSummaryScheduler,
     opencode: Option<OpenCodeDataSource>,
     window_preview: Option<WindowPreviewLoader>,
-    file_preview: Option<FilePreviewPublisher>,
-}
-
-struct FilePreviewPublisher {
-    path: PathBuf,
-    sequence: u64,
-}
-
-impl FilePreviewPublisher {
-    fn new(path: PathBuf) -> Self {
-        Self { path, sequence: 0 }
-    }
-
-    fn publish(&mut self, state: FilePreviewState) -> Result<(), CliError> {
-        self.sequence = self.sequence.wrapping_add(1);
-        write_json_file(
-            &self.path,
-            &FilePreviewEnvelope {
-                protocol_version: PROTOCOL_VERSION,
-                sequence: self.sequence,
-                state,
-            },
-        )
-    }
+    file_preview_loader: FilePreviewLoader,
 }
 
 struct OpenCodeDataSource {
@@ -1137,11 +1211,16 @@ impl DataSource for CatalogDataSource {
         self.window_preview.as_mut()?.update()
     }
 
-    fn publish_file_preview(&mut self, state: FilePreviewState) -> Result<(), String> {
-        self.file_preview
-            .as_mut()
-            .map_or(Ok(()), |publisher| publisher.publish(state))
-            .map_err(|error| format!("could not publish file preview: {error}"))
+    fn request_file_preview(&mut self, request: FilePreviewRequest) {
+        self.file_preview_loader.request(request);
+    }
+
+    fn cancel_file_preview(&mut self) {
+        self.file_preview_loader.cancel();
+    }
+
+    fn file_preview_update(&mut self) -> Option<FilePreviewUpdate> {
+        self.file_preview_loader.update()
     }
 
     fn directory(&mut self, path: &Path) -> Result<Vec<DirectoryEntry>, String> {
@@ -1367,45 +1446,103 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_preview_publisher_writes_atomic_versioned_sequences() {
+    fn file_preview_reader_returns_plain_text() {
         let temp = TempDir::new().unwrap();
-        let path = temp.path().join("preview.json");
-        let mut publisher = FilePreviewPublisher::new(path.clone());
+        let path = temp.path().join("README.md");
+        let empty_path = temp.path().join("empty.txt");
+        fs::write(&path, "# API\n\nPreview content\n").unwrap();
+        fs::write(&empty_path, "").unwrap();
 
-        publisher
-            .publish(wisp_core::protocol::FilePreviewState::Hidden)
-            .unwrap();
-        let first: wisp_core::protocol::FilePreviewEnvelope =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(
-            first.protocol_version,
-            wisp_core::protocol::PROTOCOL_VERSION
+            load_file_preview(&path),
+            FilePreviewContent::Text {
+                text: "# API\n\nPreview content\n".into(),
+                truncated: false,
+            }
         );
-        assert_eq!(first.sequence, 1);
-        assert_eq!(first.state, wisp_core::protocol::FilePreviewState::Hidden);
+        assert_eq!(load_file_preview(&empty_path), FilePreviewContent::Empty);
+    }
 
-        publisher
-            .publish(wisp_core::protocol::FilePreviewState::File {
-                project: Project {
-                    id: "api".into(),
-                    path: "/repos/api".into(),
-                    group: "Repos".into(),
-                    name: "api".into(),
-                    display_name: "API".into(),
-                },
-                path: "/repos/api/src/main.rs".into(),
-                nvim_view: None,
-            })
-            .unwrap();
-        let second: wisp_core::protocol::FilePreviewEnvelope =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(second.sequence, 2);
-        assert!(matches!(
-            second.state,
-            wisp_core::protocol::FilePreviewState::File { ref path, .. }
-                if path == Path::new("/repos/api/src/main.rs")
-        ));
-        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    #[test]
+    fn file_preview_reader_rejects_binary_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("binary.dat");
+        fs::write(&path, b"plain prefix\0binary suffix").unwrap();
+
+        assert_eq!(load_file_preview(&path), FilePreviewContent::Binary);
+    }
+
+    #[test]
+    fn file_preview_reader_bounds_bytes_and_lines() {
+        let temp = TempDir::new().unwrap();
+        let byte_path = temp.path().join("large.txt");
+        fs::write(&byte_path, "x".repeat(1_048_577)).unwrap();
+        let line_path = temp.path().join("many-lines.txt");
+        fs::write(&line_path, "line\n".repeat(10_001)).unwrap();
+
+        let FilePreviewContent::Text { text, truncated } = load_file_preview(&byte_path) else {
+            panic!("large text file should produce a bounded text preview");
+        };
+        assert_eq!(text.len(), 1_048_576);
+        assert!(truncated);
+
+        let FilePreviewContent::Text { text, truncated } = load_file_preview(&line_path) else {
+            panic!("long text file should produce a bounded text preview");
+        };
+        assert_eq!(text.lines().count(), 10_000);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn file_preview_reader_reports_unreadable_files() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("missing.txt");
+
+        let FilePreviewContent::Unavailable(error) = load_file_preview(&path) else {
+            panic!("missing file should produce an unavailable preview");
+        };
+        assert!(error.contains("missing.txt"));
+    }
+
+    #[test]
+    fn file_preview_loader_debounces_to_the_latest_request() {
+        let temp = TempDir::new().unwrap();
+        let first = temp.path().join("first.txt");
+        let latest = temp.path().join("latest.txt");
+        fs::write(&first, "stale").unwrap();
+        fs::write(&latest, "latest").unwrap();
+        let mut loader = FilePreviewLoader::new();
+
+        loader.request(FilePreviewRequest {
+            request_id: 1,
+            path: first,
+        });
+        loader.request(FilePreviewRequest {
+            request_id: 2,
+            path: latest.clone(),
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let update = loop {
+            if let Some(update) = loader.update() {
+                break update;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "file preview worker should finish"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(update.request_id, 2);
+        assert_eq!(update.path, latest);
+        assert_eq!(
+            update.content,
+            FilePreviewContent::Text {
+                text: "latest".into(),
+                truncated: false,
+            }
+        );
+        assert_eq!(loader.update(), None);
     }
 
     #[test]
@@ -1514,7 +1651,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 7,
+            "protocol_version": 8,
             "projects": {
                 "api": { "labels": ["open"] },
                 "web": { "labels": ["current", "open"] }
@@ -1553,7 +1690,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 7,
+            "protocol_version": 8,
             "projects": {
                 "api": { "labels": ["open"] },
                 "web": { "labels": ["current", "open"] }
@@ -1592,7 +1729,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 7,
+            "protocol_version": 8,
             "projects": {
                 "repos": { "labels": ["open"] },
                 "api": { "labels": ["new"] }
@@ -1640,7 +1777,7 @@ mod tests {
             },
         ];
         let context: HostContext = serde_json::from_value(serde_json::json!({
-            "protocol_version": 7,
+            "protocol_version": 8,
             "projects": {
                 "api": { "labels": ["open"] },
                 "web": { "labels": ["new"] },
@@ -2008,7 +2145,7 @@ mod tests {
             }
         });
         let temporary = TempDir::new().unwrap();
-        let config = Config::parse("version = 7", temporary.path()).unwrap();
+        let config = Config::parse("version = 8", temporary.path()).unwrap();
         let cache =
             CacheStore::open(temporary.path().join("cache.json"), config.fingerprint()).unwrap();
         let directory_loader = DirectoryLoader::new(
@@ -2046,7 +2183,7 @@ mod tests {
                 last_poll: Instant::now() - Duration::from_secs(2),
             }),
             window_preview: None,
-            file_preview: None,
+            file_preview_loader: FilePreviewLoader::new(),
         };
 
         DataSource::sessions(&mut data, Path::new("/repos/wisp")).unwrap();

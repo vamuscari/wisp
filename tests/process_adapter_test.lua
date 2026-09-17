@@ -21,7 +21,7 @@ local projects = {
 
 local function nvim_state(path)
   return {
-    protocol_version = 7,
+    protocol_version = 8,
     views = {
       {
         window_id = "1001",
@@ -127,7 +127,7 @@ local function fixture(result, mux_overrides)
         return mux_overrides.nvim_states[value]
       end
       if value == "PROJECTS" then
-        return mux_overrides.projects_result or { protocol_version = 7, projects = projects }
+        return mux_overrides.projects_result or { protocol_version = 8, projects = projects }
       end
       if value == "RESULT" then
         return result
@@ -167,7 +167,7 @@ local function fixture(result, mux_overrides)
 end
 
 helper.test("project query rejects unsupported versions before reading the payload", function()
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     projects_result = { protocol_version = 1, projects = "future schema" },
   })
 
@@ -181,8 +181,8 @@ helper.test("project query rejects unsupported versions before reading the paylo
 end)
 
 helper.test("project query rejects unknown envelope fields", function()
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
-    projects_result = { protocol_version = 7, projects = projects, future_field = true },
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
+    projects_result = { protocol_version = 8, projects = projects, future_field = true },
   })
 
   helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
@@ -192,8 +192,8 @@ helper.test("project query rejects unknown envelope fields", function()
 end)
 
 helper.test("project query requires a JSON array", function()
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
-    projects_result = { protocol_version = 7, projects = { api = projects[1] } },
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
+    projects_result = { protocol_version = 8, projects = { api = projects[1] } },
   })
 
   helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
@@ -202,9 +202,9 @@ helper.test("project query requires a JSON array", function()
   assert(test.wezterm.logs[#test.wezterm.logs].message:match "project list", "object project list message")
 end)
 
-helper.test("project picker launches wisp with a v7 host context", function()
+helper.test("project picker launches wisp with a v8 host context", function()
   local test = fixture {
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "project", project = projects[1] },
   }
@@ -222,7 +222,7 @@ helper.test("project picker launches wisp with a v7 host context", function()
   helper.assert_equal(argument_after(spawn.args, "--result-file") ~= nil, true, "result argument")
   helper.assert_equal(argument_after(spawn.args, "--host-context-file") ~= nil, true, "host context argument")
   helper.assert_equal(argument_after(spawn.args, "--initial-view"), "projects", "initial view")
-  helper.assert_equal(test.annotations().protocol_version, 7, "host context protocol")
+  helper.assert_equal(test.annotations().protocol_version, 8, "host context protocol")
   helper.assert_table_equal(test.annotations().projects.api.labels, { "current", "open" }, "current labels")
   helper.assert_equal(test.annotations().projects.api.windows, nil, "empty current windows are omitted")
   helper.assert_table_equal(test.annotations().projects.artifacts.labels, { "new" }, "new labels")
@@ -278,9 +278,9 @@ helper.test("Windows host context derives project-relative details across case a
       return { { index = 0, is_active = true, tab = active_tab } }
     end,
   }
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     target_triple = "x86_64-pc-windows-msvc",
-    projects_result = { protocol_version = 7, projects = { windows_project } },
+    projects_result = { protocol_version = 8, projects = { windows_project } },
     all_windows = function()
       return { project_window }
     end,
@@ -332,9 +332,9 @@ helper.test("Windows host context derives project-relative details from UNC file
       return { { index = 0, is_active = true, tab = active_tab } }
     end,
   }
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     target_triple = "x86_64-pc-windows-msvc",
-    projects_result = { protocol_version = 7, projects = { windows_project } },
+    projects_result = { protocol_version = 8, projects = { windows_project } },
     all_windows = function()
       return { project_window }
     end,
@@ -346,7 +346,7 @@ helper.test("Windows host context derives project-relative details from UNC file
 end)
 
 helper.test("project picker forwards the active published Neovim view from an unmanaged workspace", function()
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     active_workspace = "default",
     window_workspace = "default",
     get_workspace_names = function()
@@ -371,7 +371,7 @@ helper.test("project picker forwards the active published Neovim view from an un
 end)
 
 helper.test("project picker ignores stale Neovim state when a shell is active", function()
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     pane = {
       process_name = "/bin/zsh",
       user_vars = { WISP_NVIM_STATE = "STALE_STATE" },
@@ -385,7 +385,7 @@ helper.test("project picker ignores stale Neovim state when a shell is active", 
 end)
 
 helper.test("project picker accepts Neovim pane context when mux process inspection is unavailable", function()
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     pane = {
       user_vars = { WISP_NVIM_STATE = "MUX_STATE" },
     },
@@ -402,7 +402,7 @@ helper.test("project picker accepts Neovim pane context when mux process inspect
 end)
 
 helper.test("host context uses the displayed mux window workspace when client state is stale", function()
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     active_workspace = "default",
     window_workspace = "wisp:Repos/api",
   })
@@ -467,7 +467,7 @@ helper.test("host context describes the selected project's WezTerm tabs", functi
       }
     end,
   }
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     window_preview = true,
     all_windows = function()
       return { project_window }
@@ -541,7 +541,7 @@ helper.test("host context includes only live workspaces not owned by projects", 
       return { { index = 0, is_active = true, tab = active_tab } }
     end,
   }
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     active_workspace = "default",
     window_workspace = "default",
     get_workspace_names = function()
@@ -577,7 +577,7 @@ helper.test("host context includes only live workspaces not owned by projects", 
 end)
 
 helper.test("window picker requests the windows initial view", function()
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     single_pane_behavior = "activate",
   })
 
@@ -596,7 +596,7 @@ helper.test("directory status click opens the project picker in a popup split", 
       return 99
     end,
   }
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     pane = {
       pane_id = 41,
       split = function(command)
@@ -634,7 +634,7 @@ helper.test("popup result waits for exact pane closure to succeed", function()
       return 99
     end,
   }
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     get_pane = function(pane_id)
       if pane_id == 99 then
         return popup_pane
@@ -675,7 +675,7 @@ helper.test("superseded popup discards its stale result", function()
   local kill_fails = true
   local next_pane_id = 90
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "project", project = projects[1] },
   }, {
@@ -726,7 +726,7 @@ helper.test("superseded popup discards its stale result", function()
 end)
 
 helper.test("cancelled picker closes its temporary tab without a host action", function()
-  local test = fixture { protocol_version = 7, status = "cancelled" }
+  local test = fixture { protocol_version = 8, status = "cancelled" }
 
   helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
 
@@ -735,7 +735,7 @@ helper.test("cancelled picker closes its temporary tab without a host action", f
 end)
 
 helper.test("picker cleanup accepts a temporary tab that already exited", function()
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     picker_activate_error = "tab id 1 not found in mux",
     get_tab = function()
       error "tab id 1 not found in mux"
@@ -750,9 +750,9 @@ helper.test("picker cleanup accepts a temporary tab that already exited", functi
   end
 end)
 
-helper.test("result projects require every protocol v7 field", function()
+helper.test("result projects require every protocol v8 field", function()
   local test = fixture {
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = {
       kind = "project",
@@ -781,7 +781,7 @@ helper.test("result projects reject unknown protocol fields", function()
     future_field = true,
   }
   local test = fixture {
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "project", project = project },
   }
@@ -794,7 +794,7 @@ end)
 
 helper.test("selections reject unknown protocol fields", function()
   local test = fixture {
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "project", project = projects[1], future_field = true },
   }
@@ -807,7 +807,7 @@ end)
 
 helper.test("selections reject malformed opener fields", function()
   local test = fixture {
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "project", project = projects[1], opener = "nvim" },
   }
@@ -821,7 +821,7 @@ end)
 helper.test("selected file delegates its resolved opener to wisp open in an existing workspace", function()
   local project_window = helper.fake_mux_window "wisp:Repos/api"
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = {
       kind = "file",
@@ -852,7 +852,7 @@ end)
 
 helper.test("wisp open becomes the initial process for a selected file in a new workspace", function()
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = {
       kind = "file",
@@ -887,7 +887,7 @@ end)
 helper.test("selected host workspace activates the exact existing workspace", function()
   local activated_workspace
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "workspace", workspace = "default" },
   }, {
@@ -908,7 +908,7 @@ end)
 
 helper.test("stale host workspace selection does not recreate the workspace", function()
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "workspace", workspace = "default" },
   }, {
@@ -949,7 +949,7 @@ helper.test("selected host workspace pane activates in the exact window and work
     end,
   }
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "workspace_pane", workspace = "default", window_id = "29", pane_id = "43" },
   }, {
@@ -991,7 +991,7 @@ helper.test("host workspace panes moved to another workspace are rejected", func
     end,
   }
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "workspace_pane", workspace = "default", window_id = "29", pane_id = "43" },
   }, {
@@ -1031,7 +1031,7 @@ helper.test("selected host pane activates in its captured project window", funct
     end,
   }
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "host_pane", project = projects[1], window_id = "17", pane_id = "42" },
   }, {
@@ -1051,7 +1051,7 @@ end)
 
 helper.test("stale host pane IDs perform no workspace action", function()
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "host_pane", project = projects[1], window_id = "17", pane_id = "42" },
   }, {
@@ -1089,7 +1089,7 @@ helper.test("host panes moved to another workspace are rejected", function()
     end,
   }
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "host_pane", project = projects[1], window_id = "17", pane_id = "42" },
   }, {
@@ -1145,7 +1145,7 @@ helper.test("close project terminates every pane in only that workspace", functi
     end,
   }
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "close_project", project = projects[1] },
   }, {
@@ -1220,7 +1220,7 @@ helper.test("close host workspace terminates panes in only the exact workspace",
     end,
   }
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = { kind = "close_workspace", workspace = "default" },
   }, {
@@ -1253,7 +1253,7 @@ end)
 
 helper.test("selected file without an opener reports an actionable error", function()
   local test = fixture {
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = {
       kind = "file",
@@ -1282,7 +1282,7 @@ helper.test("invalid result protocol closes the picker and reports an error", fu
 end)
 
 helper.test("result envelopes reject unknown protocol fields", function()
-  local test = fixture { protocol_version = 7, status = "cancelled", future_field = true }
+  local test = fixture { protocol_version = 8, status = "cancelled", future_field = true }
 
   helper.run_callback(test.wisp.project_picker_action(), test.window, test.pane)
 
@@ -1292,7 +1292,7 @@ end)
 
 helper.test("result envelopes reject fields that do not match their status", function()
   local test = fixture {
-    protocol_version = 7,
+    protocol_version = 8,
     status = "cancelled",
     selection = { kind = "project", project = projects[1] },
   }
@@ -1304,7 +1304,7 @@ helper.test("result envelopes reject fields that do not match their status", fun
 end)
 
 helper.test("picker pane disappearance fails immediately without waiting for timeout", function()
-  local test = fixture({ protocol_version = 7, status = "cancelled" }, {
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
     get_pane = function()
       return nil
     end,
@@ -1320,7 +1320,7 @@ helper.test("picker pane disappearance fails immediately without waiting for tim
 end)
 
 helper.test("OpenCode picker starts in the sessions view", function()
-  local test = fixture { protocol_version = 7, status = "cancelled" }
+  local test = fixture { protocol_version = 8, status = "cancelled" }
 
   helper.run_callback(test.wisp.opencode_picker_action(), test.window, test.pane)
 
@@ -1343,7 +1343,7 @@ helper.test("OpenCode selection focuses an exact registered pane", function()
     end,
   }
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = {
       kind = "open_code_session",
@@ -1369,7 +1369,7 @@ end)
 helper.test("stale OpenCode host targets attach in a new project tab", function()
   local project_window = helper.fake_mux_window "wisp:Repos/api"
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = {
       kind = "open_code_session",
@@ -1426,7 +1426,7 @@ helper.test("OpenCode sessions spawned in new workspaces are remembered", functi
     end,
   }
   local test = fixture({
-    protocol_version = 7,
+    protocol_version = 8,
     status = "selected",
     selection = {
       kind = "open_code_session",

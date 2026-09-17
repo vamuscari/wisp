@@ -331,7 +331,7 @@ function Picker:apply_result(window, pane, result, picker_pane_id)
   return nil, "wisp result contains an unknown selection kind"
 end
 
-function Picker:poll_result(window, original_pane, owner, result_path, host_context_path, preview)
+function Picker:poll_result(window, original_pane, owner, result_path, host_context_path)
   local attempts = 0
   local values = self.options:get()
   local maximum_attempts = math.ceil(values.picker_timeout_seconds / values.poll_interval_seconds)
@@ -342,110 +342,6 @@ function Picker:poll_result(window, original_pane, owner, result_path, host_cont
   local function remove_paths()
     os.remove(result_path)
     os.remove(host_context_path)
-    if preview then
-      os.remove(preview.path)
-    end
-  end
-
-  local function block_preview(message)
-    preview.blocked = true
-    if not preview.failure_reported then
-      preview.failure_reported = true
-      self.report_error(window, message .. "; toggle file preview off and on to retry")
-    end
-  end
-
-  local function preview_is_alive()
-    if not preview or not preview.pane_id then
-      return false
-    end
-    local found, live_pane = pcall(self.wezterm.mux.get_pane, preview.pane_id)
-    if found and live_pane then
-      return true
-    end
-    preview.pane = nil
-    preview.pane_id = nil
-    block_preview "wisp file preview exited unexpectedly"
-    return false
-  end
-
-  local function poll_preview()
-    if not preview then
-      return true
-    end
-    if preview.pane_id then
-      preview_is_alive()
-    end
-    local file = io.open(preview.path, "rb")
-    if not file then
-      return true
-    end
-    local encoded = file:read "*a"
-    file:close()
-    local envelope = self.client:parse_file_preview(encoded, preview.sequence)
-    if not envelope then
-      return true
-    end
-    preview.sequence = envelope.sequence
-    local state = envelope.state
-    if state.state == "hidden" then
-      preview.visible = false
-      preview.blocked = false
-      preview.failure_reported = false
-      if preview.pane_id then
-        local closed, close_error = self.workspace:close_pane(preview.pane_id)
-        if not closed then
-          return nil, "wisp could not close file preview: " .. tostring(close_error)
-        end
-        preview.pane = nil
-        preview.pane_id = nil
-      end
-      return true
-    end
-
-    preview.visible = true
-    if preview.pane_id or preview.blocked then
-      return true
-    end
-    local args = {}
-    for _, argument in ipairs(preview.config.command) do
-      table.insert(args, argument)
-    end
-    for _, argument in ipairs { "-n", "-i", "NONE", "-S", preview.config.script } do
-      table.insert(args, argument)
-    end
-    local command = {
-      args = args,
-      direction = preview.config.direction,
-      size = preview.config.size,
-      set_environment_variables = { WISP_FILE_PREVIEW_STATE_FILE = preview.path },
-    }
-    if state.state == "file" then
-      command.cwd = state.project.path
-    end
-    local spawned, preview_pane = pcall(function()
-      return owner.pane:split(command)
-    end)
-    if not spawned or not preview_pane then
-      block_preview("wisp could not open file preview: " .. tostring(preview_pane))
-      return true
-    end
-    local identified, pane_id = pcall(function()
-      return preview_pane:pane_id()
-    end)
-    if not identified or pane_id == nil then
-      block_preview "wisp file preview has no stable pane ID"
-      return true
-    end
-    preview.pane = preview_pane
-    preview.pane_id = pane_id
-    local focused, focus_error = pcall(function()
-      owner.pane:activate()
-    end)
-    if not focused then
-      return nil, "wisp could not restore picker focus: " .. tostring(focus_error)
-    end
-    return true
   end
 
   local function after_close(callback)
@@ -497,14 +393,6 @@ function Picker:poll_result(window, original_pane, owner, result_path, host_cont
       after_close(function() end)
       return
     end
-    local previewed, preview_error = poll_preview()
-    if not previewed then
-      remove_paths()
-      after_close(function()
-        self.report_error(window, preview_error)
-      end)
-      return
-    end
     local file = io.open(result_path, "rb")
     if not file then
       if not picker_is_alive() then
@@ -552,24 +440,11 @@ function Picker:launch(window, pane, initial_view, surface)
 
   local result_path = temporary_path()
   local host_context_path = temporary_path()
-  local preview
   local values = self.options:get()
-  if values.file_preview then
-    preview = {
-      blocked = false,
-      config = values.file_preview,
-      path = temporary_path(),
-      sequence = -1,
-      visible = false,
-    }
-  end
   local encoded = self.wezterm.json_encode(self:host_context(window, projects))
   local written, write_error = write_file(host_context_path, encoded)
   if not written then
     os.remove(result_path)
-    if preview then
-      os.remove(preview.path)
-    end
     self.report_error(window, "wisp could not write host context: " .. tostring(write_error))
     return
   end
@@ -592,9 +467,7 @@ function Picker:launch(window, pane, initial_view, surface)
   if values.window_preview then
     table.insert(picker_args, "--window-preview")
   end
-  if preview then
-    table.insert(picker_args, "--file-preview-state-file")
-    table.insert(picker_args, preview.path)
+  if values.file_preview then
     table.insert(picker_args, "--file-preview")
   end
   local active_file = self:active_nvim_file(pane)
@@ -641,29 +514,10 @@ function Picker:launch(window, pane, initial_view, surface)
   if not owner then
     os.remove(result_path)
     os.remove(host_context_path)
-    if preview then
-      os.remove(preview.path)
-    end
     self.report_error(window, "wisp could not launch picker: " .. tostring(launch_error))
     return
   end
-  if preview then
-    local close_surface = owner.close
-    function owner:close()
-      if preview.pane_id then
-        local closed, close_error = self.picker.workspace:close_pane(preview.pane_id)
-        if not closed then
-          return nil, close_error
-        end
-        preview.pane = nil
-        preview.pane_id = nil
-      end
-      os.remove(preview.path)
-      return close_surface(self)
-    end
-    owner.picker = self
-  end
-  self:poll_result(window, pane, owner, result_path, host_context_path, preview)
+  self:poll_result(window, pane, owner, result_path, host_context_path)
 end
 
 function Picker:launch_popup(window, pane, initial_view)

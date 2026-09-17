@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crossterm::{
@@ -29,8 +29,7 @@ use wisp_core::{
     opencode::{OpenCodeSession, OpenCodeSnapshot, SessionDisplayState},
     path::comparison_key,
     protocol::{
-        FileHostTarget, FileOpenTarget, FilePreviewState, HostContext, HostWorkspaceContext,
-        NvimView, Selection,
+        FileHostTarget, FileOpenTarget, HostContext, HostWorkspaceContext, NvimView, Selection,
     },
 };
 
@@ -138,12 +137,43 @@ pub struct DirectoryUpdate {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilePreviewRequest {
+    pub request_id: u64,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FilePreviewContent {
+    Text { text: String, truncated: bool },
+    Empty,
+    Binary,
+    Unavailable(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilePreviewUpdate {
+    pub request_id: u64,
+    pub path: PathBuf,
+    pub content: FilePreviewContent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowPreviewState {
     Disabled,
     Loading,
     Ready(String),
     NoOutput,
     Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FilePreviewViewState {
+    Disabled,
+    Loading,
+    Ready { text: String, truncated: bool },
+    Empty,
+    Binary,
+    Unavailable(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,6 +217,11 @@ pub trait DataSource {
     fn directory_update(&mut self) -> Option<DirectoryUpdate> {
         None
     }
+    fn request_file_preview(&mut self, _request: FilePreviewRequest) {}
+    fn cancel_file_preview(&mut self) {}
+    fn file_preview_update(&mut self) -> Option<FilePreviewUpdate> {
+        None
+    }
     fn sessions(&mut self, _path: &Path) -> Result<OpenCodeSnapshot, String> {
         Err("OpenCode integration is not configured".into())
     }
@@ -200,9 +235,6 @@ pub trait DataSource {
     fn cancel_window_preview(&mut self) {}
     fn window_preview_update(&mut self) -> Option<WindowPreviewUpdate> {
         None
-    }
-    fn publish_file_preview(&mut self, _state: FilePreviewState) -> Result<(), String> {
-        Ok(())
     }
 }
 
@@ -271,11 +303,15 @@ pub struct App {
     project_git: BTreeMap<String, GitSummary>,
     vcs_icons: VcsIcons,
     window_preview_available: bool,
+    window_preview_preferred: bool,
     auxiliary_pane: AuxiliaryPane,
     auxiliary_before_commands: AuxiliaryPane,
     window_preview_request: Option<(u64, String)>,
     window_preview_state: WindowPreviewState,
     window_preview_refresh: u64,
+    file_preview_request: Option<(u64, PathBuf)>,
+    file_preview_view_state: FilePreviewViewState,
+    file_preview_refresh: u64,
     hovered_detail: Option<usize>,
 }
 
@@ -358,11 +394,15 @@ impl App {
             project_git: BTreeMap::new(),
             vcs_icons: VcsIcons::default(),
             window_preview_available: false,
+            window_preview_preferred: false,
             auxiliary_pane: AuxiliaryPane::Hidden,
             auxiliary_before_commands: AuxiliaryPane::Hidden,
             window_preview_request: None,
             window_preview_state: WindowPreviewState::Disabled,
             window_preview_refresh: 0,
+            file_preview_request: None,
+            file_preview_view_state: FilePreviewViewState::Disabled,
+            file_preview_refresh: 0,
             hovered_detail: None,
         };
         app.select_current_project();
@@ -479,25 +519,7 @@ impl App {
     pub fn configure_file_preview(&mut self, available: bool, initially_visible: bool) {
         self.file_preview_available = available;
         self.file_preview_visible = available && initially_visible;
-    }
-
-    pub fn file_preview_state(&self) -> FilePreviewState {
-        if self.right_mode != RightMode::Files
-            || !self.file_preview_available
-            || !self.file_preview_visible
-        {
-            return FilePreviewState::Hidden;
-        }
-        let Some((project, entry)) = self.selected_regular_file() else {
-            return FilePreviewState::Empty;
-        };
-        FilePreviewState::File {
-            project,
-            path: entry.path.clone(),
-            nvim_view: self
-                .best_nvim_target(&entry.path)
-                .map(|(_, nvim_view)| Box::new(nvim_view)),
-        }
+        self.sync_auxiliary_pane();
     }
 
     pub fn current_directory(&self) -> Option<&Path> {
@@ -548,12 +570,8 @@ impl App {
 
     pub fn configure_window_preview(&mut self, available: bool, initially_visible: bool) {
         self.window_preview_available = available;
-        self.auxiliary_pane = if available && initially_visible {
-            AuxiliaryPane::Preview
-        } else {
-            AuxiliaryPane::Hidden
-        };
-        self.auxiliary_before_commands = self.auxiliary_pane;
+        self.window_preview_preferred = available && initially_visible;
+        self.sync_auxiliary_pane();
         self.window_preview_request = None;
         self.window_preview_state = if self.window_preview_visible() {
             WindowPreviewState::Unavailable
@@ -568,8 +586,23 @@ impl App {
 
     pub fn window_preview_visible(&self) -> bool {
         self.window_preview_available
+            && self.window_preview_preferred
             && self.auxiliary_pane == AuxiliaryPane::Preview
             && self.right_mode == RightMode::Windows
+    }
+
+    fn file_preview_visible(&self) -> bool {
+        self.file_preview_available
+            && self.file_preview_visible
+            && self.auxiliary_pane == AuxiliaryPane::Preview
+            && self.right_mode == RightMode::Files
+    }
+
+    fn file_preview_target(&self) -> Option<PathBuf> {
+        if !self.file_preview_visible() {
+            return None;
+        }
+        self.selected_regular_file().map(|(_, entry)| entry.path)
     }
 
     pub fn window_preview_target(&self) -> Option<String> {
@@ -690,18 +723,74 @@ impl App {
         }
     }
 
+    fn begin_file_preview(&mut self, request: &FilePreviewRequest) {
+        self.file_preview_request = Some((request.request_id, request.path.clone()));
+        self.file_preview_view_state = FilePreviewViewState::Loading;
+    }
+
+    fn apply_file_preview(&mut self, update: FilePreviewUpdate) {
+        if self.file_preview_request.as_ref() != Some(&(update.request_id, update.path.clone())) {
+            return;
+        }
+        self.file_preview_view_state = match update.content {
+            FilePreviewContent::Text { text, truncated: _ } if text.is_empty() => {
+                FilePreviewViewState::Empty
+            }
+            FilePreviewContent::Text { text, truncated } => {
+                FilePreviewViewState::Ready { text, truncated }
+            }
+            FilePreviewContent::Empty => FilePreviewViewState::Empty,
+            FilePreviewContent::Binary => FilePreviewViewState::Binary,
+            FilePreviewContent::Unavailable(error) => FilePreviewViewState::Unavailable(error),
+        };
+    }
+
+    fn clear_file_preview(&mut self) {
+        self.file_preview_request = None;
+        self.file_preview_view_state = if self.file_preview_visible() {
+            FilePreviewViewState::Empty
+        } else {
+            FilePreviewViewState::Disabled
+        };
+    }
+
+    fn sync_auxiliary_pane(&mut self) {
+        let preview = match self.right_mode {
+            RightMode::Windows => self.window_preview_available && self.window_preview_preferred,
+            RightMode::Files => self.file_preview_available && self.file_preview_visible,
+            RightMode::Sessions => false,
+        };
+        let pane = if preview {
+            AuxiliaryPane::Preview
+        } else {
+            AuxiliaryPane::Hidden
+        };
+        if self.auxiliary_pane == AuxiliaryPane::Commands {
+            self.auxiliary_before_commands = pane;
+        } else {
+            self.auxiliary_pane = pane;
+            self.auxiliary_before_commands = pane;
+        }
+        self.clear_window_preview();
+        self.clear_file_preview();
+    }
+
     fn toggle_window_preview(&mut self) {
         if !self.window_preview_available {
             self.status = Some("Window preview is unavailable".into());
             return;
         }
-        self.auxiliary_pane = if self.auxiliary_pane == AuxiliaryPane::Preview {
-            AuxiliaryPane::Hidden
-        } else {
-            AuxiliaryPane::Preview
-        };
-        self.auxiliary_before_commands = self.auxiliary_pane;
-        self.clear_window_preview();
+        self.window_preview_preferred = !self.window_preview_preferred;
+        self.sync_auxiliary_pane();
+    }
+
+    fn toggle_file_preview(&mut self) {
+        if !self.file_preview_available {
+            self.status = Some("File preview is unavailable".into());
+            return;
+        }
+        self.file_preview_visible = !self.file_preview_visible;
+        self.sync_auxiliary_pane();
     }
 
     fn toggle_commands(&mut self) {
@@ -712,6 +801,7 @@ impl App {
             self.auxiliary_pane = AuxiliaryPane::Commands;
         }
         self.clear_window_preview();
+        self.clear_file_preview();
     }
 
     pub fn replace_projects(&mut self, projects: Vec<Project>) {
@@ -727,6 +817,7 @@ impl App {
         self.session_host_items.clear();
         self.session_conflicts.clear();
         self.reset_queries_and_cursors();
+        self.sync_auxiliary_pane();
         self.select_current_project();
     }
 
@@ -907,6 +998,9 @@ impl App {
                     if self.window_preview_visible() {
                         self.window_preview_refresh = self.window_preview_refresh.wrapping_add(1);
                     }
+                    if self.file_preview_visible() {
+                        self.file_preview_refresh = self.file_preview_refresh.wrapping_add(1);
+                    }
                     Ok(self.refresh_command())
                 }
                 _ => Ok(Command::None),
@@ -990,10 +1084,8 @@ impl App {
             KeyCode::Char('p') => {
                 match self.right_mode {
                     RightMode::Windows => self.toggle_window_preview(),
-                    RightMode::Files if self.file_preview_available => {
-                        self.file_preview_visible = !self.file_preview_visible;
-                    }
-                    RightMode::Files | RightMode::Sessions => {
+                    RightMode::Files => self.toggle_file_preview(),
+                    RightMode::Sessions => {
                         self.status = Some("File preview is unavailable".into());
                     }
                 }
@@ -1318,6 +1410,7 @@ impl App {
         }
         self.focus = Focus::Detail;
         self.right_mode = RightMode::Files;
+        self.sync_auxiliary_pane();
         self.file_columns.clear();
         self.file_focus = 0;
         self.pending_file_load = None;
@@ -1353,6 +1446,7 @@ impl App {
         }
         self.focus = Focus::Detail;
         self.right_mode = RightMode::Sessions;
+        self.sync_auxiliary_pane();
         self.navigator.show_projects();
         self.file_columns.clear();
         self.file_focus = 0;
@@ -1377,6 +1471,7 @@ impl App {
     fn show_windows(&mut self) {
         self.focus = Focus::Detail;
         self.right_mode = RightMode::Windows;
+        self.sync_auxiliary_pane();
         self.navigator.show_projects();
         self.file_columns.clear();
         self.file_focus = 0;
@@ -1524,6 +1619,7 @@ impl App {
         self.status = None;
         if self.selected_workspace_name().is_some() && self.right_mode != RightMode::Windows {
             self.right_mode = RightMode::Windows;
+            self.sync_auxiliary_pane();
             self.set_workspace_project_status();
             self.select_active_host_item();
             return Ok(Command::None);
@@ -1702,6 +1798,7 @@ impl App {
                     .or_else(|| item.panes.first())
                     .map(|pane| pane.id.clone()),
                 active: item.active,
+                indicator_color: THEME.active,
                 score,
                 target: DetailTarget::HostWindow(item.id.clone()),
             })
@@ -1730,6 +1827,11 @@ impl App {
                                 .session_item(&project.id, &session.id)
                                 .is_some()
                                 || self.session_host_items.contains_key(&session.id),
+                            indicator_color: if conflict {
+                                THEME.error
+                            } else {
+                                session_state_color(&session)
+                            },
                             score,
                             target: DetailTarget::OpenCodeSession(session.id),
                         }
@@ -1776,6 +1878,7 @@ impl App {
                 detail: None,
                 pane_id: None,
                 active: false,
+                indicator_color: THEME.active,
                 score,
                 target: DetailTarget::Entry(entry.clone()),
             })
@@ -1897,6 +2000,7 @@ impl App {
                 detail: pane.detail.clone(),
                 pane_id: Some(pane.id.clone()),
                 active: pane.active,
+                indicator_color: THEME.active,
                 score,
                 target: DetailTarget::HostPane {
                     window_id: window.id.clone(),
@@ -1994,6 +2098,7 @@ struct DetailItem {
     detail: Option<String>,
     pane_id: Option<String>,
     active: bool,
+    indicator_color: Color,
     score: usize,
     target: DetailTarget,
 }
@@ -2126,6 +2231,15 @@ fn session_state_label(session: &OpenCodeSession) -> String {
         SessionDisplayState::Running => "running".into(),
         SessionDisplayState::Idle => "idle".into(),
         SessionDisplayState::Error { message } => format!("error: {message}"),
+    }
+}
+
+fn session_state_color(session: &OpenCodeSession) -> Color {
+    match session.display_state() {
+        SessionDisplayState::Waiting { .. } => THEME.input,
+        SessionDisplayState::Retrying { .. } | SessionDisplayState::Error { .. } => THEME.error,
+        SessionDisplayState::Running => THEME.active,
+        SessionDisplayState::Idle => THEME.muted,
     }
 }
 
@@ -2644,8 +2758,9 @@ fn render_file_column(frame: &mut Frame, app: &App, depth: usize, area: Rect) {
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
-    let auxiliary_visible =
-        app.auxiliary_pane == AuxiliaryPane::Commands || app.window_preview_visible();
+    let auxiliary_visible = app.auxiliary_pane == AuxiliaryPane::Commands
+        || app.window_preview_visible()
+        || app.file_preview_visible();
     let layout = ui_areas(frame.area(), auxiliary_visible);
     let projects_area = layout.projects;
     let (detail_area, pane_area) = match (app.right_mode, layout.detail) {
@@ -2729,7 +2844,7 @@ pub fn render(frame: &mut Frame, app: &App) {
                 Span::styled(
                     if item.active { "◆" } else { " " },
                     Style::default().fg(if item.active {
-                        THEME.active
+                        item.indicator_color
                     } else {
                         THEME.muted
                     }),
@@ -2807,7 +2922,7 @@ pub fn render(frame: &mut Frame, app: &App) {
                     Span::styled(
                         if item.active { "◆" } else { " " },
                         Style::default().fg(if item.active {
-                            THEME.active
+                            item.indicator_color
                         } else {
                             THEME.muted
                         }),
@@ -2881,6 +2996,31 @@ pub fn render(frame: &mut Frame, app: &App) {
                 )
                 .style(Style::default().fg(THEME.muted))
                 .block(Block::default().borders(Borders::ALL).title(" Commands ")),
+                auxiliary_area,
+            );
+        } else if app.right_mode == RightMode::Files {
+            let preview = match &app.file_preview_view_state {
+                FilePreviewViewState::Disabled => "Preview disabled".to_string(),
+                FilePreviewViewState::Loading => "Loading preview".to_string(),
+                FilePreviewViewState::Ready { text, truncated } => {
+                    if *truncated {
+                        format!("{text}\n\n[Preview truncated]")
+                    } else {
+                        text.clone()
+                    }
+                }
+                FilePreviewViewState::Empty => "Select a file to preview".to_string(),
+                FilePreviewViewState::Binary => "Binary file cannot be previewed".to_string(),
+                FilePreviewViewState::Unavailable(error) => {
+                    format!("Preview unavailable\n{error}")
+                }
+            };
+            frame.render_widget(
+                Paragraph::new(preview).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" File Preview "),
+                ),
                 auxiliary_area,
             );
         } else {
@@ -2998,59 +3138,7 @@ fn issue_directory_request<D: DataSource>(
     }
 }
 
-const FILE_PREVIEW_DEBOUNCE: Duration = Duration::from_millis(40);
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(250);
-
-#[derive(Default)]
-struct FilePreviewPublication {
-    published: Option<FilePreviewState>,
-    pending: Option<(FilePreviewState, Instant)>,
-}
-
-impl FilePreviewPublication {
-    fn observe(&mut self, state: FilePreviewState, now: Instant) -> Option<FilePreviewState> {
-        if self.published.as_ref() == Some(&state) {
-            self.pending = None;
-            return None;
-        }
-        if matches!(state, FilePreviewState::File { .. }) {
-            if self
-                .pending
-                .as_ref()
-                .is_none_or(|(pending, _)| pending != &state)
-            {
-                self.pending = Some((state, now + FILE_PREVIEW_DEBOUNCE));
-            }
-            return None;
-        }
-        self.pending = None;
-        self.published = Some(state.clone());
-        Some(state)
-    }
-
-    fn take_due(&mut self, now: Instant) -> Option<FilePreviewState> {
-        if self
-            .pending
-            .as_ref()
-            .is_none_or(|(_, deadline)| *deadline > now)
-        {
-            return None;
-        }
-        let (state, _) = self.pending.take()?;
-        self.published = Some(state.clone());
-        Some(state)
-    }
-
-    fn input_timeout(&self, now: Instant) -> Duration {
-        self.pending
-            .as_ref()
-            .map_or(INPUT_POLL_INTERVAL, |(_, deadline)| {
-                deadline
-                    .saturating_duration_since(now)
-                    .min(INPUT_POLL_INTERVAL)
-            })
-    }
-}
 
 pub fn run_with_terminal<B, D, I>(
     terminal: &mut Terminal<B>,
@@ -3064,10 +3152,11 @@ where
     I: Input,
 {
     let mut mouse_capture_enabled = false;
-    let mut file_preview_publication = FilePreviewPublication::default();
     let result = (|| -> Result<Option<Selection>, TuiError> {
         let mut requested_preview_target = None;
         let mut preview_request_id = 0_u64;
+        let mut requested_file_preview_target = None;
+        let mut file_preview_request_id = 0_u64;
         let mut directory_request_id = 0_u64;
         if let Some(Command::LoadSessions(path)) = app.take_startup_command() {
             match data.sessions(&path) {
@@ -3076,16 +3165,6 @@ where
             }
         }
         loop {
-            let file_preview = app.file_preview_state();
-            let now = Instant::now();
-            let publication = file_preview_publication
-                .observe(file_preview, now)
-                .or_else(|| file_preview_publication.take_due(now));
-            if let Some(publication) = publication {
-                if let Err(error) = data.publish_file_preview(publication) {
-                    app.set_status(error);
-                }
-            }
             while let Some(update) = data.directory_update() {
                 app.apply_directory_update(update);
             }
@@ -3118,6 +3197,27 @@ where
             if let Some(update) = data.window_preview_update() {
                 app.apply_window_preview(update);
             }
+            let file_preview_target = app
+                .file_preview_target()
+                .map(|path| (path, app.file_preview_refresh));
+            if file_preview_target != requested_file_preview_target {
+                requested_file_preview_target = file_preview_target.clone();
+                if let Some((path, _)) = file_preview_target {
+                    file_preview_request_id = file_preview_request_id.wrapping_add(1);
+                    let request = FilePreviewRequest {
+                        request_id: file_preview_request_id,
+                        path,
+                    };
+                    app.begin_file_preview(&request);
+                    data.request_file_preview(request);
+                } else {
+                    data.cancel_file_preview();
+                    app.clear_file_preview();
+                }
+            }
+            if let Some(update) = data.file_preview_update() {
+                app.apply_file_preview(update);
+            }
             for (project_id, git) in data.project_git_updates() {
                 app.set_active_project_git(&project_id, git);
             }
@@ -3130,9 +3230,7 @@ where
                 }
             }
             terminal.draw(|frame| render(frame, app))?;
-            let Some(event) =
-                input.read_event_timeout(file_preview_publication.input_timeout(Instant::now()))?
-            else {
+            let Some(event) = input.read_event_timeout(INPUT_POLL_INTERVAL)? else {
                 continue;
             };
             let command = match event {
@@ -3186,9 +3284,6 @@ where
     } else {
         Ok(())
     };
-    if file_preview_publication.published.as_ref() != Some(&FilePreviewState::Hidden) {
-        let _ = data.publish_file_preview(FilePreviewState::Hidden);
-    }
     match result {
         Err(error) => Err(error),
         Ok(selection) => {

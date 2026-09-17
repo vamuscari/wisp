@@ -11,12 +11,13 @@ use wisp_core::{
     model::{DirectoryEntry, EntryKind, Project},
     navigation::Screen,
     opencode::{OpenCodeSession, OpenCodeSnapshot, SessionActivity, SessionWaiting},
-    protocol::{FileOpenTarget, FilePreviewState, HostContext, Selection},
+    protocol::{FileOpenTarget, HostContext, Selection},
 };
 use wisp_tui::{
-    ActiveProjectContext, App, Command, DataSource, DirectoryRequest, DirectoryUpdate, GitSummary,
-    InitialView, Input, RightMode, WindowPreviewContent, WindowPreviewRequest, WindowPreviewState,
-    WindowPreviewUpdate, run_with_terminal,
+    ActiveProjectContext, App, Command, DataSource, DirectoryRequest, DirectoryUpdate,
+    FilePreviewContent, FilePreviewRequest, FilePreviewUpdate, GitSummary, InitialView, Input,
+    RightMode, WindowPreviewContent, WindowPreviewRequest, WindowPreviewState, WindowPreviewUpdate,
+    run_with_terminal,
 };
 
 fn projects() -> Vec<Project> {
@@ -44,7 +45,7 @@ fn key(code: KeyCode) -> KeyEvent {
 
 fn file_target_context() -> HostContext {
     serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -308,6 +309,26 @@ fn replacing_projects_resets_the_two_pane_view() {
     assert!(app.detail_query().is_empty());
 }
 
+#[test]
+fn replacing_projects_restores_the_preferred_window_preview() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        None,
+        InitialView::Projects,
+    );
+    app.configure_window_preview(true, true);
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    assert_eq!(app.auxiliary_pane(), wisp_tui::AuxiliaryPane::Hidden);
+
+    app.replace_projects(projects());
+
+    assert_eq!(app.right_mode(), RightMode::Windows);
+    assert!(app.window_preview_visible());
+    assert_eq!(app.auxiliary_pane(), wisp_tui::AuxiliaryPane::Preview);
+}
+
 #[derive(Default)]
 struct FixtureData {
     project_git_updates: Vec<(String, GitSummary)>,
@@ -321,7 +342,9 @@ struct FixtureData {
     preview_cancellations: usize,
     preview_update: Option<WindowPreviewUpdate>,
     preview_update_delay: usize,
-    file_preview_states: Vec<FilePreviewState>,
+    file_preview_requests: Vec<FilePreviewRequest>,
+    file_preview_updates: VecDeque<FilePreviewUpdate>,
+    file_preview_updates_after_requests: usize,
 }
 
 impl DataSource for FixtureData {
@@ -376,9 +399,15 @@ impl DataSource for FixtureData {
         self.preview_update.take()
     }
 
-    fn publish_file_preview(&mut self, state: FilePreviewState) -> Result<(), String> {
-        self.file_preview_states.push(state);
-        Ok(())
+    fn request_file_preview(&mut self, request: FilePreviewRequest) {
+        self.file_preview_requests.push(request);
+    }
+
+    fn file_preview_update(&mut self) -> Option<FilePreviewUpdate> {
+        if self.file_preview_requests.len() < self.file_preview_updates_after_requests.max(1) {
+            return None;
+        }
+        self.file_preview_updates.pop_front()
     }
 }
 
@@ -404,26 +433,6 @@ impl Input for TimedInput {
         self.0
             .pop_front()
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "input exhausted"))
-    }
-}
-
-struct WaitingInput(VecDeque<Option<KeyEvent>>);
-
-impl Input for WaitingInput {
-    fn read_key(&mut self) -> io::Result<KeyEvent> {
-        self.read_key_timeout(std::time::Duration::ZERO)?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "input timed out"))
-    }
-
-    fn read_key_timeout(&mut self, timeout: std::time::Duration) -> io::Result<Option<KeyEvent>> {
-        let event = self
-            .0
-            .pop_front()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "input exhausted"))?;
-        if event.is_none() {
-            std::thread::sleep(timeout);
-        }
-        Ok(event)
     }
 }
 
@@ -499,40 +508,7 @@ fn terminal_loop_loads_files_lazily_and_returns_the_selection() {
 }
 
 #[test]
-fn terminal_loop_publishes_file_preview_changes_and_hides_on_exit() {
-    let mut app = App::new(
-        projects(),
-        Openers::default(),
-        false,
-        None,
-        InitialView::Projects,
-    );
-    app.configure_file_preview(true, true);
-    let mut data = FixtureData::default();
-    let mut input = WaitingInput(VecDeque::from([
-        Some(key(KeyCode::Char('f'))),
-        None,
-        Some(key(KeyCode::Char('q'))),
-    ]));
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-
-    assert_eq!(
-        run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).unwrap(),
-        None
-    );
-    assert_eq!(data.file_preview_states.len(), 3);
-    assert_eq!(data.file_preview_states[0], FilePreviewState::Hidden);
-    assert!(matches!(
-        &data.file_preview_states[1],
-        FilePreviewState::File { project, path, nvim_view: None }
-            if project.id == "api" && path == Path::new("/repos/api/README.md")
-    ));
-    assert_eq!(data.file_preview_states[2], FilePreviewState::Hidden);
-}
-
-#[test]
-fn terminal_loop_debounces_rapid_file_highlights_to_the_latest_state() {
+fn terminal_loop_renders_file_preview_inside_the_picker() {
     let mut app = App::new(
         projects(),
         Openers::default(),
@@ -542,34 +518,138 @@ fn terminal_loop_debounces_rapid_file_highlights_to_the_latest_state() {
     );
     app.configure_file_preview(true, true);
     let mut data = FixtureData {
-        directory_results: VecDeque::from([Ok(vec![
-            DirectoryEntry::new(PathBuf::from("/repos/api/a.rs"), EntryKind::File),
-            DirectoryEntry::new(PathBuf::from("/repos/api/b.rs"), EntryKind::File),
-            DirectoryEntry::new(PathBuf::from("/repos/api/c.rs"), EntryKind::File),
-        ])]),
+        file_preview_updates: VecDeque::from([FilePreviewUpdate {
+            request_id: 1,
+            path: PathBuf::from("/repos/api/README.md"),
+            content: FilePreviewContent::Text {
+                text: "# API\n\nInternal preview content".into(),
+                truncated: false,
+            },
+        }]),
         ..FixtureData::default()
     };
-    let mut input = WaitingInput(VecDeque::from([
-        Some(key(KeyCode::Char('f'))),
-        Some(key(KeyCode::Down)),
-        Some(key(KeyCode::Down)),
-        None,
-        Some(key(KeyCode::Char('q'))),
+    let mut input = ScriptedInput(VecDeque::from([
+        key(KeyCode::Char('f')),
+        key(KeyCode::Char('q')),
     ]));
-    let backend = TestBackend::new(80, 24);
+    let backend = TestBackend::new(120, 24);
     let mut terminal = Terminal::new(backend).unwrap();
 
     assert_eq!(
         run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).unwrap(),
         None
     );
-    assert_eq!(data.file_preview_states.len(), 3);
-    assert_eq!(data.file_preview_states[0], FilePreviewState::Hidden);
-    assert!(matches!(
-        &data.file_preview_states[1],
-        FilePreviewState::File { path, .. } if path == Path::new("/repos/api/c.rs")
-    ));
-    assert_eq!(data.file_preview_states[2], FilePreviewState::Hidden);
+    assert_eq!(
+        data.file_preview_requests,
+        vec![FilePreviewRequest {
+            request_id: 1,
+            path: PathBuf::from("/repos/api/README.md"),
+        }]
+    );
+    let rendered = rendered_lines(&terminal).join("\n");
+    assert!(rendered.contains("File Preview"));
+    assert!(rendered.contains("Internal preview content"));
+}
+
+#[test]
+fn stale_file_preview_updates_cannot_replace_the_new_target() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        None,
+        InitialView::Projects,
+    );
+    app.configure_file_preview(true, true);
+    let first = PathBuf::from("/repos/api/a.rs");
+    let latest = PathBuf::from("/repos/api/b.rs");
+    let mut data = FixtureData {
+        directory_results: VecDeque::from([Ok(vec![
+            DirectoryEntry::new(first.clone(), EntryKind::File),
+            DirectoryEntry::new(latest.clone(), EntryKind::File),
+        ])]),
+        file_preview_updates: VecDeque::from([
+            FilePreviewUpdate {
+                request_id: 1,
+                path: first.clone(),
+                content: FilePreviewContent::Text {
+                    text: "stale preview".into(),
+                    truncated: false,
+                },
+            },
+            FilePreviewUpdate {
+                request_id: 2,
+                path: latest.clone(),
+                content: FilePreviewContent::Text {
+                    text: "latest preview".into(),
+                    truncated: false,
+                },
+            },
+        ]),
+        file_preview_updates_after_requests: 2,
+        ..FixtureData::default()
+    };
+    let mut input = ScriptedInput(VecDeque::from([
+        key(KeyCode::Char('f')),
+        key(KeyCode::Down),
+        key(KeyCode::Null),
+        key(KeyCode::Char('q')),
+    ]));
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    assert_eq!(
+        run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).unwrap(),
+        None
+    );
+    assert_eq!(
+        data.file_preview_requests,
+        vec![
+            FilePreviewRequest {
+                request_id: 1,
+                path: first,
+            },
+            FilePreviewRequest {
+                request_id: 2,
+                path: latest,
+            },
+        ]
+    );
+    let rendered = rendered_lines(&terminal).join("\n");
+    assert!(rendered.contains("latest preview"));
+    assert!(!rendered.contains("stale preview"));
+}
+
+#[test]
+fn ctrl_r_requests_a_fresh_file_preview_for_the_same_path() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        None,
+        InitialView::Projects,
+    );
+    app.configure_file_preview(true, true);
+    let mut data = FixtureData::default();
+    let mut input = ScriptedInput(VecDeque::from([
+        key(KeyCode::Char('f')),
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('q')),
+    ]));
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    assert_eq!(
+        run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).unwrap(),
+        None
+    );
+    assert_eq!(data.file_preview_requests.len(), 2);
+    assert_eq!(data.file_preview_requests[0].request_id, 1);
+    assert_eq!(data.file_preview_requests[1].request_id, 2);
+    assert_eq!(
+        data.file_preview_requests[0].path,
+        data.file_preview_requests[1].path
+    );
 }
 
 #[test]
@@ -1034,7 +1114,7 @@ fn terminal_loop_applies_every_ready_project_git_update_before_input() {
 #[test]
 fn terminal_loop_requests_and_applies_the_selected_window_preview() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -1094,7 +1174,7 @@ fn terminal_loop_requests_and_applies_the_selected_window_preview() {
 #[test]
 fn on_demand_preview_waits_for_p_before_requesting_text() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -1138,7 +1218,7 @@ fn on_demand_preview_waits_for_p_before_requesting_text() {
 #[test]
 fn commands_cancel_and_restore_the_visible_preview() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -1178,7 +1258,7 @@ fn commands_cancel_and_restore_the_visible_preview() {
 #[test]
 fn mouse_capture_tracks_visible_preview_state() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -1222,7 +1302,7 @@ fn mouse_capture_tracks_visible_preview_state() {
 #[test]
 fn ctrl_r_requests_a_fresh_preview_for_the_same_window() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -1263,7 +1343,7 @@ fn ctrl_r_requests_a_fresh_preview_for_the_same_window() {
 #[test]
 fn ctrl_r_preserves_a_non_default_window_preview_target() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -1309,7 +1389,7 @@ fn ctrl_r_preserves_a_non_default_window_preview_target() {
 #[test]
 fn ctrl_r_preserves_exact_pane_focus() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -1359,7 +1439,7 @@ fn ctrl_r_preserves_exact_pane_focus() {
 #[test]
 fn leaving_windows_cancels_a_pending_preview_request() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -1397,7 +1477,7 @@ fn leaving_windows_cancels_a_pending_preview_request() {
 #[test]
 fn stale_window_preview_updates_cannot_replace_the_new_target() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],
@@ -1445,7 +1525,7 @@ fn stale_window_preview_updates_cannot_replace_the_new_target() {
 #[test]
 fn narrow_window_preview_stacks_below_the_window_list() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
-        "protocol_version": 7,
+        "protocol_version": 8,
         "projects": {
             "api": {
                 "labels": ["current", "open"],

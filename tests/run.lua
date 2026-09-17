@@ -13,7 +13,6 @@ local tests = {
   "tests/tab_split_test.lua",
   "tests/wezterm_example_test.lua",
   "tests/nvim_adapter_test.lua",
-  "tests/nvim_file_preview_test.lua",
 }
 
 local script = arg and arg[0] or "tests/run.lua"

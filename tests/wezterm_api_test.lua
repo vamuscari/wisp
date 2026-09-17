@@ -10,7 +10,7 @@ helper.test("adapter requires its deployed module directory", function()
   end
 
   local loaded, load_error = pcall(function()
-    return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v7")
+    return assert(loadfile "wezterm/init.lua")("/opt/bin/wisp", "wisp-deployment-v8")
   end)
 
   assert(not loaded, "adapter should reject a missing module directory")
