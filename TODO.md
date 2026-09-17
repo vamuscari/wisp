@@ -7,7 +7,7 @@ its expected behavior and verification strategy.
 
 ### OpenCode Tab Status Colors
 
-- [ ] Add opt-in OpenCode status colors to WezTerm tab backgrounds.
+- [x] Add opt-in OpenCode status colors to WezTerm tab backgrounds.
 
 #### Goal
 
@@ -147,9 +147,9 @@ normal tab formatting.
 - [x] Install Wisp `0.11.0`, confirm `wisp --version`, and deploy the new bundle
   without `--replace-incompatible` because deployment schema v7 is unchanged.
 - [x] Refresh the stable OpenCode loader with `wisp opencode install`.
-- [ ] Install Wisp `0.11.1`, confirm `wisp --version`, and deploy the corrected
+- [x] Install Wisp `0.11.1`, confirm `wisp --version`, and deploy the corrected
   bundle without `--replace-incompatible`.
-- [ ] Refresh the stable OpenCode loader after deploying `0.11.1`.
+- [x] Refresh the stable OpenCode loader after deploying `0.11.1`.
 - [ ] Restart OpenCode so the new bundled plugin publishes pane state.
 - [x] Dry-run and push only the managed WezTerm configuration through a reduced
   `~/Artifacts` manifest.
@@ -525,7 +525,7 @@ The decoded pane value should have this conceptual shape:
 - [x] Run `lua tests/run.lua` and `stylua --check .`.
 - [x] Parse the minimum WezTerm test configuration and load the deployed adapter
   in Neovim 0.10.4 locally with the existing CI smoke commands.
-- [ ] Run the minimum WezTerm and Neovim smoke jobs in CI after the `0.11.1`
+- [x] Run the minimum WezTerm and Neovim smoke jobs in CI after the `0.11.1`
   changes are committed and pushed.
 - [x] Update `~/Artifacts/wisp/config.toml` to config version 7, then use the
   reduced `~/Artifacts` manifest to dry-run and push only the managed Wisp TOML
