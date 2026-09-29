@@ -28,6 +28,16 @@ local STATUS_ACTIONS = { projects = true, windows = true, sessions = true }
 local POPUP_DIRECTIONS = { Top = true, Bottom = true, Left = true, Right = true }
 local FILE_OPEN_TARGETS = { window = true, right_pane = true, bottom_pane = true }
 local SINGLE_PANE_BEHAVIORS = { show = true, activate = true }
+local POWERLINE_SHAPES = { arrow = true, slash = true, slant = true, rounded = true, plain = true }
+local POWERLINE_COLOR_FIELDS = {
+  bar_background = true,
+  active_background = true,
+  active_foreground = true,
+  inactive_background = true,
+  inactive_foreground = true,
+  hover_background = true,
+  hover_foreground = true,
+}
 local DEFAULT_STATUS_ITEMS = {
   { name = "opencode", action = "sessions" },
   { name = "directory", action = "projects" },
@@ -39,7 +49,68 @@ local function validate_domain(domain, label)
   end
 end
 
-local function validate(configured)
+local function validate_powerline_shape(shape, label, column_width)
+  if shape == nil then
+    return
+  end
+  if type(shape) == "string" then
+    if not POWERLINE_SHAPES[shape] then
+      error("wisp " .. label .. " shape must be arrow, slash, slant, rounded, plain, or a custom shape")
+    end
+    return
+  end
+  if type(shape) ~= "table" then
+    error("wisp " .. label .. " shape must be a preset name or a custom shape table")
+  end
+  for field in pairs(shape) do
+    if field ~= "left" and field ~= "right" then
+      error("wisp " .. label .. " shape contains unknown field " .. tostring(field))
+    end
+  end
+  for _, field in ipairs { "left", "right" } do
+    local glyph = shape[field]
+    if type(glyph) ~= "string" or glyph == "" then
+      error("wisp " .. label .. " shape " .. field .. " must be a non-empty string")
+    end
+    local measured, width = pcall(column_width, glyph)
+    if not measured or width ~= 1 then
+      error("wisp " .. label .. " shape " .. field .. " must occupy exactly one column")
+    end
+  end
+end
+
+local function validate_powerline_surface(surface, label, allow_colors, column_width)
+  if type(surface) ~= "table" then
+    error("wisp " .. label .. " must be a table")
+  end
+  for field in pairs(surface) do
+    if field ~= "shape" and field ~= "gap" and field ~= "padding" and not (allow_colors and field == "colors") then
+      error("wisp " .. label .. " contains unknown field " .. tostring(field))
+    end
+  end
+  validate_powerline_shape(surface.shape, label, column_width)
+  for _, field in ipairs { "gap", "padding" } do
+    local value = surface[field]
+    if value ~= nil and (type(value) ~= "number" or value < 0 or value ~= math.floor(value)) then
+      error("wisp " .. label .. " " .. field .. " must be a non-negative integer")
+    end
+  end
+  if surface.colors ~= nil then
+    if type(surface.colors) ~= "table" then
+      error("wisp " .. label .. " colors must be a table")
+    end
+    for field, value in pairs(surface.colors) do
+      if not POWERLINE_COLOR_FIELDS[field] then
+        error("wisp " .. label .. " colors contains unknown field " .. tostring(field))
+      end
+      if type(value) ~= "string" or value == "" then
+        error("wisp " .. label .. " colors " .. field .. " must be a non-empty string")
+      end
+    end
+  end
+end
+
+local function validate(configured, column_width)
   if type(configured) ~= "table" then
     error "wisp options must be a table"
   end
@@ -55,12 +126,14 @@ local function validate(configured)
     picker_timeout_seconds = true,
     poll_interval_seconds = true,
     popup = true,
+    powerline = true,
     spawn_domain = true,
     single_pane_behavior = true,
     status_bar = true,
     status_colors = true,
     status_items = true,
     status_interval_seconds = true,
+    tab_button_pickers = true,
     window_preview = true,
     workspace_for_project = true,
     workspace_prefix = true,
@@ -101,11 +174,36 @@ local function validate(configured)
   if configured.status_bar ~= nil and type(configured.status_bar) ~= "boolean" then
     error "wisp status_bar must be a boolean"
   end
+  if configured.tab_button_pickers ~= nil and type(configured.tab_button_pickers) ~= "boolean" then
+    error "wisp tab_button_pickers must be a boolean"
+  end
   if configured.opencode_tab_colors ~= nil and type(configured.opencode_tab_colors) ~= "boolean" then
     error "wisp opencode_tab_colors must be a boolean"
   end
   if configured.opencode_tab_colors == true and configured.status_bar == false then
     error "wisp opencode_tab_colors requires status_bar"
+  end
+  if configured.powerline ~= nil then
+    if type(configured.powerline) ~= "table" then
+      error "wisp powerline must be a table"
+    end
+    for field in pairs(configured.powerline) do
+      if field ~= "tabs" and field ~= "status" then
+        error("wisp powerline contains unknown field " .. tostring(field))
+      end
+    end
+    if configured.powerline.tabs == nil and configured.powerline.status == nil then
+      error "wisp powerline must configure tabs or status"
+    end
+    if configured.powerline.tabs ~= nil then
+      validate_powerline_surface(configured.powerline.tabs, "powerline tabs", true, column_width)
+    end
+    if configured.powerline.status ~= nil then
+      validate_powerline_surface(configured.powerline.status, "powerline status", false, column_width)
+      if configured.status_bar == false then
+        error "wisp powerline status requires status_bar"
+      end
+    end
   end
   if configured.file_open ~= nil then
     if type(configured.file_open) ~= "table" then
@@ -199,14 +297,14 @@ local function validate(configured)
   end
 end
 
-function Options.new(executable_path)
-  local self = setmetatable({ executable_path = executable_path }, Options)
+function Options.new(executable_path, column_width)
+  local self = setmetatable({ executable_path = executable_path, column_width = column_width }, Options)
   self:configure {}
   return self
 end
 
 function Options:configure(configured)
-  validate(configured)
+  validate(configured, self.column_width)
   local spawn_domain = configured.spawn_domain or { DomainName = "local" }
   local status_colors = {}
   for field, value in pairs(DEFAULT_STATUS_COLORS) do
@@ -231,12 +329,14 @@ function Options:configure(configured)
       direction = popup.direction or "Bottom",
       size = popup.size or 0.65,
     },
+    powerline = configured.powerline,
     spawn_domain = spawn_domain,
     single_pane_behavior = configured.single_pane_behavior or "show",
     status_bar = configured.status_bar ~= false,
     status_colors = status_colors,
     status_items = status_items,
     status_interval_seconds = configured.status_interval_seconds or 2,
+    tab_button_pickers = configured.tab_button_pickers == true,
     window_preview = configured.window_preview == true,
     executable_path = self.executable_path,
     workspace_for_project = configured.workspace_for_project,

@@ -132,6 +132,9 @@ local function fixture(result, mux_overrides)
       if value == "RESULT" then
         return result
       end
+      if value == "NEXT" then
+        return mux_overrides.next_result
+      end
       error("unexpected JSON fixture " .. value)
     end,
   }
@@ -141,6 +144,7 @@ local function fixture(result, mux_overrides)
     picker_domain = { DomainName = "unix" },
     single_pane_behavior = mux_overrides.single_pane_behavior,
     window_preview = mux_overrides.window_preview,
+    tab_button_pickers = mux_overrides.tab_button_pickers,
   })
   local window = helper.fake_window(mux_overrides.active_workspace or "wisp:Repos/api", picker_mux)
   local pane = helper.fake_pane(mux_overrides.pane)
@@ -165,6 +169,135 @@ local function fixture(result, mux_overrides)
     wisp = wisp,
   }
 end
+
+helper.test("next OpenCode session action focuses the selected live pane without a popup", function()
+  local activated = 0
+  local target = {
+    window = function()
+      return helper.fake_mux_window "wisp:Repos/api"
+    end,
+    activate = function()
+      activated = activated + 1
+    end,
+  }
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
+    pane = { pane_id = 41 },
+    get_pane = function(id)
+      return id == 99 and target or nil
+    end,
+    next_result = {
+      protocol_version = 8,
+      status = "selected",
+      selection = {
+        kind = "open_code_session",
+        project = projects[1],
+        session_id = "ses_api",
+        opener = { "opencode", "attach", "http://localhost:4096", "--dir", projects[1].path, "--session", "ses_api" },
+        host_item_id = "pane:99",
+      },
+    },
+    run_child_process = function(args)
+      if has_argument(args, "next") then
+        return true, "NEXT", ""
+      end
+      return true, "PROJECTS", ""
+    end,
+  })
+
+  helper.run_callback(
+    test.wisp.next_opencode_session_action { status = "priority", scope = "all" },
+    test.window,
+    test.pane
+  )
+
+  local query = test.child_calls[1]
+  helper.assert_equal(argument_after(query, "--status"), "priority", "priority selector")
+  helper.assert_equal(argument_after(query, "--after-pane-id"), "41", "active pane anchor")
+  helper.assert_equal(activated, 1, "exact session pane focused")
+  helper.assert_equal(#test.picker_mux.spawned, 0, "no temporary picker tab")
+  helper.assert_equal(test.window.performed[1].action.kind, "SwitchToWorkspace", "selected project workspace")
+end)
+
+helper.test("next OpenCode session action scopes the current project and reports empty results", function()
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
+    next_result = { protocol_version = 8, status = "cancelled" },
+    run_child_process = function(args)
+      if has_argument(args, "next") then
+        return true, "NEXT", ""
+      end
+      return true, "PROJECTS", ""
+    end,
+  })
+  helper.run_callback(
+    test.wisp.next_opencode_session_action { scope = "current", status = "permission" },
+    test.window,
+    test.pane
+  )
+
+  helper.assert_equal(argument_after(test.child_calls[2], "--project-path"), projects[1].path, "current project path")
+  helper.assert_equal(argument_after(test.child_calls[2], "--status"), "permission", "permission filter")
+  helper.assert_equal(#test.window.performed, 0, "empty result does not activate a pane")
+  helper.assert_equal(#test.window.toasts, 1, "empty result reports a toast")
+  local valid, option_error = pcall(test.wisp.next_opencode_session_action, { status = "unknown" })
+  assert(not valid and tostring(option_error):match "status must be", "unknown status must be rejected")
+end)
+
+helper.test("tab button routes left to open projects and right to sessions", function()
+  local splits = {}
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
+    tab_button_pickers = true,
+    call_after = function() end,
+    pane = {
+      split = function(command)
+        table.insert(splits, command)
+        return {
+          pane_id = function()
+            return 90 + #splits
+          end,
+        }
+      end,
+    },
+  })
+  local click = assert(test.wezterm.events["new-tab-button-click"])
+  local default_action = { kind = "new-tab" }
+
+  helper.assert_equal(click(test.window, test.pane, "Left", default_action), false, "left consumed")
+  helper.assert_equal(argument_after(splits[1].args, "--initial-view"), "projects", "left picker view")
+  assert(has_argument(splits[1].args, "--open-projects-only"), "left picker scopes projects")
+  helper.assert_equal(click(test.window, test.pane, "Right", default_action), false, "right consumed")
+  helper.assert_equal(argument_after(splits[2].args, "--initial-view"), "sessions", "right picker view")
+  assert(not has_argument(splits[2].args, "--open-projects-only"), "sessions keep all projects")
+  helper.assert_equal(#test.window.performed, 0, "no built-in action for handled clicks")
+  helper.assert_equal(click(test.window, test.pane, "Middle", default_action), nil, "middle retains default")
+  helper.assert_equal(#splits, 2, "middle does not spawn picker")
+end)
+
+helper.test("OpenCode status left click shows all sessions and right click scopes the current project", function()
+  local splits = {}
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
+    call_after = function() end,
+    pane = {
+      split = function(command)
+        table.insert(splits, command)
+        local id = 90 + #splits
+        return {
+          pane_id = function()
+            return id
+          end,
+        }
+      end,
+    },
+  })
+
+  helper.assert_equal(test.wezterm.events["open-uri"](test.window, test.pane, "wisp://status/opencode"), false)
+  assert(has_argument(splits[1].args, "--all-sessions"), "left click lists all sessions")
+  helper.assert_equal(argument_after(splits[1].args, "--initial-view"), "sessions")
+
+  local right = assert(test.wezterm.events["status-action-click"])
+  helper.assert_equal(right(test.window, test.pane, "wisp://status/opencode", "Right"), false)
+  assert(has_argument(splits[2].args, "--current-project-only"), "right click scopes the current project")
+  assert(not has_argument(splits[2].args, "--all-sessions"), "right click is not global")
+end)
 
 helper.test("project query rejects unsupported versions before reading the payload", function()
   local test = fixture({ protocol_version = 8, status = "cancelled" }, {
@@ -666,6 +799,51 @@ helper.test("popup result waits for exact pane closure to succeed", function()
 
   helper.assert_equal(kill_attempts, 2, "popup close retry count")
   helper.assert_equal(#test.window.performed, 0, "cancelled popup host action count")
+end)
+
+helper.test("an already exited popup does not block the next OpenCode sessions click", function()
+  local pane_id = 90
+  local split_calls = {}
+  local test = fixture({ protocol_version = 8, status = "cancelled" }, {
+    get_pane = function()
+      return {
+        pane_id = function()
+          return pane_id
+        end,
+      }
+    end,
+    pane = {
+      split = function(command)
+        pane_id = pane_id + 1
+        table.insert(split_calls, command)
+        local result_path = assert(argument_after(command.args, "--result-file"))
+        local file = assert(io.open(result_path, "wb"))
+        file:write "RESULT"
+        file:close()
+        local id = pane_id
+        return {
+          pane_id = function()
+            return id
+          end,
+        }
+      end,
+    },
+    run_child_process = function(args)
+      if args[2] == "cli" then
+        return false, "", "Error: no such pane " .. args[5]
+      end
+      return true, "PROJECTS", ""
+    end,
+  })
+
+  test.wezterm.events["open-uri"](test.window, test.pane, "wisp://status/opencode")
+  test.wezterm.events["open-uri"](test.window, test.pane, "wisp://status/opencode")
+
+  helper.assert_equal(#split_calls, 2, "both sessions popups launch")
+  helper.assert_equal(argument_after(split_calls[2].args, "--initial-view"), "sessions", "sessions view")
+  for _, log in ipairs(test.wezterm.logs) do
+    assert(not log.message:match "could not close", "exited popup should be treated as closed")
+  end
 end)
 
 helper.test("superseded popup discards its stale result", function()

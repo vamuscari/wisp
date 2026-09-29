@@ -6,15 +6,18 @@ import test from "node:test"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 const canonicalPlugin = fileURLToPath(new URL("../opencode/wisp.js", import.meta.url))
+const canonicalProjectTitle = fileURLToPath(new URL("../opencode/project-title.js", import.meta.url))
 const statusSequence = /^\x1b\]1337;SetUserVar=WISP_OPENCODE_STATUS=([A-Za-z0-9+/=]*)\x1b\\$/
+const defaultSessionTitle = "New session - 2026-09-17T12:34:56.789Z"
+const titleSystemPrompt = "You are a title generator. You output ONLY a thread title. Nothing else."
 
-function session(id, parentID) {
+function session(id, parentID, title = id) {
   return {
     id,
     projectID: "project",
     directory: "/repos/wisp",
     parentID,
-    title: id,
+    title,
     version: "1.18.31",
     time: { created: 1, updated: 1 },
   }
@@ -92,6 +95,7 @@ async function fixture() {
   await mkdir(binDirectory)
   await writeFile(path.join(root, "package.json"), '{"type":"module"}\n')
   await copyFile(canonicalPlugin, pluginPath)
+  await copyFile(canonicalProjectTitle, path.join(pluginDirectory, "project-title.js"))
   await writeFile(
     executable,
     `#!/usr/bin/env node
@@ -104,32 +108,44 @@ appendFileSync(process.env.WISP_PLUGIN_TEST_LOG, JSON.stringify(process.argv.sli
 }
 
 async function withPlugin(run, options = {}) {
-  const { paneID, stdoutWrite } = options
+  const { paneID, stdoutWrite, wispProjectName, wispProjectDirectory, openCodeProjectName } = options
   const sessionID = Object.hasOwn(options, "sessionID") ? options.sessionID : "ses_root"
   const item = await fixture()
   const originalArgv = process.argv
   const originalLog = process.env.WISP_PLUGIN_TEST_LOG
   const originalPane = process.env.WEZTERM_PANE
+  const originalProjectName = process.env.WISP_PROJECT_NAME
+  const originalProjectDirectory = process.env.WISP_PROJECT_DIR
   const originalSetInterval = globalThis.setInterval
   const originalClearInterval = globalThis.clearInterval
+  const originalSetTimeout = globalThis.setTimeout
+  const originalClearTimeout = globalThis.clearTimeout
   const originalDateNow = Date.now
   const originalStdoutWrite = process.stdout.write
   const writes = []
   const state = {
     children: new Map(),
+    sessions: new Map(),
     nowSeconds: 1_700_000_000,
     permissionResponse: undefined,
     permissions: [],
     questions: [],
     statuses: { ses_root: { type: "busy" } },
+    titleUpdates: [],
+    titleUpdateResponse: undefined,
   }
   let heartbeat
+  let startupRefresh
   let hooks
   process.argv = [process.execPath, item.pluginPath]
   if (sessionID) process.argv.push("--session", sessionID)
   process.env.WISP_PLUGIN_TEST_LOG = item.log
   if (paneID === undefined) delete process.env.WEZTERM_PANE
   else process.env.WEZTERM_PANE = paneID
+  if (wispProjectName === undefined) delete process.env.WISP_PROJECT_NAME
+  else process.env.WISP_PROJECT_NAME = wispProjectName
+  if (wispProjectDirectory === undefined) delete process.env.WISP_PROJECT_DIR
+  else process.env.WISP_PROJECT_DIR = wispProjectDirectory
   Date.now = () => state.nowSeconds * 1000
   process.stdout.write = (chunk, ...args) => {
     const write = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk)
@@ -142,6 +158,12 @@ async function withPlugin(run, options = {}) {
     return { unref() {} }
   }
   globalThis.clearInterval = () => {}
+  globalThis.setTimeout = (callback, delay) => {
+    assert.equal(delay, 1_000)
+    startupRefresh = callback
+    return { unref() {} }
+  }
+  globalThis.clearTimeout = () => {}
 
   try {
     const plugin = await import(pathToFileURL(item.pluginPath).href)
@@ -160,20 +182,34 @@ async function withPlugin(run, options = {}) {
         },
         session: {
           children: async ({ path: requestPath }) => ({ data: state.children.get(requestPath.id) ?? [] }),
+          get: async ({ path: requestPath }) => ({ data: state.sessions.get(requestPath.id) }),
           status: async () => ({ data: state.statuses }),
+          update: async (request) => {
+            state.titleUpdates.push(request)
+            if (state.titleUpdateResponse) return state.titleUpdateResponse(request)
+            return { data: session(request.path.id, undefined, request.body.title) }
+          },
         },
       },
       serverUrl: new URL("http://localhost:4096"),
       directory: "/repos/wisp",
       worktree: "/repos/wisp",
+      project: {
+        id: "project",
+        worktree: "/repos/wisp",
+        name: openCodeProjectName,
+        time: { created: 1 },
+      },
     })
     await run({
       hooks,
       state,
       heartbeat: async () => heartbeat(),
+      startupRefresh: async () => startupRefresh?.(),
       latestRegistration: async () => (await registrations(item.log)).at(-1),
       commands: async () => commands(item.log),
       statusPayloads: () => statusPayloads(writes),
+      titleUpdates: () => state.titleUpdates,
       dispose: async () => {
         const activeHooks = hooks
         hooks = undefined
@@ -187,13 +223,299 @@ async function withPlugin(run, options = {}) {
     else process.env.WISP_PLUGIN_TEST_LOG = originalLog
     if (originalPane === undefined) delete process.env.WEZTERM_PANE
     else process.env.WEZTERM_PANE = originalPane
+    if (originalProjectName === undefined) delete process.env.WISP_PROJECT_NAME
+    else process.env.WISP_PROJECT_NAME = originalProjectName
+    if (originalProjectDirectory === undefined) delete process.env.WISP_PROJECT_DIR
+    else process.env.WISP_PROJECT_DIR = originalProjectDirectory
     globalThis.setInterval = originalSetInterval
     globalThis.clearInterval = originalClearInterval
+    globalThis.setTimeout = originalSetTimeout
+    globalThis.clearTimeout = originalClearTimeout
     Date.now = originalDateNow
     process.stdout.write = originalStdoutWrite
     await rm(item.root, { recursive: true, force: true })
   }
 }
+
+test("adds the project prefix while OpenCode generates a root session title", async () => {
+  await withPlugin(async ({ hooks, titleUpdates }) => {
+    await hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: session("ses_title", undefined, defaultSessionTitle) },
+      },
+    })
+    assert.deepEqual(titleUpdates(), [])
+
+    const output = { system: [titleSystemPrompt] }
+    assert.equal(typeof hooks["experimental.chat.system.transform"], "function")
+    await hooks["experimental.chat.system.transform"](
+      { sessionID: "ses_title", model: { id: "small" } },
+      output,
+    )
+
+    assert.equal(output.system[0], titleSystemPrompt)
+    assert.match(output.system.at(-1), /\[wisp\]/)
+    assert.match(output.system.at(-1), /50 characters/)
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("publishes the selected session title as soon as OpenCode updates it", async () => {
+  await withPlugin(async ({ hooks, latestRegistration }) => {
+    await hooks.event({ event: {
+      type: "session.updated",
+      properties: { info: session("ses_root", undefined, "[wisp] Fix status links") },
+    } })
+    assert.equal(option(await latestRegistration(), "--session-title"), "[wisp] Fix status links")
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("uses a project placeholder until the selected session receives a generated title", async () => {
+  await withPlugin(async ({ hooks, latestRegistration }) => {
+    await hooks.event({ event: {
+      type: "session.created",
+      properties: { info: session("ses_root", undefined, defaultSessionTitle) },
+    } })
+    assert.equal(option(await latestRegistration(), "--session-title"), undefined)
+
+    await hooks.event({ event: {
+      type: "session.updated",
+      properties: { info: session("ses_root", undefined, "[wisp] Implement picker") },
+    } })
+    assert.equal(option(await latestRegistration(), "--session-title"), "[wisp] Implement picker")
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("loads an existing selected session title shortly after plugin startup", async () => {
+  await withPlugin(async ({ state, startupRefresh, latestRegistration }) => {
+    state.sessions.set("ses_root", session("ses_root", undefined, "[wisp] Existing title"))
+    await startupRefresh()
+    assert.equal(option(await latestRegistration(), "--session-title"), "[wisp] Existing title")
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("does not alter ordinary system prompts", async () => {
+  await withPlugin(async ({ hooks }) => {
+    await hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: session("ses_title", undefined, defaultSessionTitle) },
+      },
+    })
+    const output = { system: ["You are a coding agent."] }
+
+    await hooks["experimental.chat.system.transform"](
+      { sessionID: "ses_title", model: { id: "large" } },
+      output,
+    )
+
+    assert.deepEqual(output.system, ["You are a coding agent."])
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("adds the project title generation instruction only once", async () => {
+  await withPlugin(async ({ hooks }) => {
+    await hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: session("ses_title", undefined, defaultSessionTitle) },
+      },
+    })
+    const output = { system: [titleSystemPrompt] }
+    const input = { sessionID: "ses_title", model: { id: "small" } }
+
+    await hooks["experimental.chat.system.transform"](input, output)
+    await hooks["experimental.chat.system.transform"](input, output)
+
+    assert.equal(output.system.length, 2)
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("falls back to prefixing an unprefixed generated root title", async () => {
+  await withPlugin(async ({ hooks, titleUpdates }) => {
+    await hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: session("ses_title", undefined, defaultSessionTitle) },
+      },
+    })
+    await hooks.event({
+      event: {
+        type: "session.updated",
+        properties: { info: session("ses_title", undefined, "Fix cache invalidation") },
+      },
+    })
+
+    assert.deepEqual(titleUpdates(), [
+      {
+        path: { id: "ses_title" },
+        query: { directory: "/repos/wisp" },
+        body: { title: "[wisp] Fix cache invalidation" },
+      },
+    ])
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("prefixes updates to a root session that predates plugin startup", async () => {
+  await withPlugin(async ({ hooks, titleUpdates }) => {
+    await hooks.event({
+      event: {
+        type: "session.updated",
+        properties: { info: session("ses_root", undefined, "Fix cache invalidation") },
+      },
+    })
+
+    assert.equal(titleUpdates().length, 1)
+    assert.equal(titleUpdates()[0].body.title, "[wisp] Fix cache invalidation")
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("title generation recognizes a resumed root but not a resumed child", async () => {
+  await withPlugin(async ({ hooks, state }) => {
+    state.sessions.set("ses_root", session("ses_root", undefined, defaultSessionTitle))
+    state.sessions.set("ses_child", session("ses_child", "ses_root", defaultSessionTitle))
+    const rootOutput = { system: [titleSystemPrompt] }
+    const childOutput = { system: [titleSystemPrompt] }
+
+    await hooks["experimental.chat.system.transform"]({ sessionID: "ses_root" }, rootOutput)
+    await hooks["experimental.chat.system.transform"]({ sessionID: "ses_child" }, childOutput)
+
+    assert.match(rootOutput.system.at(-1), /\[wisp\]/)
+    assert.deepEqual(childOutput.system, [titleSystemPrompt])
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("does not rewrite default or already prefixed root titles", async () => {
+  await withPlugin(async ({ hooks, titleUpdates }) => {
+    await hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: session("ses_title", undefined, defaultSessionTitle) },
+      },
+    })
+    await hooks.event({
+      event: {
+        type: "session.updated",
+        properties: { info: session("ses_title", undefined, defaultSessionTitle) },
+      },
+    })
+    await hooks.event({
+      event: {
+        type: "session.updated",
+        properties: { info: session("ses_title", undefined, "[wisp] Fix cache invalidation") },
+      },
+    })
+
+    assert.deepEqual(titleUpdates(), [])
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("prefixes an explicitly titled root session when it is created", async () => {
+  await withPlugin(async ({ hooks, titleUpdates }) => {
+    await hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: session("ses_named", undefined, "Release planning") },
+      },
+    })
+
+    assert.equal(titleUpdates().length, 1)
+    assert.equal(titleUpdates()[0].body.title, "[wisp] Release planning")
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("does not add project titles to child sessions", async () => {
+  await withPlugin(async ({ hooks, titleUpdates }) => {
+    await hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: session("ses_child", "ses_root", "Research API") },
+      },
+    })
+    const output = { system: [titleSystemPrompt] }
+    await hooks["experimental.chat.system.transform"]?.(
+      { sessionID: "ses_child", model: { id: "small" } },
+      output,
+    )
+    await hooks.event({
+      event: {
+        type: "session.updated",
+        properties: { info: session("ses_child", "ses_root", "Research API") },
+      },
+    })
+
+    assert.deepEqual(output.system, [titleSystemPrompt])
+    assert.deepEqual(titleUpdates(), [])
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("uses the OpenCode project name when matching Wisp metadata is unavailable", async () => {
+  await withPlugin(async ({ hooks, titleUpdates }) => {
+    await hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: session("ses_named", undefined, "Release planning") },
+      },
+    })
+
+    assert.equal(titleUpdates().length, 1)
+    assert.equal(titleUpdates()[0].body.title, "[OpenCode Wisp] Release planning")
+  }, { openCodeProjectName: "OpenCode Wisp" })
+})
+
+test("ignores Wisp project metadata from a different project", async () => {
+  await withPlugin(async ({ hooks, titleUpdates }) => {
+    await hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: session("ses_named", undefined, "Release planning") },
+      },
+    })
+
+    assert.deepEqual(titleUpdates(), [])
+    assert.equal(hooks["experimental.chat.system.transform"], undefined)
+  }, { wispProjectName: "other", wispProjectDirectory: "/repos/other" })
+})
+
+test("coalesces concurrent title fallback updates", async () => {
+  await withPlugin(async ({ hooks, state, titleUpdates }) => {
+    await hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: session("ses_title", undefined, defaultSessionTitle) },
+      },
+    })
+    const response = deferred()
+    state.titleUpdateResponse = () => response.promise
+    const event = {
+      event: {
+        type: "session.updated",
+        properties: { info: session("ses_title", undefined, "Fix cache invalidation") },
+      },
+    }
+
+    const first = hooks.event(event)
+    const second = hooks.event(event)
+    assert.equal(titleUpdates().length, 1)
+    response.resolve({ data: session("ses_title", undefined, "[wisp] Fix cache invalidation") })
+    await Promise.all([first, second])
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
+
+test("title update failures do not reject the OpenCode event hook", async () => {
+  await withPlugin(async ({ hooks, state }) => {
+    state.titleUpdateResponse = () => {
+      throw new Error("update unavailable")
+    }
+
+    await assert.doesNotReject(() => hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: session("ses_named", undefined, "Release planning") },
+      },
+    }))
+  }, { wispProjectName: "wisp", wispProjectDirectory: "/repos/wisp" })
+})
 
 test("publishes initial idle after accepting the supported server", async () => {
   await withPlugin(async ({ statusPayloads: payloads }) => {

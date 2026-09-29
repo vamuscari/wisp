@@ -8,7 +8,7 @@ use std::{
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseEvent, MouseEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -188,9 +188,11 @@ pub enum Command {
     None,
     LoadDirectory(PathBuf),
     LoadSessions(PathBuf),
+    LoadAllSessions,
     RefreshProjects,
     RefreshDirectory(PathBuf),
     RefreshSessions(PathBuf),
+    RefreshAllSessions,
     Finish(Selection),
     Cancel,
 }
@@ -223,6 +225,9 @@ pub trait DataSource {
         None
     }
     fn sessions(&mut self, _path: &Path) -> Result<OpenCodeSnapshot, String> {
+        Err("OpenCode integration is not configured".into())
+    }
+    fn all_sessions(&mut self) -> Result<OpenCodeSnapshot, String> {
         Err("OpenCode integration is not configured".into())
     }
     fn refresh_sessions(&mut self, path: &Path) -> Result<OpenCodeSnapshot, String> {
@@ -276,6 +281,9 @@ pub struct App {
     file_preview_visible: bool,
     follow_symlinks: bool,
     context: HostContext,
+    open_projects_only: bool,
+    current_project_only: bool,
+    all_sessions: bool,
     file_columns: Vec<FileColumn>,
     file_focus: usize,
     pending_file_load: Option<(usize, PathBuf)>,
@@ -286,6 +294,7 @@ pub struct App {
     sessions: Vec<OpenCodeSession>,
     session_host_items: BTreeMap<String, String>,
     session_conflicts: BTreeSet<String>,
+    session_project_ids: BTreeMap<String, String>,
     project_query: String,
     detail_query: String,
     pane_query: String,
@@ -313,6 +322,57 @@ pub struct App {
     file_preview_view_state: FilePreviewViewState,
     file_preview_refresh: u64,
     hovered_detail: Option<usize>,
+    armed_mouse_row: Option<MouseRowTarget>,
+    command_scroll: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MouseRowTarget {
+    Project(ProjectTargetKey),
+    Window {
+        project: ProjectTargetKey,
+        window_id: String,
+    },
+    Pane {
+        project: ProjectTargetKey,
+        window_id: String,
+        pane_id: String,
+    },
+    Session {
+        project: ProjectTargetKey,
+        session_id: String,
+    },
+    File {
+        directory: PathBuf,
+        path: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerAction {
+    Activate,
+    OpenWindow,
+    OpenRight,
+    OpenBottom,
+    JumpProject,
+    ShowWindows,
+    ShowFiles,
+    ShowSessions,
+    Parent,
+    TogglePreview,
+    ToggleCommands,
+    EnterSearch,
+    ExitSearch,
+    Refresh,
+    CloseProject,
+    Cancel,
+}
+
+struct ActionControl {
+    action: PickerAction,
+    area: Rect,
+    label: String,
+    enabled: bool,
 }
 
 impl App {
@@ -367,6 +427,9 @@ impl App {
             file_preview_visible: false,
             follow_symlinks,
             context: context.unwrap_or_default(),
+            open_projects_only: false,
+            current_project_only: false,
+            all_sessions: false,
             file_columns: Vec::new(),
             file_focus: 0,
             pending_file_load: None,
@@ -377,6 +440,7 @@ impl App {
             sessions: Vec::new(),
             session_host_items: BTreeMap::new(),
             session_conflicts: BTreeSet::new(),
+            session_project_ids: BTreeMap::new(),
             project_query: String::new(),
             detail_query: String::new(),
             pane_query: String::new(),
@@ -404,6 +468,8 @@ impl App {
             file_preview_view_state: FilePreviewViewState::Disabled,
             file_preview_refresh: 0,
             hovered_detail: None,
+            armed_mouse_row: None,
+            command_scroll: 0,
         };
         app.select_current_project();
         match initial_view {
@@ -514,6 +580,28 @@ impl App {
 
     pub fn configure_file_open_target(&mut self, target: FileOpenTarget) {
         self.file_open_target = target;
+    }
+
+    pub fn configure_open_projects_only(&mut self, enabled: bool) {
+        self.open_projects_only = enabled;
+        self.project_cursor = 0;
+        self.select_current_project();
+    }
+
+    pub fn configure_current_project_only(&mut self, enabled: bool) {
+        self.current_project_only = enabled;
+        self.project_cursor = 0;
+        self.select_current_project();
+    }
+
+    pub fn configure_all_sessions(&mut self, enabled: bool) {
+        self.all_sessions = enabled;
+        if enabled && self.opencode_command.is_some() {
+            self.focus = Focus::Detail;
+            self.right_mode = RightMode::Sessions;
+            self.status = None;
+            self.startup_command = Some(Command::LoadAllSessions);
+        }
     }
 
     pub fn configure_file_preview(&mut self, available: bool, initially_visible: bool) {
@@ -668,32 +756,360 @@ impl App {
         &self.window_preview_state
     }
 
-    pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) {
-        if mouse.kind != MouseEventKind::Moved || !self.window_preview_visible() {
-            return;
+    pub fn handle_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        area: Rect,
+    ) -> Result<Command, NavigationError> {
+        let auxiliary_visible = self.auxiliary_pane == AuxiliaryPane::Commands
+            || self.window_preview_visible()
+            || self.file_preview_visible();
+        let layout = ui_areas(area, auxiliary_visible);
+        if mouse.kind == MouseEventKind::Moved {
+            if !self.window_preview_visible() {
+                return Ok(Command::None);
+            }
+            let Some(detail) = layout.detail else {
+                self.hovered_detail = None;
+                return Ok(Command::None);
+            };
+            let (Some(windows), _) = window_pane_areas(detail, self.pane_focus) else {
+                self.hovered_detail = None;
+                return Ok(Command::None);
+            };
+            let inner = inset(windows, 1);
+            if !contains(inner, mouse.column, mouse.row) {
+                self.hovered_detail = None;
+                return Ok(Command::None);
+            }
+            let items = self.visible_detail_items();
+            let offset = list_offset(self.detail_cursor, items.len(), inner.height as usize);
+            let index = offset.saturating_add(mouse.row.saturating_sub(inner.y) as usize);
+            self.hovered_detail = (index < items.len()).then_some(index);
+            return Ok(Command::None);
         }
-        let layout = ui_areas(area, true);
-        let Some(detail) = layout.detail else {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            self.armed_mouse_row = None;
             self.hovered_detail = None;
-            return;
-        };
-        let (Some(windows), _) = window_pane_areas(detail, self.pane_focus) else {
-            self.hovered_detail = None;
-            return;
-        };
-        let inner = inset(windows, 1);
-        let inside = mouse.column >= inner.x
-            && mouse.column < inner.x.saturating_add(inner.width)
-            && mouse.row >= inner.y
-            && mouse.row < inner.y.saturating_add(inner.height);
-        if !inside {
-            self.hovered_detail = None;
-            return;
+            if self.auxiliary_pane == AuxiliaryPane::Commands {
+                if let Some(auxiliary) = layout.auxiliary {
+                    if contains(inset(auxiliary, 1), mouse.column, mouse.row) {
+                        let (_, max_scroll) = command_control_layout(self, auxiliary);
+                        self.command_scroll = if mouse.kind == MouseEventKind::ScrollUp {
+                            self.command_scroll.saturating_sub(1)
+                        } else {
+                            self.command_scroll.saturating_add(1).min(max_scroll)
+                        };
+                        return Ok(Command::None);
+                    }
+                }
+            }
+            if contains(inset(layout.projects, 1), mouse.column, mouse.row) {
+                self.focus = Focus::Projects;
+                self.pane_focus = false;
+                return if mouse.kind == MouseEventKind::ScrollUp {
+                    self.move_up()
+                } else {
+                    self.move_down()
+                };
+            }
+            if self.right_mode == RightMode::Windows {
+                if let Some(detail) = layout.detail {
+                    let (windows, panes) = window_pane_areas(detail, self.pane_focus);
+                    if windows.is_some_and(|area| contains(inset(area, 1), mouse.column, mouse.row))
+                    {
+                        self.focus = Focus::Detail;
+                        self.pane_focus = false;
+                        return if mouse.kind == MouseEventKind::ScrollUp {
+                            self.move_up()
+                        } else {
+                            self.move_down()
+                        };
+                    }
+                    if panes.is_some_and(|area| contains(inset(area, 1), mouse.column, mouse.row)) {
+                        self.focus = Focus::Detail;
+                        self.pane_focus = true;
+                        return if mouse.kind == MouseEventKind::ScrollUp {
+                            self.move_up()
+                        } else {
+                            self.move_down()
+                        };
+                    }
+                }
+            }
+            if self.right_mode == RightMode::Sessions {
+                if let Some(detail) = layout.detail {
+                    if contains(inset(detail, 1), mouse.column, mouse.row) {
+                        self.focus = Focus::Detail;
+                        self.pane_focus = false;
+                        return if mouse.kind == MouseEventKind::ScrollUp {
+                            self.move_up()
+                        } else {
+                            self.move_down()
+                        };
+                    }
+                }
+            }
+            if self.right_mode == RightMode::Files {
+                if let Some(detail) = layout.detail {
+                    for (depth, column_area) in file_column_areas(self, detail, area.width) {
+                        if contains(inset(column_area, 1), mouse.column, mouse.row) {
+                            self.focus = Focus::Detail;
+                            self.pane_focus = false;
+                            self.align_file_column(depth)?;
+                            return if mouse.kind == MouseEventKind::ScrollUp {
+                                self.move_up()
+                            } else {
+                                self.move_down()
+                            };
+                        }
+                    }
+                }
+            }
+            return Ok(Command::None);
         }
-        let items = self.visible_detail_items();
-        let offset = list_offset(self.detail_cursor, items.len(), inner.height as usize);
-        let index = offset.saturating_add(mouse.row.saturating_sub(inner.y) as usize);
-        self.hovered_detail = (index < items.len()).then_some(index);
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return Ok(Command::None);
+        }
+
+        if let Some(control) = utility_controls(self, layout.utility)
+            .into_iter()
+            .find(|control| contains(control.area, mouse.column, mouse.row))
+        {
+            self.armed_mouse_row = None;
+            return if control.enabled {
+                self.perform_action(control.action)
+            } else {
+                Ok(Command::None)
+            };
+        }
+        if self.auxiliary_pane == AuxiliaryPane::Commands {
+            if let Some(auxiliary) = layout.auxiliary {
+                if let Some(control) = command_controls(self, auxiliary)
+                    .into_iter()
+                    .find(|control| contains(control.area, mouse.column, mouse.row))
+                {
+                    self.armed_mouse_row = None;
+                    return if control.enabled {
+                        self.perform_action(control.action)
+                    } else {
+                        Ok(Command::None)
+                    };
+                }
+            }
+        }
+
+        let project_items = self.visible_project_items();
+        if let Some(index) = list_index_at(
+            layout.projects,
+            self.project_cursor,
+            project_items.len(),
+            mouse.column,
+            mouse.row,
+        ) {
+            let row = MouseRowTarget::Project(project_items[index].target.clone().key());
+            if self.armed_mouse_row.as_ref() == Some(&row) {
+                self.armed_mouse_row = None;
+                return self.drill_project();
+            }
+
+            let previous = self.selected_target_key();
+            self.focus = Focus::Projects;
+            self.pane_focus = false;
+            self.project_cursor = index;
+            self.armed_mouse_row = Some(row);
+            return self.project_changed(previous);
+        }
+        if contains(inset(layout.projects, 1), mouse.column, mouse.row) {
+            self.focus = Focus::Projects;
+            self.pane_focus = false;
+            self.armed_mouse_row = None;
+            return Ok(Command::None);
+        }
+
+        if self.right_mode == RightMode::Windows {
+            if let Some(detail) = layout.detail {
+                let (windows, panes) = window_pane_areas(detail, self.pane_focus);
+                let items = self.visible_detail_items();
+                if let Some(index) = windows.and_then(|area| {
+                    list_index_at(
+                        area,
+                        self.detail_cursor,
+                        items.len(),
+                        mouse.column,
+                        mouse.row,
+                    )
+                }) {
+                    if let Some(DetailTarget::HostWindow(window_id)) =
+                        items.get(index).map(|item| &item.target)
+                    {
+                        let Some(project) = self.selected_target_key() else {
+                            return Ok(Command::None);
+                        };
+                        let row = MouseRowTarget::Window {
+                            project,
+                            window_id: window_id.clone(),
+                        };
+                        if self.armed_mouse_row.as_ref() == Some(&row) {
+                            self.armed_mouse_row = None;
+                            self.focus = Focus::Detail;
+                            self.pane_focus = false;
+                            return self.select_detail();
+                        }
+                        self.focus = Focus::Detail;
+                        self.pane_focus = false;
+                        self.detail_cursor = index;
+                        self.select_active_pane();
+                        self.hovered_detail = None;
+                        self.armed_mouse_row = Some(row);
+                        return Ok(Command::None);
+                    }
+                }
+
+                let items = self.visible_pane_items();
+                if let Some(index) = panes.and_then(|area| {
+                    list_index_at(area, self.pane_cursor, items.len(), mouse.column, mouse.row)
+                }) {
+                    if let Some(DetailTarget::HostPane { window_id, pane_id }) =
+                        items.get(index).map(|item| &item.target)
+                    {
+                        let Some(project) = self.selected_target_key() else {
+                            return Ok(Command::None);
+                        };
+                        let row = MouseRowTarget::Pane {
+                            project,
+                            window_id: window_id.clone(),
+                            pane_id: pane_id.clone(),
+                        };
+                        if self.armed_mouse_row.as_ref() == Some(&row) {
+                            self.armed_mouse_row = None;
+                            self.focus = Focus::Detail;
+                            self.pane_focus = true;
+                            return self.select_detail();
+                        }
+                        self.focus = Focus::Detail;
+                        self.pane_focus = true;
+                        self.pane_cursor = index;
+                        self.hovered_detail = None;
+                        self.armed_mouse_row = Some(row);
+                        return Ok(Command::None);
+                    }
+                }
+                if windows.is_some_and(|area| contains(inset(area, 1), mouse.column, mouse.row)) {
+                    self.focus = Focus::Detail;
+                    self.pane_focus = false;
+                    self.armed_mouse_row = None;
+                    return Ok(Command::None);
+                }
+                if panes.is_some_and(|area| contains(inset(area, 1), mouse.column, mouse.row)) {
+                    self.focus = Focus::Detail;
+                    self.pane_focus = true;
+                    self.armed_mouse_row = None;
+                    return Ok(Command::None);
+                }
+            }
+        }
+
+        if self.right_mode == RightMode::Sessions {
+            if let Some(detail) = layout.detail {
+                let items = self.visible_detail_items();
+                if let Some(index) = list_index_at(
+                    detail,
+                    self.detail_cursor,
+                    items.len(),
+                    mouse.column,
+                    mouse.row,
+                ) {
+                    if let Some(DetailTarget::OpenCodeSession(session_id)) =
+                        items.get(index).map(|item| &item.target)
+                    {
+                        let Some(project) = self.selected_target_key() else {
+                            return Ok(Command::None);
+                        };
+                        let row = MouseRowTarget::Session {
+                            project,
+                            session_id: session_id.clone(),
+                        };
+                        if self.armed_mouse_row.as_ref() == Some(&row) {
+                            self.armed_mouse_row = None;
+                            self.focus = Focus::Detail;
+                            self.pane_focus = false;
+                            return self.select_detail();
+                        }
+                        self.focus = Focus::Detail;
+                        self.pane_focus = false;
+                        self.detail_cursor = index;
+                        self.armed_mouse_row = Some(row);
+                        return Ok(Command::None);
+                    }
+                }
+                if contains(inset(detail, 1), mouse.column, mouse.row) {
+                    self.focus = Focus::Detail;
+                    self.pane_focus = false;
+                    self.armed_mouse_row = None;
+                    return Ok(Command::None);
+                }
+            }
+        }
+
+        if self.right_mode == RightMode::Files {
+            if let Some(detail) = layout.detail {
+                for (depth, column_area) in file_column_areas(self, detail, area.width) {
+                    let items = self.visible_file_items(depth);
+                    let selected = self
+                        .file_columns
+                        .get(depth)
+                        .map_or(0, |column| column.cursor);
+                    let Some(index) =
+                        list_index_at(column_area, selected, items.len(), mouse.column, mouse.row)
+                    else {
+                        if contains(inset(column_area, 1), mouse.column, mouse.row) {
+                            self.focus = Focus::Detail;
+                            self.pane_focus = false;
+                            self.align_file_column(depth)?;
+                            self.armed_mouse_row = None;
+                            return Ok(Command::None);
+                        }
+                        continue;
+                    };
+                    let Some(DetailTarget::Entry(entry)) =
+                        items.get(index).map(|item| &item.target)
+                    else {
+                        continue;
+                    };
+                    let Some(directory) = self
+                        .file_columns
+                        .get(depth)
+                        .map(|column| column.path.clone())
+                    else {
+                        continue;
+                    };
+                    let row = MouseRowTarget::File {
+                        directory,
+                        path: entry.path.clone(),
+                    };
+                    if self.armed_mouse_row.as_ref() == Some(&row) {
+                        self.armed_mouse_row = None;
+                        self.focus = Focus::Detail;
+                        self.align_file_column(depth)?;
+                        return self.select_detail();
+                    }
+                    self.focus = Focus::Detail;
+                    self.align_file_column(depth)?;
+                    if let Some(column) = self.file_columns.get_mut(depth) {
+                        column.cursor = index;
+                    }
+                    self.armed_mouse_row = Some(row);
+                    return Ok(self.preview_selected_file());
+                }
+            }
+        }
+
+        self.armed_mouse_row = None;
+        Ok(Command::None)
     }
 
     fn begin_window_preview(&mut self, request: &WindowPreviewRequest) {
@@ -799,12 +1215,14 @@ impl App {
         } else {
             self.auxiliary_before_commands = self.auxiliary_pane;
             self.auxiliary_pane = AuxiliaryPane::Commands;
+            self.command_scroll = 0;
         }
         self.clear_window_preview();
         self.clear_file_preview();
     }
 
     pub fn replace_projects(&mut self, projects: Vec<Project>) {
+        self.armed_mouse_row = None;
         self.navigator = Navigator::new(projects, self.follow_symlinks);
         self.project_git.clear();
         self.file_columns.clear();
@@ -835,6 +1253,12 @@ impl App {
             };
             (self.file_focus, path)
         });
+        if matches!(
+            &self.armed_mouse_row,
+            Some(MouseRowTarget::File { directory, .. }) if directory == &path
+        ) {
+            self.armed_mouse_row = None;
+        }
         self.file_columns.truncate(depth);
         self.file_columns.push(FileColumn {
             path,
@@ -890,6 +1314,7 @@ impl App {
     }
 
     fn fail_directory_load(&mut self, error: impl Into<String>) {
+        self.armed_mouse_row = None;
         if self.pending_file_focus.is_some() {
             let _ = self.navigator.back();
         }
@@ -912,6 +1337,9 @@ impl App {
     }
 
     pub fn load_sessions(&mut self, snapshot: OpenCodeSnapshot) {
+        if matches!(&self.armed_mouse_row, Some(MouseRowTarget::Session { .. })) {
+            self.armed_mouse_row = None;
+        }
         let selected_session_id = (self.right_mode == RightMode::Sessions)
             .then(|| self.visible_detail_items().get(self.detail_cursor).cloned())
             .flatten()
@@ -924,6 +1352,7 @@ impl App {
         self.sessions = snapshot.sessions;
         self.session_host_items = snapshot.host_items;
         self.session_conflicts = snapshot.conflicts;
+        self.session_project_ids = snapshot.project_ids;
         let visible = self.visible_detail_items();
         self.detail_cursor = selected_session_id
             .and_then(|selected| {
@@ -987,22 +1416,15 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return Ok(Command::None);
         }
+        self.armed_mouse_row = None;
         self.hovered_detail = None;
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return match key.code {
-                KeyCode::Char('c') => Ok(Command::Cancel),
-                KeyCode::Char('t') => self.select_file_open_target(FileOpenTarget::Window),
-                KeyCode::Char('v') => self.select_file_open_target(FileOpenTarget::RightPane),
-                KeyCode::Char('x') => self.select_file_open_target(FileOpenTarget::BottomPane),
-                KeyCode::Char('r') => {
-                    if self.window_preview_visible() {
-                        self.window_preview_refresh = self.window_preview_refresh.wrapping_add(1);
-                    }
-                    if self.file_preview_visible() {
-                        self.file_preview_refresh = self.file_preview_refresh.wrapping_add(1);
-                    }
-                    Ok(self.refresh_command())
-                }
+                KeyCode::Char('c') => self.perform_action(PickerAction::Cancel),
+                KeyCode::Char('t') => self.perform_action(PickerAction::OpenWindow),
+                KeyCode::Char('v') => self.perform_action(PickerAction::OpenRight),
+                KeyCode::Char('x') => self.perform_action(PickerAction::OpenBottom),
+                KeyCode::Char('r') => self.perform_action(PickerAction::Refresh),
                 _ => Ok(Command::None),
             };
         }
@@ -1011,10 +1433,9 @@ impl App {
         }
         match key.code {
             KeyCode::Esc if self.auxiliary_pane == AuxiliaryPane::Commands => {
-                self.toggle_commands();
-                Ok(Command::None)
+                self.perform_action(PickerAction::ToggleCommands)
             }
-            KeyCode::Esc | KeyCode::Char('q') => Ok(Command::Cancel),
+            KeyCode::Esc | KeyCode::Char('q') => self.perform_action(PickerAction::Cancel),
             KeyCode::Left | KeyCode::Char('h') => {
                 if self.focus == Focus::Detail
                     && self.right_mode == RightMode::Windows
@@ -1071,17 +1492,67 @@ impl App {
                 }
                 Ok(Command::None)
             }
-            KeyCode::Enter if self.focus == Focus::Projects => self.drill_project(),
-            KeyCode::Enter => self.select_detail(),
-            KeyCode::Char('o') => self.select_project(),
-            KeyCode::Char('f') => self.show_files(),
-            KeyCode::Char('s') => self.show_sessions(),
-            KeyCode::Char('w') => {
+            KeyCode::Enter => self.perform_action(PickerAction::Activate),
+            KeyCode::Char('o') => self.perform_action(PickerAction::JumpProject),
+            KeyCode::Char('f') => self.perform_action(PickerAction::ShowFiles),
+            KeyCode::Char('s') => self.perform_action(PickerAction::ShowSessions),
+            KeyCode::Char('w') => self.perform_action(PickerAction::ShowWindows),
+            KeyCode::Char('x') => self.perform_action(PickerAction::CloseProject),
+            KeyCode::Char('p') => self.perform_action(PickerAction::TogglePreview),
+            KeyCode::Char('?') => self.perform_action(PickerAction::ToggleCommands),
+            KeyCode::Char('/') => self.perform_action(PickerAction::EnterSearch),
+            KeyCode::Backspace
+                if self.focus == Focus::Detail && self.right_mode == RightMode::Files =>
+            {
+                self.perform_action(PickerAction::Parent)
+            }
+            KeyCode::Backspace
+                if self.focus == Focus::Detail
+                    && self.right_mode == RightMode::Windows
+                    && self.pane_focus =>
+            {
+                self.perform_action(PickerAction::Parent)
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.move_up(),
+            KeyCode::Down | KeyCode::Char('j') => self.move_down(),
+            _ => Ok(Command::None),
+        }
+    }
+
+    fn perform_action(&mut self, action: PickerAction) -> Result<Command, NavigationError> {
+        self.armed_mouse_row = None;
+        match action {
+            PickerAction::Activate => {
+                if self.focus == Focus::Projects {
+                    self.drill_project()
+                } else {
+                    self.select_detail()
+                }
+            }
+            PickerAction::OpenWindow => self.select_file_open_target(FileOpenTarget::Window),
+            PickerAction::OpenRight => self.select_file_open_target(FileOpenTarget::RightPane),
+            PickerAction::OpenBottom => self.select_file_open_target(FileOpenTarget::BottomPane),
+            PickerAction::JumpProject => self.select_project(),
+            PickerAction::ShowWindows => {
                 self.show_windows();
                 Ok(Command::None)
             }
-            KeyCode::Char('x') => self.close_selected_project(),
-            KeyCode::Char('p') => {
+            PickerAction::ShowFiles => self.show_files(),
+            PickerAction::ShowSessions => self.show_sessions(),
+            PickerAction::Parent => {
+                if self.focus == Focus::Detail && self.right_mode == RightMode::Files {
+                    self.back_file()
+                } else if self.focus == Focus::Detail
+                    && self.right_mode == RightMode::Windows
+                    && self.pane_focus
+                {
+                    self.pane_focus = false;
+                    Ok(Command::None)
+                } else {
+                    Ok(Command::None)
+                }
+            }
+            PickerAction::TogglePreview => {
                 match self.right_mode {
                     RightMode::Windows => self.toggle_window_preview(),
                     RightMode::Files => self.toggle_file_preview(),
@@ -1091,44 +1562,100 @@ impl App {
                 }
                 Ok(Command::None)
             }
-            KeyCode::Char('?') => {
+            PickerAction::ToggleCommands => {
                 self.toggle_commands();
                 Ok(Command::None)
             }
-            KeyCode::Char('/') => {
+            PickerAction::EnterSearch => {
                 self.input_mode = InputMode::Search;
                 Ok(Command::None)
             }
-            KeyCode::Backspace
-                if self.focus == Focus::Detail && self.right_mode == RightMode::Files =>
-            {
-                self.back_file()
-            }
-            KeyCode::Backspace
-                if self.focus == Focus::Detail
-                    && self.right_mode == RightMode::Windows
-                    && self.pane_focus =>
-            {
-                self.pane_focus = false;
+            PickerAction::ExitSearch => {
+                self.input_mode = InputMode::Normal;
                 Ok(Command::None)
             }
-            KeyCode::Up | KeyCode::Char('k') => self.move_up(),
-            KeyCode::Down | KeyCode::Char('j') => self.move_down(),
-            _ => Ok(Command::None),
+            PickerAction::Refresh => {
+                if self.window_preview_visible() {
+                    self.window_preview_refresh = self.window_preview_refresh.wrapping_add(1);
+                }
+                if self.file_preview_visible() {
+                    self.file_preview_refresh = self.file_preview_refresh.wrapping_add(1);
+                }
+                Ok(self.refresh_command())
+            }
+            PickerAction::CloseProject => self.close_selected_project(),
+            PickerAction::Cancel => Ok(Command::Cancel),
+        }
+    }
+
+    fn action_available(&self, action: PickerAction) -> bool {
+        if self.input_mode == InputMode::Search
+            && matches!(
+                action,
+                PickerAction::JumpProject
+                    | PickerAction::ShowWindows
+                    | PickerAction::ShowFiles
+                    | PickerAction::ShowSessions
+                    | PickerAction::Parent
+                    | PickerAction::TogglePreview
+                    | PickerAction::ToggleCommands
+                    | PickerAction::EnterSearch
+                    | PickerAction::CloseProject
+            )
+        {
+            return false;
+        }
+        match action {
+            PickerAction::Activate => {
+                if self.focus == Focus::Projects {
+                    !self.visible_project_items().is_empty()
+                } else if self.right_mode == RightMode::Windows && self.pane_focus {
+                    !self.visible_pane_items().is_empty()
+                } else {
+                    !self.visible_detail_items().is_empty()
+                }
+            }
+            PickerAction::OpenWindow | PickerAction::OpenRight | PickerAction::OpenBottom => {
+                self.focus == Focus::Detail
+                    && self.right_mode == RightMode::Files
+                    && self.selected_regular_file().is_some()
+            }
+            PickerAction::JumpProject => self.selected_target().is_some(),
+            PickerAction::ShowWindows
+            | PickerAction::ShowFiles
+            | PickerAction::ShowSessions
+            | PickerAction::Refresh
+            | PickerAction::Cancel => true,
+            PickerAction::Parent => {
+                self.focus == Focus::Detail
+                    && (self.right_mode == RightMode::Files
+                        || (self.right_mode == RightMode::Windows && self.pane_focus))
+            }
+            PickerAction::TogglePreview => match self.right_mode {
+                RightMode::Windows => self.window_preview_available,
+                RightMode::Files => self.file_preview_available,
+                RightMode::Sessions => false,
+            },
+            PickerAction::ToggleCommands => true,
+            PickerAction::EnterSearch => self.input_mode == InputMode::Normal,
+            PickerAction::ExitSearch => self.input_mode == InputMode::Search,
+            PickerAction::CloseProject => {
+                self.focus == Focus::Projects
+                    && self
+                        .visible_project_items()
+                        .get(self.project_cursor)
+                        .is_some_and(|item| item.host_open)
+            }
         }
     }
 
     fn handle_search_key(&mut self, code: KeyCode) -> Result<Command, NavigationError> {
         match code {
-            KeyCode::Esc => {
-                self.input_mode = InputMode::Normal;
-                Ok(Command::None)
-            }
+            KeyCode::Esc => self.perform_action(PickerAction::ExitSearch),
             KeyCode::Backspace => self.edit_query(None),
             KeyCode::Up => self.move_up(),
             KeyCode::Down => self.move_down(),
-            KeyCode::Enter if self.focus == Focus::Projects => self.drill_project(),
-            KeyCode::Enter => self.select_detail(),
+            KeyCode::Enter => self.perform_action(PickerAction::Activate),
             KeyCode::Char(character) => self.edit_query(Some(character)),
             _ => Ok(Command::None),
         }
@@ -1324,13 +1851,22 @@ impl App {
                 }
             }
             DetailTarget::OpenCodeSession(id) => {
+                if id.starts_with("launch:") {
+                    self.status = Some("OpenCode has not selected a session yet".into());
+                    return Ok(Command::None);
+                }
                 if self.session_conflicts.contains(&id) {
                     self.status = Some(format!(
                         "OpenCode session {id} is reported by multiple live servers"
                     ));
                     return Ok(Command::None);
                 }
-                let Some(project_id) = self.selected_project_id().map(str::to_owned) else {
+                let project_id = if self.all_sessions {
+                    self.session_project_ids.get(&id).cloned()
+                } else {
+                    self.selected_project_id().map(str::to_owned)
+                };
+                let Some(project_id) = project_id else {
                     return Ok(Command::None);
                 };
                 let Some(session) = self
@@ -1436,7 +1972,7 @@ impl App {
     }
 
     fn show_sessions(&mut self) -> Result<Command, NavigationError> {
-        if self.selected_workspace_name().is_some() {
+        if self.selected_workspace_name().is_some() && !self.all_sessions {
             self.set_workspace_project_status();
             return Ok(Command::None);
         }
@@ -1463,9 +1999,13 @@ impl App {
         self.pane_cursor = 0;
         self.pane_focus = false;
         self.status = None;
-        Ok(self
-            .selected_project_path()
-            .map_or(Command::None, Command::LoadSessions))
+        if self.all_sessions {
+            Ok(Command::LoadAllSessions)
+        } else {
+            Ok(self
+                .selected_project_path()
+                .map_or(Command::None, Command::LoadSessions))
+        }
     }
 
     fn show_windows(&mut self) {
@@ -1505,6 +2045,51 @@ impl App {
             self.focus = Focus::Projects;
         }
         command_for_outcome(outcome)
+    }
+
+    fn align_file_column(&mut self, target_depth: usize) -> Result<(), NavigationError> {
+        if self.file_columns.get(target_depth).is_none() {
+            return Ok(());
+        }
+        self.cancel_pending_directory_request();
+        let Screen::Directory { path, .. } = self.navigator.screen() else {
+            return Err(NavigationError::InvalidScreen);
+        };
+        let Some(mut current_depth) = self
+            .file_columns
+            .iter()
+            .position(|column| column.path == *path)
+        else {
+            return Err(NavigationError::InvalidScreen);
+        };
+
+        while current_depth > target_depth {
+            let _ = self.navigator.back()?;
+            current_depth -= 1;
+        }
+        while current_depth < target_depth {
+            let next_path = self.file_columns[current_depth + 1].path.clone();
+            let Some(entry) = self.file_columns[current_depth]
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry.path == next_path && entry.kind.is_directory(self.follow_symlinks)
+                })
+                .cloned()
+            else {
+                return Err(NavigationError::InvalidScreen);
+            };
+            let _ = self.navigator.select_entry(
+                &entry,
+                &self.openers,
+                self.file_open_target,
+                true,
+                None,
+            )?;
+            current_depth += 1;
+        }
+        self.file_focus = target_depth;
+        Ok(())
     }
 
     fn close_selected_project(&self) -> Result<Command, NavigationError> {
@@ -1608,16 +2193,22 @@ impl App {
         self.pending_file_focus = None;
         self.queued_file_preview = None;
         self.active_directory_request = None;
-        self.sessions.clear();
-        self.session_host_items.clear();
-        self.session_conflicts.clear();
+        if !self.all_sessions || self.right_mode != RightMode::Sessions {
+            self.sessions.clear();
+            self.session_host_items.clear();
+            self.session_conflicts.clear();
+            self.session_project_ids.clear();
+        }
         self.detail_query.clear();
         self.detail_cursor = 0;
         self.pane_query.clear();
         self.pane_cursor = 0;
         self.pane_focus = false;
         self.status = None;
-        if self.selected_workspace_name().is_some() && self.right_mode != RightMode::Windows {
+        if self.selected_workspace_name().is_some()
+            && self.right_mode != RightMode::Windows
+            && !(self.all_sessions && self.right_mode == RightMode::Sessions)
+        {
             self.right_mode = RightMode::Windows;
             self.sync_auxiliary_pane();
             self.set_workspace_project_status();
@@ -1634,6 +2225,9 @@ impl App {
             }
         }
         if self.right_mode == RightMode::Sessions {
+            if self.all_sessions {
+                return Ok(Command::None);
+            }
             return Ok(self
                 .selected_project_path()
                 .map_or(Command::None, Command::LoadSessions));
@@ -1648,6 +2242,9 @@ impl App {
             }
         }
         if self.focus == Focus::Detail && self.right_mode == RightMode::Sessions {
+            if self.all_sessions {
+                return Command::RefreshAllSessions;
+            }
             if let Some(path) = self.selected_project_path() {
                 return Command::RefreshSessions(path);
             }
@@ -1730,23 +2327,30 @@ impl App {
                 }
             })
             .collect::<Vec<_>>();
+        if self.current_project_only {
+            items.retain(|item| item.status == ProjectStatus::Current);
+        } else if self.open_projects_only {
+            items.retain(|item| item.host_open);
+        }
         let project_count = items.len();
-        items.extend(self.context.workspaces().iter().enumerate().map(
-            |(order, (name, context))| ProjectItem {
-                target: ProjectTarget::Workspace {
-                    name: name.clone(),
-                    context: context.clone(),
+        if !self.open_projects_only && !self.current_project_only {
+            items.extend(self.context.workspaces().iter().enumerate().map(
+                |(order, (name, context))| ProjectItem {
+                    target: ProjectTarget::Workspace {
+                        name: name.clone(),
+                        context: context.clone(),
+                    },
+                    status: if context.current {
+                        ProjectStatus::Current
+                    } else {
+                        ProjectStatus::Open
+                    },
+                    host_current: context.current,
+                    host_open: true,
+                    score: project_count + order,
                 },
-                status: if context.current {
-                    ProjectStatus::Current
-                } else {
-                    ProjectStatus::Open
-                },
-                host_current: context.current,
-                host_open: true,
-                score: project_count + order,
-            },
-        ));
+            ));
+        }
 
         if !self.project_query.is_empty() {
             items.retain_mut(|item| {
@@ -1805,13 +2409,25 @@ impl App {
             .collect(),
             RightMode::Files => unreachable!("files return before host target resolution"),
             RightMode::Sessions => {
-                let ProjectTarget::Project(project) = &target else {
-                    return Vec::new();
+                let selected_project = match &target {
+                    ProjectTarget::Project(project) => Some(project),
+                    ProjectTarget::Workspace { .. } if self.all_sessions => None,
+                    ProjectTarget::Workspace { .. } => return Vec::new(),
                 };
                 self.ordered_sessions()
                     .into_iter()
                     .enumerate()
                     .map(|(score, (session, depth))| {
+                        let project = if self.all_sessions {
+                            self.session_project_ids.get(&session.id).and_then(|id| {
+                                self.navigator
+                                    .projects()
+                                    .iter()
+                                    .find(|project| &project.id == id)
+                            })
+                        } else {
+                            selected_project
+                        };
                         let conflict = self.session_conflicts.contains(&session.id);
                         let state = if conflict {
                             "conflict: multiple live servers".into()
@@ -1820,13 +2436,21 @@ impl App {
                         };
                         DetailItem {
                             label: format!("{}{}", "  ".repeat(depth), session.title),
-                            detail: Some(format!("{} · {state}", session.type_label())),
+                            detail: Some(if self.all_sessions {
+                                format!(
+                                    "{} · {} · {state}",
+                                    project.map_or("Unknown project", |p| p.display_name.as_str()),
+                                    session.type_label()
+                                )
+                            } else {
+                                format!("{} · {state}", session.type_label())
+                            }),
                             pane_id: None,
-                            active: self
-                                .context
-                                .session_item(&project.id, &session.id)
-                                .is_some()
-                                || self.session_host_items.contains_key(&session.id),
+                            active: project.is_some_and(|project| {
+                                self.context
+                                    .session_item(&project.id, &session.id)
+                                    .is_some()
+                            }) || self.session_host_items.contains_key(&session.id),
                             indicator_color: if conflict {
                                 THEME.error
                             } else {
@@ -2604,6 +3228,29 @@ fn inset(area: Rect, amount: u16) -> Rect {
     )
 }
 
+fn contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
+fn list_index_at(
+    area: Rect,
+    selected: usize,
+    item_count: usize,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let inner = inset(area, 1);
+    if !contains(inner, column, row) {
+        return None;
+    }
+    let offset = list_offset(selected, item_count, inner.height as usize);
+    let index = offset.saturating_add(row.saturating_sub(inner.y) as usize);
+    (index < item_count).then_some(index)
+}
+
 fn list_offset(selected: usize, item_count: usize, height: usize) -> usize {
     if height == 0 || item_count <= height {
         0
@@ -2612,6 +3259,103 @@ fn list_offset(selected: usize, item_count: usize, height: usize) -> usize {
             .saturating_sub(height.saturating_sub(1))
             .min(item_count.saturating_sub(height))
     }
+}
+
+fn utility_controls(app: &App, area: Rect) -> Vec<ActionControl> {
+    let inner = inset(area, 1);
+    if inner.width == 0 || inner.height == 0 {
+        return Vec::new();
+    }
+    let long = inner.width >= 90;
+    let specs = if app.input_mode == InputMode::Search {
+        vec![(PickerAction::ExitSearch, "Done", "Esc")]
+    } else {
+        vec![
+            (PickerAction::ShowWindows, "Windows", "W"),
+            (PickerAction::ShowFiles, "Files", "F"),
+            (PickerAction::ShowSessions, "Sessions", "S"),
+            (PickerAction::TogglePreview, "Preview", "P"),
+            (PickerAction::EnterSearch, "Search", "/"),
+            (PickerAction::ToggleCommands, "Commands", "?"),
+        ]
+    };
+    let mut right = inner.x.saturating_add(inner.width);
+    let mut controls = Vec::new();
+    for (action, long_label, short_label) in specs.into_iter().rev() {
+        let label = format!("[{}]", if long { long_label } else { short_label });
+        let width = label.len() as u16;
+        if width > right.saturating_sub(inner.x) {
+            continue;
+        }
+        let x = right - width;
+        controls.push(ActionControl {
+            action,
+            area: Rect::new(x, inner.y, width, 1),
+            label,
+            enabled: app.action_available(action),
+        });
+        right = x.saturating_sub(1);
+    }
+    controls.reverse();
+    controls
+}
+
+fn command_control_layout(app: &App, area: Rect) -> (Vec<ActionControl>, usize) {
+    let inner = inset(area, 1);
+    if inner.width == 0 || inner.height == 0 {
+        return (Vec::new(), 0);
+    }
+    let specs = [
+        (PickerAction::Activate, "Enter Default/Select"),
+        (PickerAction::OpenWindow, "Ctrl-T Window"),
+        (PickerAction::OpenRight, "Ctrl-V Right"),
+        (PickerAction::OpenBottom, "Ctrl-X Bottom"),
+        (PickerAction::ShowWindows, "w Windows"),
+        (PickerAction::ShowFiles, "f Files"),
+        (PickerAction::ShowSessions, "s Sessions"),
+        (PickerAction::JumpProject, "o Jump Project"),
+        (PickerAction::EnterSearch, "/ Search"),
+        (PickerAction::Parent, "Backspace Parent"),
+        (PickerAction::TogglePreview, "p File/Window Preview"),
+        (PickerAction::Refresh, "Ctrl-R Refresh"),
+        (PickerAction::CloseProject, "x Close"),
+        (PickerAction::Cancel, "q/Ctrl-C Cancel"),
+        (PickerAction::ToggleCommands, "?/Esc Close Help"),
+    ];
+    let right = inner.x.saturating_add(inner.width);
+    let mut x = inner.x;
+    let mut row = 0_usize;
+    let mut virtual_controls = Vec::new();
+    for (action, text) in specs {
+        let label = format!("[{text}]");
+        let width = label.len().min(inner.width as usize) as u16;
+        if x > inner.x && x.saturating_add(width) > right {
+            x = inner.x;
+            row = row.saturating_add(1);
+        }
+        virtual_controls.push((action, label, app.action_available(action), x, row, width));
+        x = x.saturating_add(width).saturating_add(1);
+    }
+    let row_count = row.saturating_add(1);
+    let max_scroll = row_count.saturating_sub(inner.height as usize);
+    let scroll = app.command_scroll.min(max_scroll);
+    let controls = virtual_controls
+        .into_iter()
+        .filter_map(|(action, label, enabled, x, row, width)| {
+            let visible_row = row.checked_sub(scroll)?;
+            (visible_row < inner.height as usize).then_some(ActionControl {
+                action,
+                area: Rect::new(x, inner.y.saturating_add(visible_row as u16), width, 1),
+                label,
+                enabled,
+            })
+        })
+        .collect();
+    (controls, max_scroll)
+}
+
+fn command_controls(app: &App, area: Rect) -> Vec<ActionControl> {
+    command_control_layout(app, area).0
 }
 
 fn ui_areas(area: Rect, auxiliary_visible: bool) -> UiAreas {
@@ -2681,6 +3425,26 @@ fn visible_file_column_depths(app: &App, max_columns: usize) -> Vec<usize> {
         .max(count)
         .min(app.file_columns.len());
     (end.saturating_sub(count)..end).collect()
+}
+
+fn file_column_areas(app: &App, area: Rect, screen_width: u16) -> Vec<(usize, Rect)> {
+    let target_columns = if screen_width >= 160 {
+        3
+    } else if screen_width >= 96 {
+        2
+    } else {
+        1
+    };
+    let max_columns = target_columns.min((area.width / 24).max(1) as usize);
+    let depths = visible_file_column_depths(app, max_columns);
+    if depths.is_empty() {
+        return vec![(0, area)];
+    }
+    let constraints = vec![Constraint::Fill(1); depths.len()];
+    depths
+        .into_iter()
+        .zip(Layout::horizontal(constraints).split(area).iter().copied())
+        .collect()
 }
 
 fn render_file_column(frame: &mut Frame, app: &App, depth: usize, area: Rect) {
@@ -2793,8 +3557,16 @@ pub fn render(frame: &mut Frame, app: &App) {
             )
         })
         .collect::<Vec<_>>();
+    let no_open_projects =
+        app.open_projects_only && project_rows.is_empty() && app.project_query.is_empty();
+    let project_offset = list_offset(
+        app.project_cursor,
+        project_rows.len(),
+        inset(projects_area, 1).height as usize,
+    );
     let mut project_state = ListState::default()
-        .with_selected((!project_rows.is_empty()).then_some(app.project_cursor));
+        .with_selected((!project_rows.is_empty()).then_some(app.project_cursor))
+        .with_offset(project_offset);
     frame.render_stateful_widget(
         List::new(project_rows)
             .block(
@@ -2812,26 +3584,17 @@ pub fn render(frame: &mut Frame, app: &App) {
         projects_area,
         &mut project_state,
     );
+    if no_open_projects {
+        frame.render_widget(
+            Paragraph::new("No open projects").style(Style::default().fg(THEME.muted)),
+            inset(projects_area, 1),
+        );
+    }
 
     if app.right_mode == RightMode::Files {
         if let Some(area) = layout.detail {
-            let target_columns = if frame.area().width >= 160 {
-                3
-            } else if frame.area().width >= 96 {
-                2
-            } else {
-                1
-            };
-            let max_columns = target_columns.min((area.width / 24).max(1) as usize);
-            let depths = visible_file_column_depths(app, max_columns);
-            if depths.is_empty() {
-                render_file_column(frame, app, 0, area);
-            } else {
-                let constraints = vec![Constraint::Fill(1); depths.len()];
-                let areas = Layout::horizontal(constraints).split(area);
-                for (depth, area) in depths.into_iter().zip(areas.iter().copied()) {
-                    render_file_column(frame, app, depth, area);
-                }
+            for (depth, area) in file_column_areas(app, area, frame.area().width) {
+                render_file_column(frame, app, depth, area);
             }
         }
     }
@@ -2985,19 +3748,17 @@ pub fn render(frame: &mut Frame, app: &App) {
     if let Some(auxiliary_area) = auxiliary_area {
         if app.auxiliary_pane == AuxiliaryPane::Commands {
             frame.render_widget(
-                Paragraph::new(
-                    "↑/↓ j/k Move   h/l Tab Focus\n\
-                     Enter Default/Select   Ctrl-T Window\n\
-                     Ctrl-V Right   Ctrl-X Bottom\n\
-                     w/f/s View   o Jump Project   / Search\n\
-                     Backspace Parent   p File/Window Preview\n\
-                     Ctrl-R Refresh   x Close\n\
-                     q/Ctrl-C Cancel   ?/Esc Close Help",
-                )
-                .style(Style::default().fg(THEME.muted))
-                .block(Block::default().borders(Borders::ALL).title(" Commands ")),
+                Block::default().borders(Borders::ALL).title(" Commands "),
                 auxiliary_area,
             );
+            for control in command_controls(app, auxiliary_area) {
+                let style = if control.enabled {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(THEME.muted)
+                };
+                frame.render_widget(Paragraph::new(control.label).style(style), control.area);
+            }
         } else if app.right_mode == RightMode::Files {
             let preview = match &app.file_preview_view_state {
                 FilePreviewViewState::Disabled => "Preview disabled".to_string(),
@@ -3083,13 +3844,54 @@ pub fn render(frame: &mut Frame, app: &App) {
         )
     };
     frame.render_widget(
-        Paragraph::new(utility_text).style(utility_style).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::White)),
-        ),
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::White)),
         utility_area,
     );
+    let controls = utility_controls(app, utility_area);
+    let utility_inner = inset(utility_area, 1);
+    let text_width = controls.first().map_or(utility_inner.width, |control| {
+        control
+            .area
+            .x
+            .saturating_sub(utility_inner.x)
+            .saturating_sub(1)
+    });
+    frame.render_widget(
+        Paragraph::new(utility_text).style(utility_style),
+        Rect::new(
+            utility_inner.x,
+            utility_inner.y,
+            text_width,
+            utility_inner.height,
+        ),
+    );
+    for control in controls {
+        let active = match control.action {
+            PickerAction::ShowWindows => app.right_mode == RightMode::Windows,
+            PickerAction::ShowFiles => app.right_mode == RightMode::Files,
+            PickerAction::ShowSessions => app.right_mode == RightMode::Sessions,
+            PickerAction::TogglePreview => {
+                app.window_preview_visible() || app.file_preview_visible()
+            }
+            PickerAction::ToggleCommands => app.auxiliary_pane == AuxiliaryPane::Commands,
+            PickerAction::EnterSearch | PickerAction::ExitSearch => {
+                app.input_mode == InputMode::Search
+            }
+            _ => false,
+        };
+        let style = if !control.enabled {
+            Style::default().fg(THEME.muted)
+        } else if active {
+            Style::default()
+                .fg(THEME.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        frame.render_widget(Paragraph::new(control.label).style(style), control.area);
+    }
 }
 
 pub fn run<D: DataSource>(mut app: App, data: &mut D) -> Result<Option<Selection>, TuiError> {
@@ -3158,11 +3960,18 @@ where
         let mut requested_file_preview_target = None;
         let mut file_preview_request_id = 0_u64;
         let mut directory_request_id = 0_u64;
-        if let Some(Command::LoadSessions(path)) = app.take_startup_command() {
-            match data.sessions(&path) {
+        input.set_mouse_capture(true)?;
+        mouse_capture_enabled = true;
+        match app.take_startup_command() {
+            Some(Command::LoadSessions(path)) => match data.sessions(&path) {
                 Ok(snapshot) => app.load_sessions(snapshot),
                 Err(error) => app.set_status(error),
-            }
+            },
+            Some(Command::LoadAllSessions) => match data.all_sessions() {
+                Ok(snapshot) => app.load_sessions(snapshot),
+                Err(error) => app.set_status(error),
+            },
+            _ => {}
         }
         loop {
             while let Some(update) = data.directory_update() {
@@ -3170,11 +3979,6 @@ where
             }
             if let Some(path) = app.take_file_preview_request() {
                 issue_directory_request(app, data, &mut directory_request_id, path, false);
-            }
-            let desired_mouse_capture = app.window_preview_visible();
-            if desired_mouse_capture != mouse_capture_enabled {
-                input.set_mouse_capture(desired_mouse_capture)?;
-                mouse_capture_enabled = desired_mouse_capture;
             }
             let preview_target = app
                 .window_preview_target()
@@ -3222,8 +4026,13 @@ where
                 app.set_active_project_git(&project_id, git);
             }
             if app.right_mode == RightMode::Sessions && data.session_updates_pending() {
-                if let Some(path) = app.selected_project_path() {
-                    match data.sessions(&path) {
+                let updated = if app.all_sessions {
+                    Some(data.all_sessions())
+                } else {
+                    app.selected_project_path().map(|path| data.sessions(&path))
+                };
+                if let Some(updated) = updated {
+                    match updated {
                         Ok(snapshot) => app.load_sessions(snapshot),
                         Err(error) => app.set_status(error),
                     }
@@ -3237,8 +4046,7 @@ where
                 InputEvent::Key(key) => app.handle_key(key)?,
                 InputEvent::Mouse(mouse) => {
                     let size = terminal.size()?;
-                    app.handle_mouse(mouse, Rect::new(0, 0, size.width, size.height));
-                    Command::None
+                    app.handle_mouse(mouse, Rect::new(0, 0, size.width, size.height))?
                 }
                 InputEvent::Resize => Command::None,
             };
@@ -3248,6 +4056,10 @@ where
                     issue_directory_request(app, data, &mut directory_request_id, path, false)
                 }
                 Command::LoadSessions(path) => match data.sessions(&path) {
+                    Ok(snapshot) => app.load_sessions(snapshot),
+                    Err(error) => app.set_status(error),
+                },
+                Command::LoadAllSessions => match data.all_sessions() {
                     Ok(snapshot) => app.load_sessions(snapshot),
                     Err(error) => app.set_status(error),
                 },
@@ -3271,6 +4083,10 @@ where
                     issue_directory_request(app, data, &mut directory_request_id, path, true)
                 }
                 Command::RefreshSessions(path) => match data.refresh_sessions(&path) {
+                    Ok(snapshot) => app.load_sessions(snapshot),
+                    Err(error) => app.set_status(error),
+                },
+                Command::RefreshAllSessions => match data.all_sessions() {
                     Ok(snapshot) => app.load_sessions(snapshot),
                     Err(error) => app.set_status(error),
                 },

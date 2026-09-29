@@ -43,6 +43,59 @@ helper.test("OpenCode tab colors are opt-in and require a boolean", function()
   assert_config_error({ opencode_tab_colors = true, status_bar = false }, "requires status_bar")
 end)
 
+helper.test("tab button pickers are opt-in and require a boolean", function()
+  local wezterm = helper.fake_wezterm()
+  local wisp = helper.load_wezterm_adapter(wezterm)
+  local config = {}
+  wisp.apply_to_config(config, {})
+  helper.assert_equal(wezterm.events["new-tab-button-click"], nil, "default button handler")
+  wisp.apply_to_config(config, { tab_button_pickers = true })
+  assert(wezterm.events["new-tab-button-click"], "enabled button handler")
+  helper.assert_equal(config.show_new_tab_button_in_tab_bar, true, "visible button")
+  assert_config_error({ tab_button_pickers = "yes" }, "tab_button_pickers")
+end)
+
+helper.test("Powerline tab and status surfaces accept preset and custom shapes", function()
+  local wezterm = helper.fake_wezterm()
+  local wisp = helper.load_wezterm_adapter(wezterm)
+
+  for _, shape in ipairs { "arrow", "slash", "slant", "rounded", "plain" } do
+    wisp.apply_to_config({}, { powerline = { tabs = { shape = shape } } })
+  end
+
+  wisp.apply_to_config({}, {
+    powerline = {
+      tabs = {
+        shape = "slant",
+        gap = 1,
+        padding = 1,
+      },
+      status = {
+        shape = { left = "<", right = ">" },
+        gap = 2,
+        padding = 0,
+      },
+    },
+  })
+end)
+
+helper.test("Powerline options reject malformed surfaces shapes spacing and colors", function()
+  assert_config_error({ powerline = true }, "powerline must be a table")
+  assert_config_error({ powerline = {} }, "tabs or status")
+  assert_config_error({ powerline = { unknown = {} } }, "unknown field unknown")
+  assert_config_error({ powerline = { tabs = false } }, "powerline tabs must be a table")
+  assert_config_error({ powerline = { tabs = { unknown = true } } }, "tabs contains unknown field unknown")
+  assert_config_error({ powerline = { tabs = { shape = "missing" } } }, "shape")
+  assert_config_error({ powerline = { tabs = { shape = { left = "<" } } } }, "right")
+  assert_config_error({ powerline = { tabs = { shape = { left = "<<", right = ">" } } } }, "one column")
+  assert_config_error({ powerline = { tabs = { gap = -1 } } }, "gap")
+  assert_config_error({ powerline = { tabs = { padding = 0.5 } } }, "padding")
+  assert_config_error({ powerline = { tabs = { colors = false } } }, "colors must be a table")
+  assert_config_error({ powerline = { tabs = { colors = { unknown = "#000000" } } } }, "unknown")
+  assert_config_error({ powerline = { tabs = { colors = { active_background = "" } } } }, "active_background")
+  assert_config_error({ powerline = { status = {} }, status_bar = false }, "requires status_bar")
+end)
+
 helper.test("single-pane behavior is strict and defaults to showing panes", function()
   local wezterm = helper.fake_wezterm()
   local wisp = helper.load_wezterm_adapter(wezterm)

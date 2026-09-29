@@ -32,7 +32,7 @@ local function parse_pane_status(value, now)
   return state, priority
 end
 
-function Status.new(wezterm, options, client, providers, activate)
+function Status.new(wezterm, options, client, providers, powerline, activate)
   local clickable = pcall(function()
     wezterm.format {
       { Hyperlink = "wisp://status/probe" },
@@ -43,6 +43,7 @@ function Status.new(wezterm, options, client, providers, activate)
   return setmetatable({
     wezterm = wezterm,
     options = options,
+    powerline = powerline,
     client = client,
     providers = providers,
     activate = activate,
@@ -181,13 +182,15 @@ function Status:render(window, pane)
   local colors = self.options:get().status_colors
   local workspace_color = checked_leader and leader_is_active and colors.active_workspace_background
     or colors.workspace_background
+  local powerline_status = self.powerline:get().status
   local items = self.providers:render(self.options:get().status_items, {
     colors = colors,
     counts = self.counts,
     flashes = self.flashes,
+    powerline = powerline_status,
     project = project,
     workspace_color = workspace_color,
-  }, self.clickable)
+  }, self.clickable, self.powerline)
   if self.options:get().opencode_tab_colors then
     -- WezTerm has no tab-bar invalidation API, so vary an invisible status marker to force a freshness redraw.
     local tab_refresh_marker = not self.tab_refresh_markers[window]
@@ -198,20 +201,23 @@ function Status:render(window, pane)
   window:set_right_status(self.wezterm.format(items))
 end
 
-function Status:format_tab_title(tab, max_width)
+function Status:format_tab_title(tab, tabs, hover, max_width)
   local state
   local priority = 0
-  local now = os.time()
-  for _, pane in ipairs(tab.panes) do
-    local user_vars = pane.user_vars
-    local pane_state, pane_priority =
-      parse_pane_status(type(user_vars) == "table" and user_vars[OPENCODE_STATUS_USER_VAR] or nil, now)
-    if pane_priority and pane_priority > priority then
-      state = pane_state
-      priority = pane_priority
+  if self.options:get().opencode_tab_colors then
+    local now = os.time()
+    for _, pane in ipairs(tab.panes) do
+      local user_vars = pane.user_vars
+      local pane_state, pane_priority =
+        parse_pane_status(type(user_vars) == "table" and user_vars[OPENCODE_STATUS_USER_VAR] or nil, now)
+      if pane_priority and pane_priority > priority then
+        state = pane_state
+        priority = pane_priority
+      end
     end
   end
-  if not state then
+  local powerline_tabs = self.powerline:get().tabs
+  if not state and not powerline_tabs then
     return
   end
 
@@ -219,8 +225,69 @@ function Status:format_tab_title(tab, max_width)
   if type(title) ~= "string" or title == "" then
     title = tab.active_pane.title
   end
-  title = self.wezterm.truncate_right(title, max_width)
   local colors = self.options:get().status_colors
+  if powerline_tabs then
+    local first_tab = tabs[1]
+    local flush_left = first_tab and first_tab.tab_id == tab.tab_id
+    local background
+    local foreground
+    local tab_colors = powerline_tabs.colors
+    if tab.is_active then
+      background = tab_colors.active_background
+      foreground = tab_colors.active_foreground
+    elseif state then
+      background = colors[OPENCODE_STATE_COLOR[state]]
+      foreground = colors.foreground
+    elseif hover then
+      background = tab_colors.hover_background
+      foreground = tab_colors.hover_foreground
+    else
+      background = tab_colors.inactive_background
+      foreground = tab_colors.inactive_foreground
+    end
+    if max_width <= 0 then
+      return {}
+    end
+    local remaining = max_width - (title == "" and 0 or 1)
+    local right = powerline_tabs.right
+    if powerline_tabs.right_width > remaining then
+      right = ""
+    else
+      remaining = remaining - powerline_tabs.right_width
+    end
+    local left = flush_left and "" or powerline_tabs.left
+    if not flush_left then
+      if powerline_tabs.left_width > remaining then
+        left = ""
+      else
+        remaining = remaining - powerline_tabs.left_width
+      end
+    end
+    local padding_width = math.min(powerline_tabs.padding, math.floor(remaining / 2))
+    remaining = remaining - padding_width * 2
+    local gap = math.min(powerline_tabs.gap, remaining)
+    remaining = remaining - gap
+    title = self.wezterm.truncate_right(title, remaining + (title == "" and 0 or 1))
+    local padding = string.rep(" ", padding_width)
+    local body = {
+      { Background = { Color = background } },
+      { Foreground = { Color = foreground } },
+      { Attribute = { Intensity = tab.is_active and "Bold" or "Normal" } },
+      { Text = padding .. title .. padding },
+    }
+    return self.powerline:segment(
+      body,
+      background,
+      background,
+      { left = left, right = right, gap = gap },
+      true,
+      tab_colors.bar_background,
+      flush_left,
+      false
+    )
+  end
+
+  title = self.wezterm.truncate_right(title, max_width)
   return {
     { Background = { Color = colors[OPENCODE_STATE_COLOR[state]] } },
     { Foreground = { Color = colors.foreground } },
@@ -229,10 +296,14 @@ function Status:format_tab_title(tab, max_width)
   }
 end
 
-function Status:activate_provider(window, pane, provider_name)
+function Status:activate_provider(window, pane, provider_name, button)
   for _, item in ipairs(self.options:get().status_items) do
     if item.name == provider_name and item.action then
-      self.activate(window, pane, item.action)
+      local scope
+      if provider_name == "opencode" and item.action == "sessions" then
+        scope = button == "Right" and "current" or "all"
+      end
+      self.activate(window, pane, item.action, scope)
       return
     end
   end
@@ -259,12 +330,25 @@ function Status:install(safely)
     end
     return false
   end)
+  self.wezterm.on("status-action-click", function(window, pane, uri, button)
+    local provider_name = type(uri) == "string" and uri:match "^wisp://status/([%w_-]+)$" or nil
+    if provider_name ~= "opencode" or button ~= "Right" then
+      return
+    end
+    local activated, activate_error = pcall(function()
+      self:activate_provider(window, pane, provider_name, button)
+    end)
+    if not activated then
+      self:report_error("wisp status action failed: " .. tostring(activate_error))
+    end
+    return false
+  end)
 end
 
-function Status:install_tab_colors()
-  self.wezterm.on("format-tab-title", function(tab, _, _, _, _, max_width)
+function Status:install_tab_formatter()
+  self.wezterm.on("format-tab-title", function(tab, tabs, _, _, hover, max_width)
     local formatted, result = pcall(function()
-      return self:format_tab_title(tab, max_width)
+      return self:format_tab_title(tab, tabs, hover, max_width)
     end)
     if not formatted then
       self.wezterm.log_error("wisp tab status format failed: " .. tostring(result))

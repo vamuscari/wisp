@@ -22,6 +22,10 @@ local wisp = dofile(config_home .. "/wezterm/wisp/init.lua")
 wisp.apply_to_config(config, {
   opencode_tab_colors = true,
   picker_binding = { key = "f", mods = "CTRL|SHIFT" },
+  powerline = {
+    tabs = { shape = "slant" },
+    status = { shape = "rounded" },
+  },
   spawn_domain = { DomainName = "local" },
 })
 

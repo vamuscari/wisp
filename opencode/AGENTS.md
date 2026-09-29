@@ -15,3 +15,4 @@
 ## Debugging
 
 - OpenCode's permission and question `message=asking` log lines omit `sessionID`. Correlate their `run=` value with nearby `process` or `stream` lines, then use `created ... parentID=` entries to establish root and child ownership.
+- If tracking is empty and OpenCode logs `unsupported Wisp deployment version`, compare the global loader's baked schema with the active deployment before debugging plugin events. This mismatch fails before bundled `opencode/wisp.js` is imported.

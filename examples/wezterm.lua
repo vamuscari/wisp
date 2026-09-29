@@ -5,7 +5,13 @@ config.leader = { key = "Space", mods = "CTRL", timeout_milliseconds = 1000 }
 
 local wisp = dofile(wezterm.config_dir .. "/wisp/init.lua")
 wisp.apply_to_config(config, {
+  opencode_tab_colors = true,
+  powerline = {
+    tabs = { shape = "slant" },
+    status = { shape = "slant" },
+  },
   spawn_domain = { DomainName = "local" },
+  tab_button_pickers = true,
   status_items = {
     { name = "opencode", action = "sessions" },
     { name = "directory", action = "projects" },

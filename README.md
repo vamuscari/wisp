@@ -185,7 +185,8 @@ wisp pick --result-file <path> --host-context-file <path> \
   [--active-project-path <path>] [--active-file <path>] \
   [--file-open-target window|right-pane|bottom-pane] \
   [--file-preview] \
-  --initial-view projects|windows|sessions [--disable-sessions]
+  --initial-view projects|windows|sessions [--disable-sessions] \
+  [--open-projects-only] [--all-sessions | --current-project-only]
 wisp projects --json
 wisp refresh
 wisp cache clear
@@ -196,6 +197,8 @@ wisp deploy status --json
 wisp deploy prune
 wisp opencode install
 wisp opencode status --json
+wisp opencode next [--status any|error|permission|finished|running|priority] \
+  [--project-path <path>] [--after-pane-id <id>]
 wisp open <selection-json>
 ```
 
@@ -210,6 +213,11 @@ Adapters use `--active-project-path` and `--active-file` to identify the
 originating editor context. Wisp accepts the file only when it is inside the
 resolved active project. It prefers a matching explicit project, then a mapped
 host-current project, then the deepest project containing the active file.
+`--open-projects-only` requires `--host-context-file` and limits the Projects
+column to Wisp projects with a current or open mux workspace.
+`--all-sessions` shows live registered sessions across configured projects;
+`--current-project-only` requires `--host-context-file` and limits the picker
+to the current Wisp project.
 
 `open` is the only command that executes a resolved opener. It launches argv
 directly without a shell. For example:
@@ -219,7 +227,9 @@ wisp pick --result-file /tmp/wisp-selection.json
 wisp open "$(cat /tmp/wisp-selection.json)"
 ```
 
-## Picker Keys
+## Picker Input
+
+### Keyboard
 
 | Key | Action |
 | --- | --- |
@@ -241,6 +251,29 @@ wisp open "$(cat /tmp/wisp-selection.json)"
 | `Ctrl-R` | Force-refresh projects and open-project Git, or the active detail listing; also refresh a visible Preview |
 | `Esc` | Close Commands when visible; otherwise cancel |
 | `q`, `Ctrl-C` | Cancel |
+
+### Mouse
+
+| Input | Action |
+| --- | --- |
+| First left click on a row | Focus, select, and arm that Project, Window, Pane, file, directory, or session |
+| Second consecutive left click on the same row | Perform that row's `Enter` action |
+| Left click on a control | Perform the labeled action immediately |
+| Wheel over a list | Focus that list and move its selection one row per event |
+| Wheel over Commands | Scroll the clickable action palette when it is constrained |
+| Move over Windows while Preview is visible | Preview the hovered Window without changing keyboard selection |
+
+The first click always arms a row, even if it was already selected by the
+keyboard. Keyboard input, wheel movement, another click target, or replacement
+of that row's data clears the arm; loading a selected directory's child column
+does not. Right-click, middle-click, drag, and horizontal wheel events are
+ignored.
+
+Wisp enables terminal mouse capture for the entire picker session and restores
+it on every exit path. Terminal-native text selection may therefore require the
+terminal's mouse-bypass modifier while the picker is open.
+
+### Behavior
 
 In search mode, printable characters, including `p`, `?`, and `o`, update the
 focused pane's query, `Backspace` edits it, `Esc` returns to normal mode while
@@ -286,8 +319,10 @@ always create a duplicate in their explicit target and do nothing on a
 directory.
 There is no application title bar. A white-bordered utility bar at the bottom
 shows the current mode and view, becomes the focused query input during search,
-and reports status errors. Command hints live in the `?` Commands pane, which
-uses the Preview region and restores its previous state when closed.
+and reports status errors. Its context-aware controls switch views and expose
+Preview, Search, and Commands. The `?` Commands pane is a clickable action
+palette, uses the Preview region, wraps and scrolls when constrained, dims
+unavailable actions, and restores the previous auxiliary pane when closed.
 Files and OpenCode sessions are unavailable for a host-only workspace. Pressing
 `x` on a host-current or host-open row returns a host action rather than
 terminating processes directly. The WezTerm adapter applies it by closing every
@@ -324,10 +359,15 @@ local wisp = dofile(wezterm.config_dir .. "/wisp/init.lua")
 wisp.apply_to_config(config, {
   spawn_domain = { DomainName = "local" },
   opencode_tab_colors = true,
+  powerline = {
+    tabs = { shape = "slant", gap = 1, padding = 1 },
+    status = { shape = "slant", gap = 1, padding = 1 },
+  },
   status_items = {
     { name = "opencode", action = "sessions" },
     { name = "directory", action = "projects" },
   },
+  tab_button_pickers = true,
   popup = { direction = "Bottom", size = 0.65 },
   window_preview = true,
   file_open = { default = "window" },
@@ -357,28 +397,84 @@ running counts, and optional waiting and failure counts. Failure is the sum of
 retrying and error registrations. Waiting and failure are hidden at zero; each
 flashes three times when it becomes nonzero, then remains solid. Counts refresh
 every two seconds and retain their last valid values across transient failures.
-`directory` shows the short workspace name. On a capable WezTerm build, clicking
-the default providers opens Sessions or Projects in Wisp's popup. Set
+`directory` shows the short workspace name. On a capable WezTerm build,
+left-clicking `OC` or any count opens a popup with live sessions across all
+configured projects; right-clicking `OC` opens sessions for only the current
+project. Left-clicking `directory` opens Projects. Set
 `status_bar = false` to leave the right status area untouched.
+
+Upstream WezTerm does not currently support clickable right-status format
+segments. With `tab_button_pickers = true`, the built-in `+` tab-bar button
+provides a click target without a custom WezTerm build: **left-click** opens a
+popup listing only Wisp projects with open mux workspaces, **right-click** opens
+the Sessions picker (including idle and waiting sessions for the selected
+project; choose another project to see its sessions), and **middle-click**
+keeps WezTerm's normal new-tab behavior. If there are no open Wisp projects,
+the left-click popup says `No open projects`. This opt-in shows the `+` button
+even if `show_new_tab_button_in_tab_bar` was set to `false`; it owns WezTerm's
+`new-tab-button-click` event. The OC and directory status segments remain
+informational on unpatched WezTerm builds.
+
+The optional `powerline` table adds shaped, filled segments independently to
+`tabs`, `status`, or both. Each surface defaults to the filled `slant` shape with
+one cell of padding and one cell of separation. In the right status, the `OC`
+label and all of its differently colored counts form one shaped provider group;
+the directory is a separate group. Provider caps remain clickable, while the
+gap between providers does not belong to either action. The first tab starts
+flush against the left screen edge, and the final status provider ends flush
+against the right edge; caps remain on every interior edge.
+
+Powerline tabs force `use_fancy_tab_bar = false` and give Wisp ownership of the
+bar background plus active, inactive, and hover colors. A partial `colors` table
+can override `bar_background`, `active_background`, `active_foreground`,
+`inactive_background`, `inactive_foreground`, `hover_background`, and
+`hover_foreground`; omitted values use the built-in OldBook palette. Wisp merges
+these fields into `config.colors.tab_bar` without removing unrelated tab-bar
+settings.
+
+Available shapes are `arrow`, `slash`, `slant`, `rounded`, and `plain`.
+`slant` uses filled diagonal caps, while `slash` uses outlined diagonal
+separators. A custom shape supplies one display-column glyph for each cap:
+
+```lua
+powerline = {
+  tabs = {
+    shape = {
+      left = wezterm.nerdfonts.ple_lower_right_triangle,
+      right = wezterm.nerdfonts.ple_upper_left_triangle,
+    },
+  },
+}
+```
+
+WezTerm validates custom cap width through `wezterm.column_width`. No patched
+primary font is required: supported WezTerm releases expose the presets through
+`wezterm.nerdfonts`, include `Nerd Font Symbols Font` as a fallback, and draw
+these Powerline codepoints as custom block glyphs. A configuration using Menlo
+or another unpatched primary font therefore works without a font change.
 
 Set `opencode_tab_colors = true` to color each tab containing a fresh OpenCode
 pane. Wisp inspects every pane snapshot in that tab and uses the most urgent
 state in `waiting > failure > running > idle` order. Those states use
 `waiting_background`, `failure_background`, `running_background`, and
 `idle_background` from `status_colors`; colors are steady even when the matching
-right-status counts flash. Active colored tabs use bold titles. Explicit tab
-titles are preserved, with the active pane title as fallback, and unaffected
-tabs retain WezTerm's configured active, inactive, and hover formatting.
+right-status counts flash. With Powerline, the selected tab always uses the
+configured active palette and a bold title, while OpenCode state colors remain
+visible on inactive tabs. Explicit tab titles are preserved, with the active
+pane title as fallback. Without Powerline, unaffected tabs retain WezTerm's
+configured formatting. With Powerline tabs, unaffected tabs use the configured
+inactive and hover palette.
 
 The bundled OpenCode plugin publishes pane-local state on events and renews it
 every 30 seconds. Wisp ignores malformed values, future timestamps, and state
 older than 90 seconds, while normal plugin shutdown clears the state
 immediately. The option defaults to `false`. WezTerm executes only its first
-`format-tab-title` handler, so enabling this option gives Wisp ownership of that
-event and any other tab-title customization must be incorporated into Wisp.
-The option requires `status_bar = true`: Wisp varies a zero-width status format
-attribute on each update so WezTerm recomputes tab freshness without changing
-the visible right status.
+`format-tab-title` handler, so enabling this option or Powerline tabs gives Wisp
+ownership of that event and any other tab-title customization must be
+incorporated into Wisp. When both are enabled, Wisp installs one formatter.
+OpenCode tab colors require `status_bar = true`: Wisp varies a zero-width status
+format attribute on each update so WezTerm recomputes tab freshness without
+changing the visible right status.
 
 The picker actions query `wisp projects --json`, snapshot every live workspace,
 tab, and pane, map configured project workspaces to `current`, `open`, and `new`
@@ -433,10 +529,12 @@ project.
 | `poll_interval_seconds` | `0.05` | Atomic result polling interval |
 | `picker_timeout_seconds` | `3600` | Missing-result timeout |
 | `status_bar` | `true` | Install Wisp's right-status renderer |
+| `tab_button_pickers` | `false` | Left-click `+` for open projects, right-click for live sessions; middle-click for a new tab |
 | `status_items` | `opencode`, `directory` | Ordered bundled status providers and optional picker actions |
 | `status_interval_seconds` | `2` | Minimum interval between OpenCode status queries |
 | `status_colors` | built-in OldBook palette | Partial semantic status color table |
 | `opencode_tab_colors` | `false` | Color tab backgrounds from fresh pane-local OpenCode state |
+| `powerline` | none | Optional shaped `tabs` and/or `status` segment configuration |
 | `popup` | `{ direction = "Bottom", size = 0.65 }` | Top-level popup split placement and size |
 | `window_preview` | `false` | Start with window Preview visible instead of on demand |
 | `file_open` | `{ default = "window" }` | Default file target: `window`, `right_pane`, or `bottom_pane` |
@@ -478,6 +576,9 @@ The adapter exports action constructors for user-owned mappings:
 wisp.project_picker_action()
 wisp.window_picker_action()
 wisp.opencode_picker_action()
+wisp.next_opencode_session_action() -- next live session across all projects
+wisp.next_opencode_session_action { status = "error" }
+wisp.next_opencode_session_action { status = "priority", scope = "current" }
 wisp.popup_action "projects" -- also accepts "windows" or "sessions"
 wisp.refresh_cache_action()
 wisp.switch_to_project_action "dotfiles"
@@ -487,7 +588,19 @@ wisp.split_pane_action("Right", false)
 
 The three named picker actions use temporary tabs. `popup_action` uses the
 configured top-level split and shares its singleton lifecycle with status
-provider clicks.
+provider clicks and the opt-in tab-button pickers. Named project actions still
+show all discovered projects; the tab-button left-click lists only open projects.
+
+`next_opencode_session_action` focuses the next registered live OpenCode pane
+directly. `scope` is `"all"` (default) or `"current"`; `status` is `"any"`
+(default), `"error"` (errors and retries), `"permission"` (pending permissions
+or questions), `"finished"` (idle), `"running"`, or `"priority"`. Priority
+chooses the first available group in **error → permission → finished →
+running** order, then cycles within that group from the active pane. Within
+a group, ordering is stable by project ID and session ID, wrapping at the end.
+Unselected launches, conflicts, and sessions without a registered pane are
+skipped. There are no default key bindings; use these constructors in your
+own WezTerm `config.keys` entries.
 
 Project workspaces and project-aware tabs/splits set `WISP_PROJECT_DIR` and
 `WISP_PROJECT_NAME`. Tabs and splits preserve pane directories after converting
@@ -520,6 +633,19 @@ refreshes and retains session error events that are not represented by the
 status endpoint. It also performs a periodic resnapshot so registry changes and
 reconnections converge. The OpenCode server remains user-managed; Wisp does
 not supervise it.
+
+Without an `[opencode]` shared-server section, the project Sessions picker lists the
+currently selected sessions published by live plugin registrations, scoped to
+the selected project. It uses the recorded pane IDs to focus those OpenCode
+instances without contacting their private API. Before an instance selects a
+session, its idle launch appears as `[project] OpenCode starting` rather than
+an empty Sessions pane; it cannot be attached to until a session exists. While
+OpenCode generates a title, Wisp shows `[project] New session`; the plugin then
+publishes the selected session's title for the picker. Registrations contain no
+history, so the shared server is needed to browse historical sessions and full
+metadata.
+The all-projects Sessions popup uses those same live registrations, with each
+row showing its project. It does not include unregistered historical sessions.
 
 `wisp opencode install` adds an opt-in global plugin loader under
 `~/.config/opencode/plugins/`. The plugin verifies the exact supported version

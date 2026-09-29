@@ -108,6 +108,8 @@ fn hidden_opencode_bridge_commands_register_and_unregister_an_instance() {
                 "42",
                 "--session-id",
                 "ses_123",
+                "--session-title",
+                "[wisp] Fix status links",
                 "--session-status",
                 r#"{"type":"busy"}"#,
                 "--waiting-permissions",
@@ -128,6 +130,8 @@ fn hidden_opencode_bridge_commands_register_and_unregister_an_instance() {
     let registered: serde_json::Value =
         serde_json::from_slice(&fs::read(files[0].path()).unwrap()).unwrap();
     assert_eq!(registered["session_id"], "ses_123");
+    assert_eq!(registered["registry_version"], 9);
+    assert_eq!(registered["session_title"], "[wisp] Fix status links");
     assert_eq!(registered["session_activity"], "running");
     assert_eq!(registered["session_waiting"]["permissions"], 2);
     assert_eq!(registered["session_waiting"]["questions"], 1);
@@ -149,6 +153,98 @@ fn hidden_opencode_bridge_commands_register_and_unregister_an_instance() {
             .unwrap(),
     );
     assert_eq!(fs::read_dir(registry).unwrap().count(), 0);
+}
+
+#[test]
+fn opencode_next_returns_a_versioned_live_pane_selection_and_scopes_projects() {
+    let fixture = Fixture::new();
+    let registry = fixture.home.join("registry");
+    let api = fixture.home.join("Repos/api");
+    let artifacts = fixture.home.join("Artifacts");
+    for (pid, pane, session, project, activity) in [
+        (101, "41", "ses_running", &api, r#"{"type":"busy"}"#),
+        (
+            102,
+            "42",
+            "ses_error",
+            &artifacts,
+            r#"{"type":"retry","attempt":1,"message":"rate limited","next":99}"#,
+        ),
+    ] {
+        success(
+            fixture
+                .command()
+                .env("WISP_OPENCODE_REGISTRY_DIR", &registry)
+                .args([
+                    "opencode",
+                    "register",
+                    "--server-url",
+                    "http://localhost:4096",
+                    "--directory",
+                    project.to_str().unwrap(),
+                    "--project-path",
+                    project.to_str().unwrap(),
+                    "--pid",
+                    &pid.to_string(),
+                    "--pane-id",
+                    pane,
+                    "--session-id",
+                    session,
+                    "--session-status",
+                    activity,
+                ])
+                .output()
+                .unwrap(),
+        );
+    }
+
+    let output = success(
+        fixture
+            .command()
+            .env("WISP_OPENCODE_REGISTRY_DIR", &registry)
+            .args([
+                "opencode",
+                "next",
+                "--status",
+                "priority",
+                "--after-pane-id",
+                "41",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let result: SelectionEnvelope = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result.status, SelectionStatus::Selected);
+    let Some(Selection::OpenCodeSession {
+        project,
+        session_id,
+        host_item_id,
+        ..
+    }) = result.selection
+    else {
+        panic!("expected a live session target");
+    };
+    assert_eq!(project.id, "artifacts");
+    assert_eq!(session_id, "ses_error");
+    assert_eq!(host_item_id.as_deref(), Some("pane:42"));
+
+    let output = success(
+        fixture
+            .command()
+            .env("WISP_OPENCODE_REGISTRY_DIR", &registry)
+            .args([
+                "opencode",
+                "next",
+                "--status",
+                "error",
+                "--project-path",
+                api.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap(),
+    );
+    let result: SelectionEnvelope = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(matches!(result.status, SelectionStatus::Cancelled));
 }
 
 #[test]
@@ -206,6 +302,8 @@ fn canonical_opencode_plugin_uses_in_process_state_and_argv_registrations() {
     assert!(plugin.contains("question.asked"));
     assert!(plugin.contains("question.replied"));
     assert!(plugin.contains("question.rejected"));
+    assert!(plugin.contains("./project-title.js"));
+    assert!(plugin.contains("experimental.chat.system.transform"));
     assert!(plugin.contains("--session-status"));
     assert!(plugin.contains("--waiting-permissions"));
     assert!(plugin.contains("--waiting-questions"));
@@ -234,6 +332,8 @@ fn pick_accepts_the_sessions_initial_view() {
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("projects, windows, sessions"));
     assert!(help.contains("--disable-sessions"));
+    assert!(help.contains("--all-sessions"));
+    assert!(help.contains("--current-project-only"));
 }
 
 #[test]
@@ -301,25 +401,29 @@ fn deploy_installs_one_versioned_bundle_and_stable_host_loaders() {
     assert!(bundle.join("wezterm/workspace.lua").is_file());
     assert!(bundle.join("wezterm/popup.lua").is_file());
     assert!(bundle.join("wezterm/picker.lua").is_file());
+    assert!(bundle.join("wezterm/powerline.lua").is_file());
     assert!(bundle.join("wezterm/status.lua").is_file());
     assert!(bundle.join("wezterm/status_items.lua").is_file());
     assert!(bundle.join("nvim/lua/wisp/init.lua").is_file());
     assert!(bundle.join("nvim/lua/wisp/json.lua").is_file());
     assert!(bundle.join("nvim/doc/wisp.txt").is_file());
     assert!(bundle.join("opencode/wisp.js").is_file());
+    assert!(bundle.join("opencode/project-title.js").is_file());
 
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["deployment_schema_version"], 8);
     assert_eq!(manifest["bundle_id"], bundle_id);
-    assert_eq!(manifest["package_version"], "0.12.0");
+    assert_eq!(manifest["package_version"], "0.18.0");
     assert_eq!(manifest["protocol_version"], 8);
     assert!(manifest["files"][executable].is_string());
     assert!(manifest["files"]["wezterm/popup.lua"].is_string());
+    assert!(manifest["files"]["wezterm/powerline.lua"].is_string());
     assert!(manifest["files"]["wezterm/status.lua"].is_string());
     assert!(manifest["files"]["wezterm/status_items.lua"].is_string());
     assert!(manifest["files"]["nvim/lua/wisp/json.lua"].is_string());
     assert!(manifest["files"]["opencode/wisp.js"].is_string());
+    assert!(manifest["files"]["opencode/project-title.js"].is_string());
 
     let config_home = fixture.config.parent().unwrap().parent().unwrap();
     let wezterm_loader = fs::read_to_string(config_home.join("wezterm/wisp/init.lua")).unwrap();
@@ -684,12 +788,14 @@ fn deploy_prune_keeps_a_valid_previous_release() {
         "wezterm/workspace.lua",
         "wezterm/popup.lua",
         "wezterm/picker.lua",
+        "wezterm/powerline.lua",
         "wezterm/status.lua",
         "wezterm/status_items.lua",
         "nvim/lua/wisp/init.lua",
         "nvim/lua/wisp/json.lua",
         "nvim/doc/wisp.txt",
         "opencode/wisp.js",
+        "opencode/project-title.js",
     ];
     let mut assets = paths.map(|relative| (relative, fs::read(current.join(relative)).unwrap()));
     assets[3].1.extend_from_slice(b"\nprevious release\n");
@@ -931,6 +1037,7 @@ fn pick_help_exposes_host_context_and_initial_view_options() {
     assert!(stdout.contains("--file-open-target"));
     assert!(stdout.contains("--single-pane-behavior"));
     assert!(stdout.contains("--initial-view"));
+    assert!(stdout.contains("--open-projects-only"));
     assert!(!stdout.contains("--annotations-file"));
 }
 

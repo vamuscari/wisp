@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 use wisp_core::{
     config::Openers,
@@ -16,8 +16,8 @@ use wisp_core::{
 use wisp_tui::{
     ActiveProjectContext, App, Command, DataSource, DirectoryRequest, DirectoryUpdate,
     FilePreviewContent, FilePreviewRequest, FilePreviewUpdate, GitSummary, InitialView, Input,
-    RightMode, WindowPreviewContent, WindowPreviewRequest, WindowPreviewState, WindowPreviewUpdate,
-    run_with_terminal,
+    InputEvent, RightMode, WindowPreviewContent, WindowPreviewRequest, WindowPreviewState,
+    WindowPreviewUpdate, run_with_terminal,
 };
 
 fn projects() -> Vec<Project> {
@@ -333,6 +333,7 @@ fn replacing_projects_restores_the_preferred_window_preview() {
 struct FixtureData {
     project_git_updates: Vec<(String, GitSummary)>,
     project_git_update_delay: usize,
+    project_refreshes: usize,
     directory_calls: Vec<PathBuf>,
     directory_results: VecDeque<Result<Vec<DirectoryEntry>, String>>,
     directory_error: Option<String>,
@@ -371,6 +372,7 @@ impl DataSource for FixtureData {
     }
 
     fn refresh_projects(&mut self) -> Result<Vec<Project>, String> {
+        self.project_refreshes += 1;
         Ok(projects())
     }
 
@@ -439,6 +441,35 @@ impl Input for TimedInput {
 struct MouseTrackingInput {
     events: VecDeque<KeyEvent>,
     mouse_capture: Vec<bool>,
+}
+
+struct EventInput {
+    events: VecDeque<InputEvent>,
+    mouse_capture: Vec<bool>,
+}
+
+impl Input for EventInput {
+    fn read_key(&mut self) -> io::Result<KeyEvent> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "event input does not provide key-only reads",
+        ))
+    }
+
+    fn read_event_timeout(
+        &mut self,
+        _timeout: std::time::Duration,
+    ) -> io::Result<Option<InputEvent>> {
+        self.events
+            .pop_front()
+            .map(Some)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "input exhausted"))
+    }
+
+    fn set_mouse_capture(&mut self, enabled: bool) -> io::Result<()> {
+        self.mouse_capture.push(enabled);
+        Ok(())
+    }
 }
 
 impl Input for MouseTrackingInput {
@@ -1256,7 +1287,7 @@ fn commands_cancel_and_restore_the_visible_preview() {
 }
 
 #[test]
-fn mouse_capture_tracks_visible_preview_state() {
+fn mouse_capture_spans_the_entire_picker_session() {
     let context: HostContext = serde_json::from_value(serde_json::json!({
         "protocol_version": 8,
         "projects": {
@@ -1296,7 +1327,170 @@ fn mouse_capture_tracks_visible_preview_state() {
 
     run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).unwrap();
 
-    assert_eq!(input.mouse_capture, vec![true, false, true, false]);
+    assert_eq!(input.mouse_capture, vec![true, false]);
+}
+
+#[test]
+fn terminal_loop_returns_a_selection_from_two_project_clicks() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        None,
+        InitialView::Projects,
+    );
+    let click = InputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    });
+    let mut input = EventInput {
+        events: VecDeque::from([click.clone(), click]),
+        mouse_capture: Vec::new(),
+    };
+    let mut data = FixtureData::default();
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let Some(Selection::Project { project, .. }) =
+        run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).unwrap()
+    else {
+        panic!("two project clicks should return that project");
+    };
+
+    assert_eq!(project.id, "api");
+    assert_eq!(input.mouse_capture, vec![true, false]);
+}
+
+#[test]
+fn terminal_loop_executes_a_directory_load_from_the_files_control() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(file_target_context()),
+        InitialView::Projects,
+    );
+    let mut input = EventInput {
+        events: VecDeque::from([
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 72,
+                row: 22,
+                modifiers: KeyModifiers::NONE,
+            }),
+            InputEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        ]),
+        mouse_capture: Vec::new(),
+    };
+    let mut data = FixtureData::default();
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    assert_eq!(
+        run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).unwrap(),
+        None
+    );
+    assert_eq!(data.directory_calls, vec![PathBuf::from("/repos/api")]);
+}
+
+#[test]
+fn terminal_loop_executes_a_session_load_from_the_sessions_control() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(file_target_context()),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+    let mut input = EventInput {
+        events: VecDeque::from([
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 80,
+                row: 22,
+                modifiers: KeyModifiers::NONE,
+            }),
+            InputEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        ]),
+        mouse_capture: Vec::new(),
+    };
+    let mut data = FixtureData::default();
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    assert_eq!(
+        run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).unwrap(),
+        None
+    );
+    assert_eq!(data.session_calls, vec![PathBuf::from("/repos/api")]);
+}
+
+#[test]
+fn terminal_loop_executes_refresh_and_cancel_from_command_controls() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(file_target_context()),
+        InitialView::Projects,
+    );
+    let mut input = EventInput {
+        events: VecDeque::from([
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 110,
+                row: 22,
+                modifiers: KeyModifiers::NONE,
+            }),
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 98,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            }),
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 84,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            }),
+        ]),
+        mouse_capture: Vec::new(),
+    };
+    let mut data = FixtureData::default();
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    assert_eq!(
+        run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).unwrap(),
+        None
+    );
+    assert_eq!(data.project_refreshes, 1);
+    assert_eq!(input.mouse_capture, vec![true, false]);
+}
+
+#[test]
+fn terminal_loop_disables_mouse_capture_after_an_input_error() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        None,
+        InitialView::Projects,
+    );
+    let mut input = EventInput {
+        events: VecDeque::new(),
+        mouse_capture: Vec::new(),
+    };
+    let mut data = FixtureData::default();
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    assert!(run_with_terminal(&mut terminal, &mut app, &mut data, &mut input).is_err());
+    assert_eq!(input.mouse_capture, vec![true, false]);
 }
 
 #[test]

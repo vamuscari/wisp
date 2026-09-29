@@ -20,16 +20,16 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 use wisp_core::{
     config::OpenCodeConfig,
+    model::Project,
     opencode::{
         OpenCodeSession, OpenCodeSnapshot, OpenCodeStatusCounts, SessionActivity,
         SessionDisplayState, SessionWaiting,
     },
     path::comparison_key,
-    protocol::PROTOCOL_VERSION,
 };
 
 pub const SUPPORTED_OPENCODE_VERSION: &str = "1.18.31";
-const REGISTRY_VERSION: u32 = PROTOCOL_VERSION;
+const REGISTRY_VERSION: u32 = 9;
 const REGISTRY_STALE_AFTER_MILLIS: u64 = 90_000;
 
 #[derive(Debug, Error)]
@@ -61,6 +61,7 @@ pub struct RegistryRegistration {
     pub pid: u32,
     pub pane_id: Option<String>,
     pub session_id: Option<String>,
+    pub session_title: Option<String>,
     pub session_activity: Option<SessionActivity>,
     pub session_waiting: SessionWaiting,
     pub session_error: Option<String>,
@@ -100,6 +101,16 @@ pub fn register_instance(
             "session_error requires session_id".into(),
         ));
     }
+    if registration
+        .session_title
+        .as_ref()
+        .is_some_and(|title| title.is_empty() || title.chars().any(char::is_control))
+        || (registration.session_title.is_some() && registration.session_id.is_none())
+    {
+        return Err(OpenCodeError::InvalidRegistration(
+            "session_title requires a session_id and printable non-empty text".into(),
+        ));
+    }
     if registration.session_id.is_some() != registration.session_activity.is_some() {
         return Err(OpenCodeError::InvalidRegistration(
             "session_id and session_activity must be supplied together".into(),
@@ -137,6 +148,7 @@ pub fn register_instance(
         updated_at: now_millis(),
         pane_id: registration.pane_id.as_deref(),
         session_id: registration.session_id.as_deref(),
+        session_title: registration.session_title.as_deref(),
         session_activity: registration.session_activity.as_ref(),
         session_waiting: &registration.session_waiting,
         session_error: registration.session_error.as_deref(),
@@ -249,7 +261,7 @@ fn display_state_rank(session: &OpenCodeSession) -> u8 {
 
 #[derive(Clone)]
 pub struct OpenCodeClient {
-    config: OpenCodeConfig,
+    config: Option<OpenCodeConfig>,
     registry_dir: PathBuf,
     agent: ureq::Agent,
     auth: Option<(String, String)>,
@@ -290,6 +302,18 @@ impl OpenCodeClient {
     }
 
     pub fn with_registry_dir(config: OpenCodeConfig, registry_dir: PathBuf) -> Self {
+        Self::with_optional_config(Some(config), registry_dir)
+    }
+
+    pub fn registry_only() -> Result<Self, OpenCodeError> {
+        Ok(Self::with_registry_only_dir(registry_dir()?))
+    }
+
+    pub fn with_registry_only_dir(registry_dir: PathBuf) -> Self {
+        Self::with_optional_config(None, registry_dir)
+    }
+
+    fn with_optional_config(config: Option<OpenCodeConfig>, registry_dir: PathBuf) -> Self {
         let password = env::var("OPENCODE_SERVER_PASSWORD")
             .ok()
             .filter(|value| !value.is_empty());
@@ -311,11 +335,14 @@ impl OpenCodeClient {
     }
 
     pub fn snapshot(&self, project_path: &Path) -> Result<OpenCodeSnapshot, OpenCodeError> {
+        let Some(config) = &self.config else {
+            return self.registry_snapshot(Some(project_path), &[]);
+        };
         let mut sources = BTreeMap::new();
         sources.insert(
-            self.config.server_url.clone(),
+            config.server_url.clone(),
             Source {
-                server_url: self.config.server_url.clone(),
+                server_url: config.server_url.clone(),
                 directory: project_path.to_path_buf(),
                 shared: true,
                 host_items: BTreeMap::new(),
@@ -390,11 +417,104 @@ impl OpenCodeClient {
         Ok(snapshot)
     }
 
-    pub fn watch_shared(&self) -> OpenCodeWatcher {
+    pub fn live_snapshot_all(
+        &self,
+        projects: &[Project],
+    ) -> Result<OpenCodeSnapshot, OpenCodeError> {
+        self.registry_snapshot(None, projects)
+    }
+
+    fn registry_snapshot(
+        &self,
+        project_path: Option<&Path>,
+        projects: &[Project],
+    ) -> Result<OpenCodeSnapshot, OpenCodeError> {
+        let project_key = project_path.map(|path| comparison_key(&path.to_string_lossy()));
+        let mut snapshot = OpenCodeSnapshot::default();
+        let mut sessions = BTreeMap::<String, OpenCodeSession>::new();
+        for registration in registry_entries(&self.registry_dir)? {
+            let registration_key = comparison_key(&registration.project_path.to_string_lossy());
+            if project_key
+                .as_ref()
+                .is_some_and(|key| key != &registration_key)
+            {
+                continue;
+            }
+            let project = projects.iter().find(|project| {
+                comparison_key(&project.path.to_string_lossy()) == registration_key
+            });
+            if project_key.is_none() && project.is_none() {
+                continue;
+            }
+            let starting = registration.session_id.is_none();
+            let session_id = registration
+                .session_id
+                .unwrap_or_else(|| format!("launch:{}", registration.instance_id));
+            let mut activity = registration
+                .session_activity
+                .unwrap_or(SessionActivity::Idle);
+            if matches!(activity, SessionActivity::Idle) {
+                if let Some(message) = registration.session_error {
+                    activity = SessionActivity::Error { message };
+                }
+            }
+            let session = OpenCodeSession {
+                title: registration.session_title.unwrap_or_else(|| {
+                    let project = registration
+                        .project_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("OpenCode");
+                    if starting {
+                        format!("[{project}] OpenCode starting")
+                    } else {
+                        format!("[{project}] New session")
+                    }
+                }),
+                id: session_id.clone(),
+                directory: registration.directory,
+                server_url: registration.server_url,
+                agent: None,
+                parent_id: None,
+                updated_at: registration.updated_at,
+                activity,
+                waiting: registration.session_waiting,
+            };
+            if let Some(existing) = sessions.get(&session_id) {
+                if existing.server_url != session.server_url {
+                    snapshot.conflicts.insert(session_id.clone());
+                    continue;
+                }
+                if display_state_rank(&session) <= display_state_rank(existing) {
+                    continue;
+                }
+            }
+            if let Some(pane_id) = registration.pane_id {
+                snapshot
+                    .host_items
+                    .insert(session_id.clone(), format!("pane:{pane_id}"));
+            } else {
+                snapshot.host_items.remove(&session_id);
+            }
+            if let Some(project) = project {
+                snapshot
+                    .project_ids
+                    .insert(session_id.clone(), project.id.clone());
+            }
+            sessions.insert(session_id, session);
+        }
+        snapshot.sessions = sessions.into_values().collect();
+        snapshot
+            .sessions
+            .sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+        Ok(snapshot)
+    }
+
+    pub fn watch_shared(&self) -> Option<OpenCodeWatcher> {
+        let server_url = self.config.as_ref()?.server_url.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
-        let server_url = self.config.server_url.clone();
         let agent = http_agent(Duration::from_secs(15));
         let auth = self.auth.clone();
         let event_errors = Arc::clone(&self.event_errors);
@@ -448,7 +568,7 @@ impl OpenCodeClient {
                 thread::sleep(Duration::from_millis(50));
             }
         });
-        OpenCodeWatcher { receiver, stop }
+        Some(OpenCodeWatcher { receiver, stop })
     }
 
     fn source_snapshot(&self, source: &Source) -> Result<Vec<OpenCodeSession>, OpenCodeError> {
@@ -460,7 +580,12 @@ impl OpenCodeClient {
             });
         }
         let directory = source.directory.to_string_lossy().into_owned();
-        let limit = self.config.session_limit.to_string();
+        let limit = self
+            .config
+            .as_ref()
+            .expect("HTTP snapshots require a configured shared server")
+            .session_limit
+            .to_string();
         let raw_sessions: Vec<RawSession> = self.get_json(
             source,
             "/session",
@@ -656,6 +781,11 @@ fn valid_registry_entry(entry: &RegistryEntry, now: u64) -> bool {
         && !entry.project_path.as_os_str().is_empty()
         && entry.pane_id.as_deref() != Some("")
         && entry.session_id.as_deref() != Some("")
+        && entry
+            .session_title
+            .as_ref()
+            .is_none_or(|title| !title.is_empty() && !title.chars().any(char::is_control))
+        && (entry.session_id.is_some() || entry.session_title.is_none())
         && entry.session_error.as_deref() != Some("")
         && entry.session_id.is_some() == entry.session_activity.is_some()
         && (entry.session_id.is_some() || entry.session_waiting == SessionWaiting::default())
@@ -704,6 +834,7 @@ struct RegistryEntry {
     updated_at: u64,
     pane_id: Option<String>,
     session_id: Option<String>,
+    session_title: Option<String>,
     session_activity: Option<SessionActivity>,
     session_waiting: SessionWaiting,
     session_error: Option<String>,
@@ -720,6 +851,7 @@ struct RegistryDocument<'a> {
     updated_at: u64,
     pane_id: Option<&'a str>,
     session_id: Option<&'a str>,
+    session_title: Option<&'a str>,
     session_activity: Option<&'a SessionActivity>,
     session_waiting: &'a SessionWaiting,
     session_error: Option<&'a str>,
@@ -1116,11 +1248,11 @@ mod tests {
         let shared_server = FakeServer::new();
         let registered_server = FakeServer::new();
         let client = OpenCodeClient {
-            config: OpenCodeConfig {
+            config: Some(OpenCodeConfig {
                 server_url: shared_server.url(),
                 command: vec!["opencode".into()],
                 session_limit: 100,
-            },
+            }),
             registry_dir: PathBuf::new(),
             agent: http_agent(Duration::from_secs(2)),
             auth: Some(("wisp".into(), "secret".into())),

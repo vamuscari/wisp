@@ -23,6 +23,8 @@ helper.test("sample WezTerm config loads Wisp and defines consumer bindings", fu
   helper.assert_equal(loaded_path, "/Users/test/.config/wezterm/wisp/init.lua", "deployed loader path")
   helper.assert_equal(config.leader.key, "Space", "leader key")
   helper.assert_equal(config.leader.mods, "CTRL", "leader modifiers")
+  helper.assert_equal(config.use_fancy_tab_bar, false, "Powerline retro tab bar")
+  helper.assert_equal(type(wezterm.events["format-tab-title"]), "function", "Powerline tab formatter")
   helper.assert_equal(#config.keys, 6, "sample binding count")
   helper.assert_equal(config.keys[1].key, "p", "project popup binding")
   helper.assert_equal(config.keys[2].key, "w", "window picker binding")

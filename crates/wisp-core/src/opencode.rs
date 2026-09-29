@@ -63,6 +63,7 @@ pub struct OpenCodeSnapshot {
     pub sessions: Vec<OpenCodeSession>,
     pub host_items: BTreeMap<String, String>,
     pub conflicts: BTreeSet<String>,
+    pub project_ids: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

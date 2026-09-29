@@ -24,6 +24,8 @@ use wisp_core::{
     config::{Config, ConfigError},
     discovery::StdFileSystem,
     model::{DirectoryEntry, Project},
+    navigation::{NavigationError, NavigationOutcome, Navigator},
+    opencode::{OpenCodeSession, OpenCodeSnapshot, SessionActivity},
     path::{comparison_key, normalized_path},
     protocol::{
         FileOpenTarget, HostContext, OpenCodeStatusEnvelope, ProjectsEnvelope, Selection,
@@ -109,6 +111,12 @@ struct PickArgs {
     initial_view: InitialView,
     #[arg(long)]
     disable_sessions: bool,
+    #[arg(long, requires = "host_context_file")]
+    open_projects_only: bool,
+    #[arg(long, conflicts_with = "current_project_only")]
+    all_sessions: bool,
+    #[arg(long, requires = "host_context_file")]
+    current_project_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -151,6 +159,14 @@ enum OpenCodeCommand {
         #[arg(long)]
         json: bool,
     },
+    Next {
+        #[arg(long, value_enum, default_value_t = NextSessionStatus::Any)]
+        status: NextSessionStatus,
+        #[arg(long)]
+        project_path: Option<PathBuf>,
+        #[arg(long)]
+        after_pane_id: Option<String>,
+    },
     #[command(hide = true)]
     Register {
         #[arg(long)]
@@ -165,6 +181,8 @@ enum OpenCodeCommand {
         pane_id: Option<String>,
         #[arg(long)]
         session_id: Option<String>,
+        #[arg(long)]
+        session_title: Option<String>,
         #[arg(long)]
         session_status: Option<String>,
         #[arg(long, default_value_t = 0)]
@@ -181,6 +199,17 @@ enum OpenCodeCommand {
         #[arg(long)]
         pid: u32,
     },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum NextSessionStatus {
+    #[default]
+    Any,
+    Error,
+    Permission,
+    Finished,
+    Running,
+    Priority,
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -243,6 +272,8 @@ pub enum CliError {
     Deploy(#[from] deploy::DeployError),
     #[error(transparent)]
     OpenCode(#[from] opencode::OpenCodeError),
+    #[error(transparent)]
+    Navigation(#[from] NavigationError),
 }
 
 pub fn run() -> i32 {
@@ -375,6 +406,50 @@ fn run_noninteractive(
         }
         WispCommand::Opencode {
             command:
+                OpenCodeCommand::Next {
+                    status,
+                    project_path,
+                    after_pane_id,
+                },
+        } => {
+            let (config, mut catalog) = load_catalog(config_override)?;
+            let projects = catalog.projects(now())?;
+            let snapshot =
+                opencode::OpenCodeClient::registry_only()?.live_snapshot_all(&projects)?;
+            let result = choose_next_opencode_session(
+                &snapshot,
+                &projects,
+                status,
+                project_path.as_deref(),
+                after_pane_id.as_deref(),
+            );
+            let envelope = if let Some((project, session, host_item_id)) = result {
+                let command = config.opencode.as_ref().map_or_else(
+                    || vec!["opencode".into()],
+                    |opencode| opencode.command.clone(),
+                );
+                let navigator = Navigator::new(projects.clone(), config.follow_symlinks);
+                let NavigationOutcome::Selected(selection) = navigator.select_opencode_session(
+                    &project.id,
+                    session,
+                    &command,
+                    Some(host_item_id),
+                )?
+                else {
+                    unreachable!("selecting a session always returns a selection")
+                };
+                SelectionEnvelope::selected(selection)
+            } else {
+                SelectionEnvelope::cancelled()
+            };
+            let stdout = io::stdout();
+            let mut writer = stdout.lock();
+            serde_json::to_writer(&mut writer, &envelope)?;
+            writer.write_all(b"\n")?;
+            Ok(())
+        }
+        WispCommand::Opencode {
+            command:
                 OpenCodeCommand::Register {
                     server_url,
                     directory,
@@ -382,6 +457,7 @@ fn run_noninteractive(
                     pid,
                     pane_id,
                     session_id,
+                    session_title,
                     session_status,
                     waiting_permissions,
                     waiting_questions,
@@ -402,6 +478,7 @@ fn run_noninteractive(
                     pid,
                     pane_id,
                     session_id,
+                    session_title,
                     session_activity,
                     session_waiting: wisp_core::opencode::SessionWaiting {
                         permissions: waiting_permissions,
@@ -421,6 +498,82 @@ fn run_noninteractive(
         }
         WispCommand::Pick(_) => unreachable!("pick is handled before noninteractive commands"),
     }
+}
+
+fn choose_next_opencode_session<'a>(
+    snapshot: &'a OpenCodeSnapshot,
+    projects: &'a [Project],
+    status: NextSessionStatus,
+    project_path: Option<&Path>,
+    after_pane_id: Option<&str>,
+) -> Option<(&'a Project, &'a OpenCodeSession, &'a str)> {
+    let scope = project_path.map(|path| comparison_key(&path.to_string_lossy()));
+    let mut candidates = snapshot
+        .sessions
+        .iter()
+        .filter_map(|session| {
+            if session.id.starts_with("launch:") || snapshot.conflicts.contains(&session.id) {
+                return None;
+            }
+            let project_id = snapshot.project_ids.get(&session.id)?;
+            let project = projects.iter().find(|project| &project.id == project_id)?;
+            if scope
+                .as_ref()
+                .is_some_and(|path| path != &comparison_key(&project.path.to_string_lossy()))
+            {
+                return None;
+            }
+            let host_item_id = snapshot.host_items.get(&session.id)?;
+            let pane_id = host_item_id.strip_prefix("pane:")?;
+            if pane_id.is_empty() || !pane_id.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            Some((project, session, host_item_id.as_str(), pane_id))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| (&left.0.id, &left.1.id).cmp(&(&right.0.id, &right.1.id)));
+    let matches = |candidate: &(_, &OpenCodeSession, _, _), filter| {
+        let session = candidate.1;
+        let failure = matches!(
+            session.activity,
+            SessionActivity::Error { .. } | SessionActivity::Retrying { .. }
+        );
+        let waiting = session.waiting.permissions > 0 || session.waiting.questions > 0;
+        match filter {
+            NextSessionStatus::Any => true,
+            NextSessionStatus::Error => failure,
+            NextSessionStatus::Permission => !failure && waiting,
+            NextSessionStatus::Finished => {
+                !failure && !waiting && session.activity == SessionActivity::Idle
+            }
+            NextSessionStatus::Running => {
+                !failure && !waiting && session.activity == SessionActivity::Running
+            }
+            NextSessionStatus::Priority => false,
+        }
+    };
+    let chosen_status = if status == NextSessionStatus::Priority {
+        [
+            NextSessionStatus::Error,
+            NextSessionStatus::Permission,
+            NextSessionStatus::Finished,
+            NextSessionStatus::Running,
+        ]
+        .into_iter()
+        .find(|tier| candidates.iter().any(|candidate| matches(candidate, *tier)))?
+    } else {
+        status
+    };
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| matches(candidate, chosen_status))
+        .collect::<Vec<_>>();
+    let next = after_pane_id
+        .and_then(|id| candidates.iter().position(|candidate| candidate.3 == id))
+        .map_or(0, |index| (index + 1) % candidates.len());
+    candidates
+        .get(next)
+        .map(|(project, session, host_item_id, _)| (*project, *session, *host_item_id))
 }
 
 fn pick(config_override: Option<&Path>, args: &PickArgs) -> Result<Option<Selection>, CliError> {
@@ -450,35 +603,40 @@ fn pick(config_override: Option<&Path>, args: &PickArgs) -> Result<Option<Select
         .map(|(project_id, _)| project_id.clone())
         .collect();
     let project_git = GitSummaryScheduler::new(git_targets);
-    let opencode_config = (!args.disable_sessions)
-        .then(|| config.opencode.clone())
-        .flatten();
+    let opencode_config = config.opencode.clone();
     let vcs_icons = config.vcs.icons;
     let tui_initial_view = match args.initial_view {
         InitialView::Projects => wisp_tui::InitialView::Projects,
         InitialView::Windows => wisp_tui::InitialView::Windows,
         InitialView::Sessions => wisp_tui::InitialView::Sessions,
     };
-    let mut app = match &opencode_config {
-        Some(opencode) => App::new_with_opencode(
+    let mut app = if args.disable_sessions {
+        App::new(
             projects,
             config.openers,
             config.follow_symlinks,
             context,
             tui_initial_view,
-            opencode.command.clone(),
-        ),
-        None => App::new(
+        )
+    } else {
+        App::new_with_opencode(
             projects,
             config.openers,
             config.follow_symlinks,
             context,
             tui_initial_view,
-        ),
+            opencode_config.as_ref().map_or_else(
+                || vec!["opencode".into()],
+                |opencode| opencode.command.clone(),
+            ),
+        )
     };
+    app.configure_open_projects_only(args.open_projects_only);
     if let Some(active_project) = active_project {
         app.set_active_project_context(active_project);
     }
+    app.configure_all_sessions(args.all_sessions);
+    app.configure_current_project_only(args.current_project_only);
     app.configure_window_preview(args.wezterm_executable.is_some(), args.window_preview);
     app.configure_file_open_target(match args.file_open_target {
         PickFileOpenTarget::Window => FileOpenTarget::Window,
@@ -491,14 +649,19 @@ fn pick(config_override: Option<&Path>, args: &PickArgs) -> Result<Option<Select
         PickSinglePaneBehavior::Activate => wisp_tui::SinglePaneBehavior::Activate,
     });
     app.set_vcs_icons(vcs_icons);
-    let opencode = opencode_config
-        .map(opencode::OpenCodeClient::new)
-        .transpose()?
-        .map(|client| OpenCodeDataSource {
+    let opencode = if args.disable_sessions {
+        None
+    } else {
+        let client = match opencode_config {
+            Some(config) => opencode::OpenCodeClient::new(config)?,
+            None => opencode::OpenCodeClient::registry_only()?,
+        };
+        Some(OpenCodeDataSource {
             watcher: client.watch_shared(),
             client,
             last_poll: Instant::now(),
-        });
+        })
+    };
     let mut data = CatalogDataSource {
         catalog,
         directory_loader,
@@ -1186,7 +1349,7 @@ struct CatalogDataSource {
 
 struct OpenCodeDataSource {
     client: opencode::OpenCodeClient,
-    watcher: opencode::OpenCodeWatcher,
+    watcher: Option<opencode::OpenCodeWatcher>,
     last_poll: Instant,
 }
 
@@ -1268,6 +1431,20 @@ impl DataSource for CatalogDataSource {
         snapshot.map_err(|error| error.to_string())
     }
 
+    fn all_sessions(&mut self) -> Result<wisp_core::opencode::OpenCodeSnapshot, String> {
+        let projects = self
+            .catalog
+            .projects(now())
+            .map_err(|error| error.to_string())?;
+        let opencode = self
+            .opencode
+            .as_mut()
+            .ok_or_else(|| "OpenCode integration is not configured".to_string())?;
+        let snapshot = opencode.client.live_snapshot_all(&projects);
+        opencode.last_poll = Instant::now();
+        snapshot.map_err(|error| error.to_string())
+    }
+
     fn refresh_sessions(
         &mut self,
         path: &Path,
@@ -1279,7 +1456,12 @@ impl DataSource for CatalogDataSource {
         let Some(opencode) = &mut self.opencode else {
             return false;
         };
-        if opencode.watcher.changed() || opencode.last_poll.elapsed() >= Duration::from_secs(1) {
+        if opencode
+            .watcher
+            .as_ref()
+            .is_some_and(|watcher| watcher.changed())
+            || opencode.last_poll.elapsed() >= Duration::from_secs(1)
+        {
             return true;
         }
         false
@@ -1442,8 +1624,160 @@ mod tests {
 
     use tempfile::TempDir;
     use wisp_core::config::OpenCodeConfig;
+    use wisp_core::opencode::{OpenCodeSession, OpenCodeSnapshot, SessionActivity, SessionWaiting};
 
     use super::*;
+
+    #[test]
+    fn next_opencode_session_cycles_live_panes_and_respects_status_priority() {
+        let projects = [
+            Project {
+                id: "api".into(),
+                path: "/repos/api".into(),
+                group: "Repos".into(),
+                name: "api".into(),
+                display_name: "API".into(),
+            },
+            Project {
+                id: "web".into(),
+                path: "/repos/web".into(),
+                group: "Repos".into(),
+                name: "web".into(),
+                display_name: "Web".into(),
+            },
+        ];
+        let make = |id: &str, activity, waiting| OpenCodeSession {
+            id: id.into(),
+            title: id.into(),
+            directory: "/repos/api".into(),
+            server_url: "http://localhost:4096".into(),
+            agent: None,
+            parent_id: None,
+            updated_at: 1,
+            activity,
+            waiting,
+        };
+        let snapshot = OpenCodeSnapshot {
+            sessions: vec![
+                make(
+                    "ses_error",
+                    SessionActivity::Error {
+                        message: "failed".into(),
+                    },
+                    SessionWaiting {
+                        permissions: 1,
+                        questions: 0,
+                    },
+                ),
+                make(
+                    "ses_retry",
+                    SessionActivity::Retrying {
+                        attempt: 1,
+                        message: "rate limited".into(),
+                        next_at: 1,
+                    },
+                    SessionWaiting::default(),
+                ),
+                make(
+                    "ses_permission",
+                    SessionActivity::Idle,
+                    SessionWaiting {
+                        permissions: 1,
+                        questions: 0,
+                    },
+                ),
+                make(
+                    "ses_finished",
+                    SessionActivity::Idle,
+                    SessionWaiting::default(),
+                ),
+                make(
+                    "ses_running",
+                    SessionActivity::Running,
+                    SessionWaiting::default(),
+                ),
+                make(
+                    "launch:1:/repos/api",
+                    SessionActivity::Idle,
+                    SessionWaiting::default(),
+                ),
+                make(
+                    "ses_stale",
+                    SessionActivity::Running,
+                    SessionWaiting::default(),
+                ),
+            ],
+            host_items: [
+                ("ses_error".into(), "pane:11".into()),
+                ("ses_retry".into(), "pane:12".into()),
+                ("ses_permission".into(), "pane:13".into()),
+                ("ses_finished".into(), "pane:14".into()),
+                ("ses_running".into(), "pane:15".into()),
+                ("launch:1:/repos/api".into(), "pane:16".into()),
+            ]
+            .into(),
+            project_ids: [
+                ("ses_error".into(), "api".into()),
+                ("ses_retry".into(), "web".into()),
+                ("ses_permission".into(), "api".into()),
+                ("ses_finished".into(), "api".into()),
+                ("ses_running".into(), "web".into()),
+                ("launch:1:/repos/api".into(), "api".into()),
+                ("ses_stale".into(), "api".into()),
+            ]
+            .into(),
+            ..OpenCodeSnapshot::default()
+        };
+        let choose = |status, scope, after| {
+            choose_next_opencode_session(&snapshot, &projects, status, scope, after)
+                .map(|(project, session, host)| (project.id.as_str(), session.id.as_str(), host))
+        };
+
+        assert_eq!(
+            choose(NextSessionStatus::Any, None, Some("11")),
+            Some(("api", "ses_finished", "pane:14"))
+        );
+        assert_eq!(
+            choose(NextSessionStatus::Any, None, Some("15")),
+            Some(("api", "ses_error", "pane:11"))
+        );
+        assert_eq!(
+            choose(NextSessionStatus::Error, None, Some("11")),
+            Some(("web", "ses_retry", "pane:12"))
+        );
+        assert_eq!(
+            choose(NextSessionStatus::Permission, None, None),
+            Some(("api", "ses_permission", "pane:13"))
+        );
+        assert_eq!(
+            choose(NextSessionStatus::Finished, None, None),
+            Some(("api", "ses_finished", "pane:14"))
+        );
+        assert_eq!(
+            choose(NextSessionStatus::Running, None, None),
+            Some(("web", "ses_running", "pane:15"))
+        );
+        assert_eq!(
+            choose(NextSessionStatus::Priority, None, Some("11")),
+            Some(("web", "ses_retry", "pane:12"))
+        );
+        assert_eq!(
+            choose(
+                NextSessionStatus::Priority,
+                Some(Path::new("/repos/web")),
+                Some("15")
+            ),
+            Some(("web", "ses_retry", "pane:12"))
+        );
+        assert_eq!(
+            choose(
+                NextSessionStatus::Permission,
+                Some(Path::new("/repos/web")),
+                None
+            ),
+            None
+        );
+    }
 
     #[test]
     fn file_preview_reader_returns_plain_text() {

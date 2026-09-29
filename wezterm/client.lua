@@ -406,6 +406,32 @@ function Client:query_opencode_status()
   return sessions
 end
 
+function Client:query_next_opencode_session(status, pane_id, project_path)
+  local args = { "opencode", "next", "--status", status, "--after-pane-id", tostring(pane_id) }
+  if project_path then
+    table.insert(args, "--project-path")
+    table.insert(args, project_path)
+  end
+  local stdout, command_error = self:run(table.unpack(args))
+  if not stdout then
+    return nil, command_error
+  end
+  local result = self:parse_json(stdout)
+  if not result then
+    return nil, "wisp opencode next returned invalid JSON"
+  end
+  local valid, result_error = self:validate_result(result)
+  if not valid then
+    return nil, result_error
+  end
+  if
+    result.status == "selected" and (result.selection.kind ~= "open_code_session" or not result.selection.host_item_id)
+  then
+    return nil, "wisp opencode next returned an invalid session target"
+  end
+  return result
+end
+
 function Client:validate_result(result)
   if type(result) ~= "table" or result.protocol_version ~= self.protocol_version then
     return nil, "wisp result has an unsupported protocol version"

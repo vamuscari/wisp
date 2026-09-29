@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process"
 import { Buffer } from "node:buffer"
 import { fileURLToPath } from "node:url"
+import ProjectTitlePlugin from "./project-title.js"
 
 const executable = fileURLToPath(new URL(process.platform === "win32" ? "../bin/wisp.exe" : "../bin/wisp", import.meta.url))
 const SUPPORTED_OPENCODE_VERSION = "1.18.31"
 const STATUS_USER_VAR = "WISP_OPENCODE_STATUS"
+const DEFAULT_SESSION_TITLE = /^New session - \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 
 async function supportedServer(client) {
   try {
@@ -48,9 +50,19 @@ function selectedSession(argv) {
   }
 }
 
-export default async function WispPlugin({ client, serverUrl, directory, worktree }) {
+function sessionTitle(info) {
+  const title = info?.title
+  return typeof title === "string" && title && !/[\u0000-\u001f\u007f]/.test(title) && !DEFAULT_SESSION_TITLE.test(title)
+    ? title
+    : undefined
+}
+
+export default async function WispPlugin(input) {
+  const { client, serverUrl, directory, worktree } = input
   if (!(await supportedServer(client))) return {}
+  const projectTitle = await ProjectTitlePlugin(input)
   let sessionID = selectedSession(process.argv)
+  let selectedTitle
   let sessionStatus = sessionID ? { type: "idle" } : undefined
   let sessionError
   const permissions = new Set()
@@ -115,6 +127,7 @@ export default async function WispPlugin({ client, serverUrl, directory, worktre
     if (process.env.WEZTERM_PANE) args.push("--pane-id", process.env.WEZTERM_PANE)
     if (sessionID) {
       args.push("--session-id", sessionID)
+      if (selectedTitle) args.push("--session-title", selectedTitle)
       args.push("--session-status", JSON.stringify(state.status))
       args.push("--waiting-permissions", String(state.waitingPermissions))
       args.push("--waiting-questions", String(state.waitingQuestions))
@@ -132,8 +145,9 @@ export default async function WispPlugin({ client, serverUrl, directory, worktre
     run(["opencode", "unregister", "--directory", directory, "--pid", String(process.pid)])
   }
 
-  function selectSession(id) {
+  function selectSession(id, title) {
     sessionID = id
+    selectedTitle = sessionTitle({ title })
     sessionStatus = { type: "idle" }
     sessionError = undefined
     permissions.clear()
@@ -144,6 +158,7 @@ export default async function WispPlugin({ client, serverUrl, directory, worktre
 
   function clearSession() {
     sessionID = undefined
+    selectedTitle = undefined
     sessionStatus = undefined
     sessionError = undefined
     permissions.clear()
@@ -177,6 +192,7 @@ export default async function WispPlugin({ client, serverUrl, directory, worktre
       const generation = ++refreshGeneration
       const startingRevision = revision
       let nextStatus
+      let nextTitle
       let nextParents
       let nextPermissions
       let nextQuestions
@@ -187,6 +203,12 @@ export default async function WispPlugin({ client, serverUrl, directory, worktre
         }
       } catch {
         // Event state remains authoritative until the next heartbeat.
+      }
+      try {
+        const response = await client.session.get({ path: { id: selected }, query: { directory } })
+        if (!response.error && response.data?.id === selected) nextTitle = sessionTitle(response.data)
+      } catch {
+        // Event titles remain authoritative until the next heartbeat.
       }
       try {
         const discoveredParents = new Map()
@@ -254,6 +276,7 @@ export default async function WispPlugin({ client, serverUrl, directory, worktre
 
       if (generation === refreshGeneration && revision === startingRevision && sessionID === selected) {
         if (nextStatus) applyStatus(nextStatus)
+        if (nextTitle) selectedTitle = nextTitle
         if (nextParents && nextPermissions && nextQuestions) {
           sessionParents.clear()
           for (const [id, parentID] of nextParents) sessionParents.set(id, parentID)
@@ -269,93 +292,112 @@ export default async function WispPlugin({ client, serverUrl, directory, worktre
   }
 
   register()
+  const startupTimer = sessionID ? setTimeout(refreshAndRegister, 1_000) : undefined
+  startupTimer?.unref?.()
   const heartbeat = setInterval(refreshAndRegister, 30_000)
   heartbeat.unref?.()
-  return {
-    event: async ({ event }) => {
-      if (event.type === "session.created") {
-        const info = event.properties?.info
-        if (typeof info?.id === "string" && info.id && typeof info.parentID === "string" && info.parentID) {
-          if (sessionParents.get(info.id) !== info.parentID) {
-            sessionParents.set(info.id, info.parentID)
-            revision += 1
-          }
-        }
-        if (!sessionID && info?.id && !info.parentID) {
-          selectSession(info.id)
-          register()
-        }
-        return
-      }
-      if (event.type === "session.deleted" && event.properties?.info?.id === sessionID) {
-        clearSession()
+  function handleEvent(event) {
+    const info = event.properties?.info
+    if ((event.type === "session.created" || event.type === "session.updated") && info?.id === sessionID) {
+      const title = sessionTitle(info)
+      if (title && title !== selectedTitle) {
+        selectedTitle = title
+        revision += 1
         register()
-        return
       }
-      if (!sessionID && event.type === "session.status") {
-        const activity = event.properties?.status?.type
-        if (event.properties?.sessionID && (activity === "busy" || activity === "retry")) {
-          selectSession(event.properties.sessionID)
-          applyStatus(event.properties.status)
-          register()
-        }
-        return
-      }
-      if (event.type === "session.error" && event.properties?.sessionID === sessionID) {
-        const error = event.properties?.error
-        const message = typeof error?.data?.message === "string" ? error.data.message : error?.name
-        if (typeof message === "string" && message) {
-          sessionError = message
+    }
+    if (event.type === "session.created") {
+      if (typeof info?.id === "string" && info.id && typeof info.parentID === "string" && info.parentID) {
+        if (sessionParents.get(info.id) !== info.parentID) {
+          sessionParents.set(info.id, info.parentID)
           revision += 1
-          register()
-        }
-        return
-      }
-      if (event.type === "session.status" && event.properties?.sessionID === sessionID) {
-        if (applyStatus(event.properties.status)) {
-          register()
-        }
-        return
-      }
-      if (event.type === "permission.asked" && ownsSession(event.properties?.sessionID)) {
-        const id = event.properties?.id
-        if (typeof id === "string" && id && !permissions.has(id)) {
-          permissions.add(id)
-          revision += 1
-          register()
-        }
-        return
-      }
-      if (event.type === "permission.replied" && ownsSession(event.properties?.sessionID)) {
-        if (permissions.delete(event.properties?.requestID)) {
-          revision += 1
-          register()
-        }
-        return
-      }
-      if (event.type === "question.asked" && ownsSession(event.properties?.sessionID)) {
-        const id = event.properties?.id
-        if (typeof id === "string" && id && !questions.has(id)) {
-          questions.add(id)
-          revision += 1
-          register()
-        }
-        return
-      }
-      if (
-        (event.type === "question.replied" || event.type === "question.rejected")
-        && ownsSession(event.properties?.sessionID)
-      ) {
-        if (questions.delete(event.properties?.requestID)) {
-          revision += 1
-          register()
         }
       }
+      if (!sessionID && info?.id && !info.parentID) {
+        selectSession(info.id, info.title)
+        register()
+      }
+      return
+    }
+    if (event.type === "session.deleted" && event.properties?.info?.id === sessionID) {
+      clearSession()
+      register()
+      return
+    }
+    if (!sessionID && event.type === "session.status") {
+      const activity = event.properties?.status?.type
+      if (event.properties?.sessionID && (activity === "busy" || activity === "retry")) {
+        selectSession(event.properties.sessionID)
+        applyStatus(event.properties.status)
+        register()
+      }
+      return
+    }
+    if (event.type === "session.error" && event.properties?.sessionID === sessionID) {
+      const error = event.properties?.error
+      const message = typeof error?.data?.message === "string" ? error.data.message : error?.name
+      if (typeof message === "string" && message) {
+        sessionError = message
+        revision += 1
+        register()
+      }
+      return
+    }
+    if (event.type === "session.status" && event.properties?.sessionID === sessionID) {
+      if (applyStatus(event.properties.status)) {
+        register()
+      }
+      return
+    }
+    if (event.type === "permission.asked" && ownsSession(event.properties?.sessionID)) {
+      const id = event.properties?.id
+      if (typeof id === "string" && id && !permissions.has(id)) {
+        permissions.add(id)
+        revision += 1
+        register()
+      }
+      return
+    }
+    if (event.type === "permission.replied" && ownsSession(event.properties?.sessionID)) {
+      if (permissions.delete(event.properties?.requestID)) {
+        revision += 1
+        register()
+      }
+      return
+    }
+    if (event.type === "question.asked" && ownsSession(event.properties?.sessionID)) {
+      const id = event.properties?.id
+      if (typeof id === "string" && id && !questions.has(id)) {
+        questions.add(id)
+        revision += 1
+        register()
+      }
+      return
+    }
+    if (
+      (event.type === "question.replied" || event.type === "question.rejected")
+      && ownsSession(event.properties?.sessionID)
+    ) {
+      if (questions.delete(event.properties?.requestID)) {
+        revision += 1
+        register()
+      }
+    }
+  }
+
+  return {
+    ...(projectTitle["experimental.chat.system.transform"]
+      ? { "experimental.chat.system.transform": projectTitle["experimental.chat.system.transform"] }
+      : {}),
+    event: async (input) => {
+      handleEvent(input.event)
+      await projectTitle.event?.(input)
     },
     dispose: async () => {
       disposed = true
       refreshGeneration += 1
       clearInterval(heartbeat)
+      if (startupTimer) clearTimeout(startupTimer)
       try {
         setStatusUserVar("")
       } catch {

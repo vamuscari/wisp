@@ -21,12 +21,14 @@ const WEZTERM_CLIENT: &[u8] = include_bytes!("../../../wezterm/client.lua");
 const WEZTERM_WORKSPACE: &[u8] = include_bytes!("../../../wezterm/workspace.lua");
 const WEZTERM_POPUP: &[u8] = include_bytes!("../../../wezterm/popup.lua");
 const WEZTERM_PICKER: &[u8] = include_bytes!("../../../wezterm/picker.lua");
+const WEZTERM_POWERLINE: &[u8] = include_bytes!("../../../wezterm/powerline.lua");
 const WEZTERM_STATUS: &[u8] = include_bytes!("../../../wezterm/status.lua");
 const WEZTERM_STATUS_ITEMS: &[u8] = include_bytes!("../../../wezterm/status_items.lua");
 const NVIM_ADAPTER: &[u8] = include_bytes!("../../../nvim/lua/wisp/init.lua");
 const NVIM_JSON: &[u8] = include_bytes!("../../../nvim/lua/wisp/json.lua");
 const NVIM_HELP: &[u8] = include_bytes!("../../../nvim/doc/wisp.txt");
 const OPENCODE_PLUGIN: &[u8] = include_bytes!("../../../opencode/wisp.js");
+const OPENCODE_PROJECT_TITLE: &[u8] = include_bytes!("../../../opencode/project-title.js");
 const PRUNE_TOMBSTONE_PREFIX: &str = ".prune-";
 
 #[derive(Debug, Error)]
@@ -125,12 +127,14 @@ pub fn deploy(replace_incompatible: bool) -> Result<PathBuf, DeployError> {
         ("wezterm/workspace.lua", WEZTERM_WORKSPACE),
         ("wezterm/popup.lua", WEZTERM_POPUP),
         ("wezterm/picker.lua", WEZTERM_PICKER),
+        ("wezterm/powerline.lua", WEZTERM_POWERLINE),
         ("wezterm/status.lua", WEZTERM_STATUS),
         ("wezterm/status_items.lua", WEZTERM_STATUS_ITEMS),
         ("nvim/lua/wisp/init.lua", NVIM_ADAPTER),
         ("nvim/lua/wisp/json.lua", NVIM_JSON),
         ("nvim/doc/wisp.txt", NVIM_HELP),
         ("opencode/wisp.js", OPENCODE_PLUGIN),
+        ("opencode/project-title.js", OPENCODE_PROJECT_TITLE),
     ];
     let bundle_id = bundle_id(&assets);
     let deployments = root.join("deployments");
@@ -461,12 +465,14 @@ fn verify_bundle(path: &Path, expected_id: &str) -> Result<Manifest, DeployError
         "wezterm/workspace.lua",
         "wezterm/popup.lua",
         "wezterm/picker.lua",
+        "wezterm/powerline.lua",
         "wezterm/status.lua",
         "wezterm/status_items.lua",
         "nvim/lua/wisp/init.lua",
         "nvim/lua/wisp/json.lua",
         "nvim/doc/wisp.txt",
         "opencode/wisp.js",
+        "opencode/project-title.js",
     ];
     if manifest.files.len() != expected_paths.len()
         || expected_paths

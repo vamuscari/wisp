@@ -5,6 +5,18 @@ its expected behavior and verification strategy.
 
 ## Features
 
+### WezTerm Tab-Button Pickers
+
+- [x] Add an opt-in `+` tab-button handler: left-click lists open Wisp projects,
+  right-click lists all live OpenCode sessions, and middle-click keeps WezTerm's
+  default new-tab action. Do not require a custom WezTerm build.
+- [x] Scope the left-click Projects popup to configured projects with a currently
+  open mux workspace; retain the full project catalog in ordinary pickers and
+  display a useful empty state when no projects are open.
+- [x] Test button dispatch, disabled/default behavior, live project filtering,
+  popup lifecycle, and the unmodified new-tab action; document the mouse mapping
+  and synchronize the package version before deployment.
+
 ### OpenCode Tab Status Colors
 
 - [x] Add opt-in OpenCode status colors to WezTerm tab backgrounds.
@@ -155,7 +167,7 @@ normal tab formatting.
   `~/Artifacts` manifest.
 - [x] Run `wisp deploy verify`, validate the live Wisp config, and confirm
   `wisp projects --json` still returns protocol v7.
-- [ ] Manually verify split-pane tab coloring, priority changes, pane moves,
+- [x] Manually verify split-pane tab coloring, priority changes, pane moves,
   normal OpenCode exit, and unaffected tabs without automating the host GUI.
 
 #### Acceptance Criteria
@@ -259,7 +271,7 @@ a companion float, or coordinating through a temporary sidecar.
 - [x] Run `cargo +1.85.0 check --workspace --locked`.
 - [x] Run `node --check opencode/wisp.js` and both OpenCode plugin test suites.
 - [x] Run `lua tests/run.lua` and `stylua --check .`.
-- [ ] Update managed config to version 8 before a live deployment, install
+- [x] Update managed config to version 8 before a live deployment, install
   package `0.12.0`, deploy with incompatible-schema replacement, and run bundle
   and live-consumer verification.
 
@@ -275,6 +287,100 @@ a companion float, or coordinating through a temporary sidecar.
   Pane, float, process, watcher, or sidecar.
 - All current strict readers require protocol version 8; old internal state is
   discarded and old external configuration or protocol input is rejected.
+
+### Picker Mouse Interaction
+
+- [x] Add complete mouse interaction to the picker without changing keyboard
+  behavior.
+
+#### Goal
+
+Make every visible picker row selectable and activatable with the mouse, and
+provide click access to every existing non-text keyboard action. Mouse support
+must remain host-neutral and use the same application actions as keyboard input.
+
+#### Interaction
+
+- [x] Enable mouse capture for the entire picker session, independently of
+  Preview visibility, and restore it on every normal and error exit path.
+- [x] Make the first physical left click focus, select, and arm a row, even when
+  that row was already selected by the keyboard.
+- [x] Make a second consecutive click on the same stable row target perform its
+  existing `Enter` action without a timed double-click gesture.
+- [x] Clear the armed row after keyboard navigation, wheel movement, mode
+  changes, replacement of the armed row's own data, or a click on another
+  target. Pointer movement and loading a separate child column must not disarm
+  it.
+- [x] Move selection one row per vertical wheel event in the list under the
+  pointer. Ignore right-click, middle-click, drag, and horizontal wheel events.
+- [x] Keep Window Preview hover independent from keyboard selection and use the
+  selected Window when the pointer is over the Pane column.
+
+#### Layout And Actions
+
+- [x] Derive rendering and mouse hit testing from shared layout calculations
+  covering Projects, Windows, Panes, Sessions, every visible file column, the
+  auxiliary pane, and the utility bar.
+- [x] Give Projects an explicit rendered list offset so hit testing and Ratatui
+  scrolling cannot diverge.
+- [x] Identify armed rows by stable project, workspace, window, pane, path, or
+  session identity rather than a filtered list index.
+- [x] Route keyboard shortcuts and click controls through shared semantic picker
+  actions rather than synthesizing key events.
+- [x] Add a compact, context-aware utility action bar for Views, Preview, Search,
+  and Commands while preserving mode, query, and error text.
+- [x] Replace the Commands text block with a clickable, responsive action
+  palette containing Default/Select, Jump Project, Parent, Window, Right,
+  Bottom, Refresh, Close Project, and Cancel. Wrap and scroll controls when the
+  auxiliary area is constrained, and dim unavailable actions.
+- [x] Synchronize the core Navigator to a clicked retained file column before
+  changing that column's cursor, including multi-level ancestor and descendant
+  jumps, so later preview and activation use the correct directory.
+
+#### Tests
+
+- [x] Cover first-click selection and second-click activation for Projects,
+  Windows, Panes, Files, and Sessions.
+- [x] Cover wheel focus and movement, blank panel space, ignored mouse events,
+  search mode, Window Preview hover, filtered lists, and scrolled lists.
+- [x] Cover wide, stacked, constrained, multi-column Files, Preview, and
+  Commands layouts with shared hit geometry.
+- [x] Cover retained file-column jumps and prove Navigator directory state stays
+  aligned before opening or descending.
+- [x] Exercise mouse-generated directory loads, session loads, refreshes,
+  selections, and cancellation through `run_with_terminal`.
+- [x] Verify mouse capture is enabled and disabled exactly once on successful,
+  cancelled, and error exits.
+
+#### Documentation And Versioning
+
+- [x] Document row activation, wheel behavior, clickable controls, and terminal
+  mouse capture in `README.md`.
+- [x] Bump the workspace package from `0.12.3` to `0.13.0` for the substantial
+  new picker capability and synchronize workspace lock entries and exact
+  package-version assertions.
+- [x] Keep protocol, config, cache, registry, and deployment schemas at version
+  8 because mouse interaction is internal to the TUI.
+
+#### Verification
+
+- [x] Run `cargo fmt --all -- --check`.
+- [x] Run `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+- [x] Run `cargo test --workspace --locked`.
+- [x] Run `rustup run 1.85.0 cargo check --workspace --locked`.
+- [x] Run `node --check opencode/wisp.js` and both OpenCode plugin test suites.
+- [x] Run `lua tests/run.lua` and `stylua --check .`.
+
+#### Acceptance Criteria
+
+- Every rendered selectable row can be focused, selected, and activated with
+  the mouse while retaining its exact keyboard semantics.
+- Every existing non-text keyboard action has a visible click path through the
+  compact bar or Commands palette.
+- Mouse-driven lazy loads and asynchronous updates cannot activate stale or
+  mismatched targets.
+- Mouse capture is always restored, keyboard-only operation remains unchanged,
+  and strict protocol version 8 behavior is unaffected.
 
 <!--
 - [ ] Feature name
@@ -389,7 +495,7 @@ selection, but it is missing from the on-screen Commands pane.
 - [x] Manually open the project picker in WezTerm, highlight a `○` project, and
   verify that `Enter` closes the picker and creates one default-shell project
   Window at the configured directory.
-- [ ] Manually verify that `o` jumps to both new and existing projects without
+- [x] Manually verify that `o` jumps to both new and existing projects without
   selecting a Window or Pane, while `Enter` still drills into an open project's
   existing windows.
 - [x] Before a live deployment, install the selected package version, confirm

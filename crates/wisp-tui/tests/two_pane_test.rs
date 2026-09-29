@@ -5,6 +5,7 @@ use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Color};
 use wisp_core::{
     config::{Openers, VcsIcons},
     model::{DirectoryEntry, EntryKind, Project},
+    navigation::Screen,
     opencode::{OpenCodeSession, OpenCodeSnapshot, SessionActivity, SessionWaiting},
     protocol::{FileHostTarget, HostContext, Selection},
 };
@@ -15,6 +16,15 @@ use wisp_tui::{
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
 }
 
 fn projects() -> Vec<Project> {
@@ -114,6 +124,54 @@ fn host_workspace_context() -> HostContext {
     .unwrap()
 }
 
+#[test]
+fn open_projects_only_excludes_closed_projects_and_unmanaged_workspaces() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(host_workspace_context()),
+        InitialView::Projects,
+    );
+    app.configure_open_projects_only(true);
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal).join("\n");
+    assert!(lines.contains("API Service"));
+    assert!(!lines.contains("Web Client"));
+    assert!(!lines.contains("Documentation"));
+    assert!(!lines.contains("default"));
+
+    let Command::Finish(Selection::Project { project, .. }) =
+        app.handle_key(key(KeyCode::Char('o'))).unwrap()
+    else {
+        panic!("only an open project should be selectable");
+    };
+    assert_eq!(project.id, "api");
+}
+
+#[test]
+fn open_projects_only_has_no_closed_project_selection() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(HostContext::default()),
+        InitialView::Projects,
+    );
+    app.configure_open_projects_only(true);
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal).join("\n");
+    assert!(lines.contains("No open projects"));
+    assert!(matches!(
+        app.handle_key(key(KeyCode::Char('o'))).unwrap(),
+        Command::None
+    ));
+}
+
 fn session(
     id: &str,
     title: &str,
@@ -185,6 +243,147 @@ fn sessions_command_loads_the_selected_project_and_groups_children() {
         app.visible_detail_labels(),
         vec!["Needs input", "Root task", "  Child task"]
     );
+}
+
+#[test]
+fn idle_opencode_launch_is_visible_until_a_session_is_selected() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Sessions,
+        vec!["opencode".into()],
+    );
+    app.load_sessions(OpenCodeSnapshot {
+        sessions: vec![session(
+            "launch:104:/repos/docs",
+            "[docs] OpenCode starting",
+            None,
+            SessionActivity::Idle,
+            SessionWaiting::default(),
+        )],
+        ..OpenCodeSnapshot::default()
+    });
+
+    assert_eq!(
+        app.visible_detail_labels(),
+        vec!["[docs] OpenCode starting"]
+    );
+    assert_eq!(app.handle_key(key(KeyCode::Enter)).unwrap(), Command::None);
+    assert_eq!(
+        app.status(),
+        Some("OpenCode has not selected a session yet")
+    );
+
+    app.load_sessions(OpenCodeSnapshot {
+        sessions: vec![session(
+            "ses_ready",
+            "[docs] Ready",
+            None,
+            SessionActivity::Idle,
+            SessionWaiting::default(),
+        )],
+        ..OpenCodeSnapshot::default()
+    });
+    assert_eq!(app.visible_detail_labels(), vec!["[docs] Ready"]);
+}
+
+#[test]
+fn global_sessions_show_every_project_and_select_the_sessions_own_project() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Sessions,
+        vec!["opencode".into()],
+    );
+    app.configure_all_sessions(true);
+    app.load_sessions(OpenCodeSnapshot {
+        sessions: vec![
+            session(
+                "ses_docs",
+                "Docs task",
+                None,
+                SessionActivity::Idle,
+                SessionWaiting::default(),
+            ),
+            OpenCodeSession {
+                id: "ses_web".into(),
+                title: "Web task".into(),
+                directory: PathBuf::from("/repos/web"),
+                ..session(
+                    "ses_docs",
+                    "Docs task",
+                    None,
+                    SessionActivity::Idle,
+                    SessionWaiting::default(),
+                )
+            },
+        ],
+        project_ids: [
+            ("ses_docs".into(), "docs".into()),
+            ("ses_web".into(), "web".into()),
+        ]
+        .into(),
+        ..OpenCodeSnapshot::default()
+    });
+
+    assert_eq!(app.visible_detail_labels(), vec!["Docs task", "Web task"]);
+    app.handle_key(key(KeyCode::Down)).unwrap();
+    let Command::Finish(Selection::OpenCodeSession {
+        project,
+        session_id,
+        ..
+    }) = app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("global selection must target the session's project");
+    };
+    assert_eq!(project.id, "web");
+    assert_eq!(session_id, "ses_web");
+}
+
+#[test]
+fn global_sessions_can_open_from_an_unmanaged_workspace() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(host_workspace_context()),
+        InitialView::Sessions,
+        vec!["opencode".into()],
+    );
+    app.configure_all_sessions(true);
+    assert_eq!(app.right_mode(), RightMode::Sessions);
+    assert_eq!(app.status(), None);
+    app.load_sessions(OpenCodeSnapshot {
+        sessions: vec![session(
+            "ses_docs",
+            "Docs task",
+            None,
+            SessionActivity::Idle,
+            SessionWaiting::default(),
+        )],
+        project_ids: [("ses_docs".into(), "docs".into())].into(),
+        ..OpenCodeSnapshot::default()
+    });
+    assert_eq!(app.visible_detail_labels(), vec!["Docs task"]);
+}
+
+#[test]
+fn current_project_sessions_hide_other_projects_from_the_project_list() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Sessions,
+        vec!["opencode".into()],
+    );
+    app.configure_current_project_only(true);
+
+    assert_eq!(app.visible_project_labels(), vec!["Documentation"]);
 }
 
 #[test]
@@ -1574,7 +1773,8 @@ fn mouse_hover_changes_only_the_window_preview_target() {
             modifiers: KeyModifiers::NONE,
         },
         Rect::new(0, 0, 120, 24),
-    );
+    )
+    .unwrap();
 
     assert_eq!(
         app.detail_cursor(),
@@ -1591,30 +1791,912 @@ fn mouse_hover_changes_only_the_window_preview_target() {
             modifiers: KeyModifiers::NONE,
         },
         Rect::new(0, 0, 200, 24),
-    );
+    )
+    .unwrap();
     assert_eq!(
         app.window_preview_target(),
         Some("72".into()),
         "hovering the Pane column must keep the keyboard-selected window target"
     );
 
-    app.handle_mouse(
-        MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 42,
-            row: 1,
-            modifiers: KeyModifiers::NONE,
-        },
-        Rect::new(0, 0, 120, 24),
-    );
-    assert_eq!(
-        app.detail_cursor(),
-        1,
-        "clicks must not activate or select windows"
-    );
-
     app.handle_key(key(KeyCode::Down)).unwrap();
     assert_eq!(app.window_preview_target(), Some("72".into()));
+}
+
+#[test]
+fn project_row_requires_one_click_to_arm_and_a_second_to_activate() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    let area = Rect::new(0, 0, 120, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 2, 1);
+
+    app.handle_mouse(click, area).unwrap();
+    assert_eq!(app.focus(), Focus::Projects);
+    assert_eq!(app.selected_project_id(), Some("docs"));
+
+    app.handle_mouse(click, area).unwrap();
+    assert_eq!(app.focus(), Focus::Detail);
+}
+
+#[test]
+fn clicking_blank_project_space_only_focuses_the_project_pane() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+
+    assert_eq!(
+        app.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 10),
+            Rect::new(0, 0, 120, 24),
+        )
+        .unwrap(),
+        Command::None
+    );
+
+    assert_eq!(app.focus(), Focus::Projects);
+    assert_eq!(app.selected_project_id(), Some("docs"));
+}
+
+#[test]
+fn clicking_blank_window_space_only_focuses_the_window_pane() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+
+    assert_eq!(
+        app.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 42, 10),
+            Rect::new(0, 0, 120, 24),
+        )
+        .unwrap(),
+        Command::None
+    );
+
+    assert_eq!(app.focus(), Focus::Detail);
+}
+
+#[test]
+fn keyboard_navigation_clears_an_armed_mouse_row() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    let area = Rect::new(0, 0, 120, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 2, 1);
+
+    app.handle_mouse(click, area).unwrap();
+    app.handle_key(key(KeyCode::Down)).unwrap();
+    app.handle_key(key(KeyCode::Up)).unwrap();
+    app.handle_mouse(click, area).unwrap();
+
+    assert_eq!(app.focus(), Focus::Projects);
+}
+
+#[test]
+fn replacing_data_clears_an_armed_mouse_row() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    let area = Rect::new(0, 0, 120, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 2, 1);
+
+    app.handle_mouse(click, area).unwrap();
+    app.replace_projects(projects());
+    app.handle_mouse(click, area).unwrap();
+
+    assert_eq!(app.focus(), Focus::Projects);
+}
+
+#[test]
+fn loading_sessions_preserves_an_armed_project_row() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+    app.handle_key(key(KeyCode::Char('s'))).unwrap();
+    app.load_sessions(OpenCodeSnapshot::default());
+    let area = Rect::new(0, 0, 120, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 2, 2);
+
+    assert_eq!(
+        app.handle_mouse(click, area).unwrap(),
+        Command::LoadSessions(PathBuf::from("/repos/web"))
+    );
+    app.load_sessions(OpenCodeSnapshot::default());
+    assert_eq!(
+        app.handle_mouse(click, area).unwrap(),
+        Command::LoadSessions(PathBuf::from("/repos/web"))
+    );
+    assert_eq!(app.focus(), Focus::Detail);
+}
+
+#[test]
+fn mouse_wheel_focuses_the_list_under_the_pointer_and_moves_selection() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+
+    assert_eq!(
+        app.handle_mouse(
+            mouse(MouseEventKind::ScrollDown, 2, 1),
+            Rect::new(0, 0, 120, 24),
+        )
+        .unwrap(),
+        Command::None
+    );
+
+    assert_eq!(app.focus(), Focus::Projects);
+    assert_eq!(app.selected_project_id(), Some("web"));
+}
+
+#[test]
+fn mouse_wheel_moves_the_window_list_under_the_pointer() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    assert_eq!(app.detail_cursor(), 1);
+
+    assert_eq!(
+        app.handle_mouse(
+            mouse(MouseEventKind::ScrollUp, 42, 1),
+            Rect::new(0, 0, 120, 24),
+        )
+        .unwrap(),
+        Command::None
+    );
+
+    assert_eq!(app.focus(), Focus::Detail);
+    assert_eq!(app.detail_cursor(), 0);
+}
+
+#[test]
+fn mouse_wheel_moves_the_pane_list_under_the_pointer() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+
+    assert_eq!(
+        app.handle_mouse(
+            mouse(MouseEventKind::ScrollDown, 78, 1),
+            Rect::new(0, 0, 120, 24),
+        )
+        .unwrap(),
+        Command::None
+    );
+
+    let Command::Finish(Selection::HostPane { pane_id, .. }) =
+        app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("wheel over Panes should focus and move that list");
+    };
+    assert_eq!(pane_id, "73");
+}
+
+#[test]
+fn mouse_wheel_moves_the_session_list_under_the_pointer() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+    app.handle_key(key(KeyCode::Char('s'))).unwrap();
+    app.load_sessions(OpenCodeSnapshot {
+        sessions: vec![
+            session(
+                "ses_root",
+                "Root task",
+                None,
+                SessionActivity::Idle,
+                SessionWaiting::default(),
+            ),
+            session(
+                "ses_urgent",
+                "Needs input",
+                None,
+                SessionActivity::Running,
+                SessionWaiting {
+                    permissions: 0,
+                    questions: 1,
+                },
+            ),
+        ],
+        ..OpenCodeSnapshot::default()
+    });
+
+    app.handle_mouse(
+        mouse(MouseEventKind::ScrollDown, 42, 1),
+        Rect::new(0, 0, 120, 24),
+    )
+    .unwrap();
+
+    let Command::Finish(Selection::OpenCodeSession { session_id, .. }) =
+        app.handle_key(key(KeyCode::Enter)).unwrap()
+    else {
+        panic!("wheel over Sessions should focus and move that list");
+    };
+    assert_eq!(session_id, "ses_root");
+}
+
+#[test]
+fn mouse_wheel_moves_the_file_column_and_previews_a_directory() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![
+        DirectoryEntry::new(PathBuf::from("/repos/docs/README.md"), EntryKind::File),
+        DirectoryEntry::new(PathBuf::from("/repos/docs/src"), EntryKind::Directory),
+    ]);
+
+    assert_eq!(
+        app.handle_mouse(
+            mouse(MouseEventKind::ScrollDown, 42, 1),
+            Rect::new(0, 0, 120, 24),
+        )
+        .unwrap(),
+        Command::LoadDirectory(PathBuf::from("/repos/docs/src"))
+    );
+    assert_eq!(app.focus(), Focus::Detail);
+    assert_eq!(app.detail_cursor(), 1);
+}
+
+#[test]
+fn utility_bar_files_control_uses_the_existing_view_action() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal);
+    let (row, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("[Files]"))
+        .expect("utility bar should render a Files control");
+    let column = line.find("[Files]").unwrap() as u16 + 1;
+
+    assert_eq!(
+        app.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row as u16),
+            Rect::new(0, 0, 120, 24),
+        )
+        .unwrap(),
+        Command::LoadDirectory(PathBuf::from("/repos/docs"))
+    );
+    assert_eq!(app.right_mode(), RightMode::Files);
+}
+
+#[test]
+fn clicking_a_disabled_control_clears_an_armed_row() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    let area = Rect::new(0, 0, 120, 24);
+    let project_click = mouse(MouseEventKind::Down(MouseButton::Left), 2, 1);
+    app.handle_mouse(project_click, area).unwrap();
+
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal);
+    let (row, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("[Preview]"))
+        .expect("utility bar should render a Preview control");
+    let column = line.find("[Preview]").unwrap() as u16 + 1;
+    assert_eq!(
+        app.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row as u16),
+            area,
+        )
+        .unwrap(),
+        Command::None
+    );
+
+    app.handle_mouse(project_click, area).unwrap();
+    assert_eq!(app.focus(), Focus::Projects);
+}
+
+#[test]
+fn commands_palette_controls_dispatch_existing_picker_actions() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal);
+    let (row, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("[Commands]"))
+        .expect("utility bar should render a Commands control");
+    let column = line.find("[Commands]").unwrap() as u16 + 1;
+    assert_eq!(
+        app.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row as u16),
+            Rect::new(0, 0, 120, 24),
+        )
+        .unwrap(),
+        Command::None
+    );
+
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal);
+    let (row, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("[o Jump Project]"))
+        .expect("Commands should render a Jump control");
+    let column = line.find("[o Jump Project]").unwrap() as u16 + 1;
+
+    let Command::Finish(Selection::Project { project, .. }) = app
+        .handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row as u16),
+            Rect::new(0, 0, 120, 24),
+        )
+        .unwrap()
+    else {
+        panic!("Jump control should directly select the current project");
+    };
+    assert_eq!(project.id, "docs");
+}
+
+#[test]
+fn commands_palette_refresh_control_returns_the_contextual_refresh_command() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal);
+    let (row, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("[Ctrl-R Refresh]"))
+        .expect("Commands should render a Refresh control");
+    let column = line.find("[Ctrl-R Refresh]").unwrap() as u16 + 1;
+
+    assert_eq!(
+        app.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row as u16),
+            Rect::new(0, 0, 120, 24),
+        )
+        .unwrap(),
+        Command::RefreshProjects
+    );
+}
+
+#[test]
+fn commands_palette_parent_control_returns_from_the_file_root() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(Vec::new());
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    let lines = rendered_lines(&terminal);
+    let (row, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("[Backspace Parent]"))
+        .expect("Commands should render a Parent control");
+    let column = line.find("[Backspace Parent]").unwrap() as u16 + 1;
+
+    assert_eq!(
+        app.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row as u16),
+            Rect::new(0, 0, 120, 24),
+        )
+        .unwrap(),
+        Command::None
+    );
+    assert_eq!(app.focus(), Focus::Projects);
+}
+
+#[test]
+fn constrained_commands_palette_scrolls_to_every_control() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('?'))).unwrap();
+    let backend = TestBackend::new(60, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+    assert!(
+        !rendered_lines(&terminal)
+            .join("\n")
+            .contains("?/Esc Close Help")
+    );
+
+    for _ in 0..8 {
+        app.handle_mouse(
+            mouse(MouseEventKind::ScrollDown, 2, 4),
+            Rect::new(0, 0, 60, 10),
+        )
+        .unwrap();
+    }
+    terminal.draw(|frame| render(frame, &app)).unwrap();
+
+    let rendered = rendered_lines(&terminal).join("\n");
+    assert!(rendered.contains("?/Esc Close Help"), "{rendered}");
+}
+
+#[test]
+fn mouse_hit_testing_uses_filtered_project_rows() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('/'))).unwrap();
+    for character in "web".chars() {
+        app.handle_key(key(KeyCode::Char(character))).unwrap();
+    }
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 2, 1);
+    let area = Rect::new(0, 0, 120, 24);
+
+    app.handle_mouse(click, area).unwrap();
+    assert_eq!(app.selected_project_id(), Some("web"));
+    app.handle_mouse(click, area).unwrap();
+    assert_eq!(app.focus(), Focus::Detail);
+}
+
+#[test]
+fn mouse_hit_testing_uses_the_rendered_project_scroll_offset() {
+    let projects = (0..30)
+        .map(|index| Project {
+            id: format!("p{index:02}"),
+            path: PathBuf::from(format!("/repos/p{index:02}")),
+            group: "Repos".into(),
+            name: format!("p{index:02}"),
+            display_name: format!("Project {index:02}"),
+        })
+        .collect();
+    let mut app = App::new(
+        projects,
+        Openers::default(),
+        false,
+        None,
+        InitialView::Projects,
+    );
+    for _ in 0..25 {
+        app.handle_key(key(KeyCode::Down)).unwrap();
+    }
+
+    app.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 2, 1),
+        Rect::new(0, 0, 100, 10),
+    )
+    .unwrap();
+
+    assert_eq!(app.selected_project_id(), Some("p21"));
+}
+
+#[test]
+fn unsupported_mouse_events_do_not_change_selection_or_focus() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    let area = Rect::new(0, 0, 120, 24);
+    for kind in [
+        MouseEventKind::Down(MouseButton::Right),
+        MouseEventKind::Down(MouseButton::Middle),
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::ScrollLeft,
+        MouseEventKind::ScrollRight,
+    ] {
+        assert_eq!(
+            app.handle_mouse(mouse(kind, 2, 2), area).unwrap(),
+            Command::None
+        );
+    }
+
+    assert_eq!(app.focus(), Focus::Projects);
+    assert_eq!(app.selected_project_id(), Some("docs"));
+}
+
+#[test]
+fn window_row_selects_then_activates_its_single_pane() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    app.configure_single_pane_behavior(SinglePaneBehavior::Activate);
+    let area = Rect::new(0, 0, 120, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 42, 1);
+
+    assert_eq!(app.handle_mouse(click, area).unwrap(), Command::None);
+
+    let Command::Finish(Selection::HostPane {
+        project,
+        window_id,
+        pane_id,
+    }) = app.handle_mouse(click, area).unwrap()
+    else {
+        panic!("second window click should activate its pane");
+    };
+    assert_eq!(project.id, "docs");
+    assert_eq!(window_id, "17");
+    assert_eq!(pane_id, "71");
+}
+
+#[test]
+fn stacked_window_row_uses_the_same_click_geometry_as_rendering() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    app.configure_single_pane_behavior(SinglePaneBehavior::Activate);
+    let area = Rect::new(0, 0, 60, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 2, 9);
+
+    assert_eq!(app.handle_mouse(click, area).unwrap(), Command::None);
+    let Command::Finish(Selection::HostPane {
+        window_id, pane_id, ..
+    }) = app.handle_mouse(click, area).unwrap()
+    else {
+        panic!("stacked Window click should activate its rendered row");
+    };
+    assert_eq!(window_id, "17");
+    assert_eq!(pane_id, "71");
+}
+
+#[test]
+fn pane_row_selects_then_activates_the_exact_pane() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Windows,
+    );
+    let area = Rect::new(0, 0, 120, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 78, 2);
+
+    assert_eq!(app.handle_mouse(click, area).unwrap(), Command::None);
+
+    let Command::Finish(Selection::HostPane {
+        project,
+        window_id,
+        pane_id,
+    }) = app.handle_mouse(click, area).unwrap()
+    else {
+        panic!("second pane click should activate that exact pane");
+    };
+    assert_eq!(project.id, "docs");
+    assert_eq!(window_id, "18");
+    assert_eq!(pane_id, "73");
+}
+
+#[test]
+fn session_row_selects_then_attaches_to_the_session() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+    app.handle_key(key(KeyCode::Char('s'))).unwrap();
+    app.load_sessions(OpenCodeSnapshot {
+        sessions: vec![session(
+            "ses_root",
+            "Root task",
+            None,
+            SessionActivity::Idle,
+            SessionWaiting::default(),
+        )],
+        ..OpenCodeSnapshot::default()
+    });
+    let area = Rect::new(0, 0, 120, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 42, 1);
+
+    assert_eq!(app.handle_mouse(click, area).unwrap(), Command::None);
+
+    let Command::Finish(Selection::OpenCodeSession { session_id, .. }) =
+        app.handle_mouse(click, area).unwrap()
+    else {
+        panic!("second session click should attach to that session");
+    };
+    assert_eq!(session_id, "ses_root");
+}
+
+#[test]
+fn clicking_blank_session_space_only_focuses_the_session_pane() {
+    let mut app = App::new_with_opencode(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+        vec!["opencode".into()],
+    );
+    app.handle_key(key(KeyCode::Char('s'))).unwrap();
+    app.load_sessions(OpenCodeSnapshot::default());
+    app.handle_key(key(KeyCode::Left)).unwrap();
+    assert_eq!(app.focus(), Focus::Projects);
+
+    app.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 42, 10),
+        Rect::new(0, 0, 120, 24),
+    )
+    .unwrap();
+
+    assert_eq!(app.focus(), Focus::Detail);
+}
+
+#[test]
+fn file_row_selects_then_opens_the_file() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/README.md"),
+        EntryKind::File,
+    )]);
+    let area = Rect::new(0, 0, 120, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 42, 1);
+
+    assert_eq!(app.handle_mouse(click, area).unwrap(), Command::None);
+
+    let Command::Finish(Selection::File { project, path, .. }) =
+        app.handle_mouse(click, area).unwrap()
+    else {
+        panic!("second file click should open that file");
+    };
+    assert_eq!(project.id, "docs");
+    assert_eq!(path, PathBuf::from("/repos/docs/README.md"));
+}
+
+#[test]
+fn directory_row_stays_armed_while_its_child_column_loads() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src"),
+        EntryKind::Directory,
+    )]);
+    let area = Rect::new(0, 0, 120, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 42, 1);
+
+    assert_eq!(
+        app.handle_mouse(click, area).unwrap(),
+        Command::LoadDirectory(PathBuf::from("/repos/docs/src"))
+    );
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src/lib.rs"),
+        EntryKind::File,
+    )]);
+    assert_eq!(app.handle_mouse(click, area).unwrap(), Command::None);
+    assert_eq!(
+        app.current_directory(),
+        Some(PathBuf::from("/repos/docs/src").as_path())
+    );
+}
+
+#[test]
+fn mouse_input_cancels_a_pending_directory_descent_before_realigning() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src"),
+        EntryKind::Directory,
+    )]);
+    let area = Rect::new(0, 0, 120, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 42, 1);
+    assert_eq!(
+        app.handle_mouse(click, area).unwrap(),
+        Command::LoadDirectory(PathBuf::from("/repos/docs/src"))
+    );
+    assert_eq!(
+        app.handle_mouse(click, area).unwrap(),
+        Command::LoadDirectory(PathBuf::from("/repos/docs/src"))
+    );
+
+    assert_eq!(
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 42, 1), area)
+            .unwrap(),
+        Command::None
+    );
+    let Screen::Directory { path, .. } = app.screen() else {
+        panic!("cancelling the pending descent should restore its parent");
+    };
+    assert_eq!(path, PathBuf::from("/repos/docs"));
+}
+
+#[test]
+fn clicking_an_ancestor_file_column_realigns_the_navigator_before_opening() {
+    let mut app = App::new(
+        projects(),
+        Openers::default(),
+        false,
+        Some(context()),
+        InitialView::Projects,
+    );
+    app.handle_key(key(KeyCode::Char('f'))).unwrap();
+    app.load_directory(vec![
+        DirectoryEntry::new(PathBuf::from("/repos/docs/README.md"), EntryKind::File),
+        DirectoryEntry::new(PathBuf::from("/repos/docs/src"), EntryKind::Directory),
+    ]);
+    assert_eq!(
+        app.handle_key(key(KeyCode::Down)).unwrap(),
+        Command::LoadDirectory(PathBuf::from("/repos/docs/src"))
+    );
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src/components"),
+        EntryKind::Directory,
+    )]);
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)).unwrap(),
+        Command::LoadDirectory(PathBuf::from("/repos/docs/src/components"))
+    );
+    app.load_directory(vec![DirectoryEntry::new(
+        PathBuf::from("/repos/docs/src/components/button.rs"),
+        EntryKind::File,
+    )]);
+    assert_eq!(app.handle_key(key(KeyCode::Enter)).unwrap(), Command::None);
+
+    let area = Rect::new(0, 0, 180, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 58, 1);
+    assert_eq!(app.handle_mouse(click, area).unwrap(), Command::None);
+    let Screen::Directory { path, .. } = app.screen() else {
+        panic!("Files mode should remain on a directory screen");
+    };
+    assert_eq!(path, PathBuf::from("/repos/docs"));
+
+    let Command::Finish(Selection::File { path, .. }) = app.handle_mouse(click, area).unwrap()
+    else {
+        panic!("second ancestor-column click should open the selected file");
+    };
+    assert_eq!(path, PathBuf::from("/repos/docs/README.md"));
+}
+
+#[test]
+fn clicking_a_retained_descendant_column_replays_the_directory_path() {
+    let mut app = deeply_browsed_files_app();
+    app.handle_key(key(KeyCode::Backspace)).unwrap();
+    app.handle_key(key(KeyCode::Backspace)).unwrap();
+    let Screen::Directory { path, .. } = app.screen() else {
+        panic!("Files mode should remain on a directory screen");
+    };
+    assert_eq!(path, PathBuf::from("/repos/docs"));
+
+    let area = Rect::new(0, 0, 180, 24);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 150, 1);
+    assert_eq!(app.handle_mouse(click, area).unwrap(), Command::None);
+    let Screen::Directory { path, .. } = app.screen() else {
+        panic!("Files mode should remain on a directory screen");
+    };
+    assert_eq!(path, PathBuf::from("/repos/docs/src/components"));
+
+    let Command::Finish(Selection::File { path, .. }) = app.handle_mouse(click, area).unwrap()
+    else {
+        panic!("second descendant-column click should open the selected file");
+    };
+    assert_eq!(path, PathBuf::from("/repos/docs/src/components/button.rs"));
+}
+
+#[test]
+fn clicking_blank_file_column_space_focuses_and_aligns_that_column() {
+    let mut app = deeply_browsed_files_app();
+    let area = Rect::new(0, 0, 180, 24);
+
+    assert_eq!(
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 58, 10), area,)
+            .unwrap(),
+        Command::None
+    );
+    let Screen::Directory { path, .. } = app.screen() else {
+        panic!("Files mode should remain on a directory screen");
+    };
+    assert_eq!(path, PathBuf::from("/repos/docs"));
+    assert_eq!(app.current_directory(), Some(path.as_path()));
 }
 
 #[test]
@@ -1865,7 +2947,9 @@ fn commands_show_default_and_forced_file_open_targets() {
     assert!(rendered.contains("Ctrl-V Right"));
     assert!(rendered.contains("Ctrl-X Bottom"));
     assert!(rendered.contains("p File/Window Preview"));
-    assert!(rendered.contains("w/f/s View"));
+    assert!(rendered.contains("[w Windows]"));
+    assert!(rendered.contains("[f Files]"));
+    assert!(rendered.contains("[s Sessions]"));
     assert!(rendered.contains("Ctrl-R Refresh"));
 }
 
@@ -1889,7 +2973,7 @@ fn commands_replace_the_detail_pane_when_height_is_constrained() {
 
     assert!(rendered.contains("Projects"));
     assert!(rendered.contains("Commands"));
-    assert!(!lines[..7].iter().any(|line| line.contains("Windows")));
+    assert!(!lines[..7].iter().any(|line| line.contains(" Windows ")));
 }
 
 #[test]

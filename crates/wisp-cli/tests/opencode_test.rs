@@ -19,6 +19,7 @@ use wisp_cli::opencode::{
 };
 use wisp_core::{
     config::OpenCodeConfig,
+    model::Project,
     opencode::{SessionActivity, SessionDisplayState, SessionWaiting},
 };
 
@@ -140,6 +141,149 @@ fn now_millis() -> u64 {
         .as_millis()
         .try_into()
         .unwrap()
+}
+
+#[test]
+fn registry_only_snapshot_lists_live_sessions_without_reaching_the_private_tui_server() {
+    let registry = TempDir::new().unwrap();
+    for (pid, project, session_id, pane_id, activity) in [
+        (
+            101,
+            "/repos/wisp",
+            "ses_wisp",
+            "42",
+            SessionActivity::Running,
+        ),
+        (
+            103,
+            "/repos/wisp",
+            "ses_second",
+            "44",
+            SessionActivity::Idle,
+        ),
+        (
+            102,
+            "/repos/other",
+            "ses_other",
+            "43",
+            SessionActivity::Idle,
+        ),
+    ] {
+        register_instance(
+            registry.path(),
+            &RegistryRegistration {
+                server_url: "http://127.0.0.1:1".into(),
+                directory: PathBuf::from(project),
+                project_path: PathBuf::from(project),
+                pid,
+                pane_id: Some(pane_id.into()),
+                session_id: Some(session_id.into()),
+                session_title: (session_id == "ses_wisp").then(|| "[wisp] My session".into()),
+                session_activity: Some(activity),
+                session_waiting: SessionWaiting::default(),
+                session_error: None,
+            },
+        )
+        .unwrap();
+    }
+    register_instance(
+        registry.path(),
+        &RegistryRegistration {
+            server_url: "http://127.0.0.1:1".into(),
+            directory: PathBuf::from("/repos/wisp"),
+            project_path: PathBuf::from("/repos/wisp"),
+            pid: 104,
+            pane_id: Some("45".into()),
+            session_id: None,
+            session_title: None,
+            session_activity: None,
+            session_waiting: SessionWaiting::default(),
+            session_error: None,
+        },
+    )
+    .unwrap();
+
+    let client = OpenCodeClient::with_registry_only_dir(registry.path().to_path_buf());
+    assert!(client.watch_shared().is_none());
+    let snapshot = client.snapshot(Path::new("/repos/wisp")).unwrap();
+
+    assert_eq!(snapshot.sessions.len(), 3);
+    let launch = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == "launch:104:/repos/wisp")
+        .unwrap();
+    assert_eq!(launch.title, "[wisp] OpenCode starting");
+    assert_eq!(launch.activity, SessionActivity::Idle);
+    assert_eq!(
+        snapshot.host_items.get(&launch.id).map(String::as_str),
+        Some("pane:45")
+    );
+    let running = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == "ses_wisp")
+        .unwrap();
+    assert_eq!(running.title, "[wisp] My session");
+    assert_eq!(
+        snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == "ses_second")
+            .unwrap()
+            .title,
+        "[wisp] New session"
+    );
+    assert_eq!(running.activity, SessionActivity::Running);
+    assert_eq!(
+        snapshot.host_items.get("ses_wisp").map(String::as_str),
+        Some("pane:42")
+    );
+    assert_eq!(
+        snapshot.host_items.get("ses_second").map(String::as_str),
+        Some("pane:44")
+    );
+    assert!(snapshot.conflicts.is_empty());
+    assert!(
+        client
+            .snapshot(Path::new("/repos/empty"))
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    let all = client
+        .live_snapshot_all(&[
+            Project {
+                id: "wisp".into(),
+                path: "/repos/wisp".into(),
+                group: "Repos".into(),
+                name: "wisp".into(),
+                display_name: "Wisp".into(),
+            },
+            Project {
+                id: "other".into(),
+                path: "/repos/other".into(),
+                group: "Repos".into(),
+                name: "other".into(),
+                display_name: "Other".into(),
+            },
+        ])
+        .unwrap();
+    assert_eq!(all.sessions.len(), 4);
+    assert_eq!(
+        all.project_ids.get("ses_wisp").map(String::as_str),
+        Some("wisp")
+    );
+    assert_eq!(
+        all.project_ids.get("ses_other").map(String::as_str),
+        Some("other")
+    );
+    assert_eq!(
+        all.project_ids
+            .get("launch:104:/repos/wisp")
+            .map(String::as_str),
+        Some("wisp")
+    );
 }
 
 #[test]
@@ -270,7 +414,7 @@ fn registry_adds_unmanaged_servers_and_exact_pane_mappings() {
     fs::write(
         registry.path().join("instance.json"),
         serde_json::json!({
-            "registry_version": 8,
+            "registry_version": 9,
             "instance_id": "123:/repos/wisp",
             "pid": 123,
             "server_url": unmanaged.url(),
@@ -317,6 +461,7 @@ fn registered_session_errors_are_reflected_in_picker_snapshots() {
             pid: 123,
             pane_id: Some("42".into()),
             session_id: Some("ses_error".into()),
+            session_title: None,
             session_activity: Some(SessionActivity::Idle),
             session_waiting: Default::default(),
             session_error: Some("provider failed".into()),
@@ -349,7 +494,7 @@ fn registry_project_matching_uses_windows_path_identity_rules() {
     fs::write(
         registry.path().join("instance.json"),
         serde_json::json!({
-            "registry_version": 8,
+            "registry_version": 9,
             "instance_id": "123:C:\\Repos\\Wisp",
             "pid": 123,
             "server_url": unmanaged.url(),
@@ -381,7 +526,7 @@ fn transient_unmanaged_server_failure_preserves_its_registration() {
     fs::write(
         &path,
         serde_json::json!({
-            "registry_version": 8,
+            "registry_version": 9,
             "instance_id": "123:/repos/wisp",
             "pid": 123,
             "server_url": unavailable_url,
@@ -417,7 +562,7 @@ fn stale_registry_entries_are_discarded_before_session_aggregation() {
     fs::write(
         &path,
         serde_json::json!({
-            "registry_version": 8,
+            "registry_version": 9,
             "instance_id": "123:/repos/wisp",
             "pid": 123,
             "server_url": stale.url(),
@@ -446,7 +591,7 @@ fn incompatible_registry_entries_are_discarded_without_interpretation() {
     let path = registry.path().join("future.json");
     fs::write(
         &path,
-        r#"{"registry_version":7,"future_server_shape":true}"#,
+        r#"{"registry_version":8,"previous_server_shape":true}"#,
     )
     .unwrap();
     let client = OpenCodeClient::with_registry_dir(config(&shared), registry.path().to_path_buf());
@@ -465,7 +610,7 @@ fn registry_entries_with_duplicate_fields_are_discarded_before_use() {
     fs::write(
         &path,
         format!(
-            r#"{{"registry_version":8,"registry_version":8,"instance_id":"1:/repos/wisp","pid":1,"server_url":"{}","directory":"/repos/wisp","project_path":"/repos/wisp","updated_at":{},"session_waiting":{{"permissions":0,"questions":0}}}}"#,
+            r#"{{"registry_version":9,"registry_version":9,"instance_id":"1:/repos/wisp","pid":1,"server_url":"{}","directory":"/repos/wisp","project_path":"/repos/wisp","updated_at":{},"session_waiting":{{"permissions":0,"questions":0}}}}"#,
             server.url(),
             now_millis()
         ),
@@ -487,7 +632,7 @@ fn current_registry_entries_with_invalid_semantics_are_discarded() {
     fs::write(
         &path,
         serde_json::json!({
-            "registry_version": 8,
+            "registry_version": 9,
             "instance_id": "0:/repos/wisp",
             "pid": 0,
             "server_url": server.url(),
@@ -517,7 +662,7 @@ fn registry_entries_from_the_future_are_discarded() {
     fs::write(
         &path,
         serde_json::json!({
-            "registry_version": 8,
+            "registry_version": 9,
             "instance_id": "1:/repos/wisp",
             "pid": 1,
             "server_url": server.url(),
@@ -552,7 +697,7 @@ fn duplicate_live_session_ids_from_different_servers_are_marked_as_conflicts() {
     fs::write(
         registry.path().join("instance.json"),
         serde_json::json!({
-            "registry_version": 8,
+            "registry_version": 9,
             "instance_id": "456:/repos/wisp",
             "pid": 456,
             "server_url": unmanaged.url(),
@@ -583,6 +728,7 @@ fn plugin_registration_is_versioned_atomic_updatable_and_removable() {
         pid: 123,
         pane_id: Some("42".into()),
         session_id: None,
+        session_title: None,
         session_activity: None,
         session_waiting: Default::default(),
         session_error: None,
@@ -590,19 +736,21 @@ fn plugin_registration_is_versioned_atomic_updatable_and_removable() {
 
     let path = register_instance(registry.path(), &registration).unwrap();
     let first: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(first["registry_version"], 8);
+    assert_eq!(first["registry_version"], 9);
     assert_eq!(first["instance_id"], "123:/repos/wisp/packages/cli");
     assert_eq!(first["pane_id"], "42");
     assert_eq!(first["session_id"], serde_json::Value::Null);
 
     let mut updated = registration;
     updated.session_id = Some("ses_123".into());
+    updated.session_title = Some("[wisp] Fix status links".into());
     updated.session_activity = Some(SessionActivity::Running);
     updated.session_waiting.permissions = 2;
     updated.session_error = Some("provider failed".into());
     assert_eq!(register_instance(registry.path(), &updated).unwrap(), path);
     let second: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(second["session_id"], "ses_123");
+    assert_eq!(second["session_title"], "[wisp] Fix status links");
     assert_eq!(second["session_activity"], "running");
     assert_eq!(second["session_waiting"]["permissions"], 2);
     assert_eq!(second["session_error"], "provider failed");
@@ -623,6 +771,7 @@ fn plugin_registration_rejects_non_loopback_servers() {
             pid: 123,
             pane_id: None,
             session_id: None,
+            session_title: None,
             session_activity: None,
             session_waiting: Default::default(),
             session_error: None,
@@ -690,6 +839,7 @@ fn live_status_counts_fresh_registered_sessions_by_display_state() {
                 pid,
                 pane_id: Some(pid.to_string()),
                 session_id: Some(session_id.into()),
+                session_title: None,
                 session_activity: Some(session_activity),
                 session_waiting,
                 session_error: session_error.map(str::to_string),
@@ -757,7 +907,7 @@ fn live_status_uses_event_backed_registration_state_without_http() {
         fs::write(
             registry.path().join(format!("{pid}.json")),
             serde_json::json!({
-                "registry_version": 8,
+                "registry_version": 9,
                 "instance_id": format!("{pid}:/repos/wisp"),
                 "pid": pid,
                 "server_url": server_url,
@@ -799,6 +949,7 @@ fn live_status_does_not_poll_an_in_process_server_url() {
             pid: 1,
             pane_id: None,
             session_id: Some("ses_unreachable".into()),
+            session_title: None,
             session_activity: Some(SessionActivity::Running),
             session_waiting: Default::default(),
             session_error: None,
@@ -824,6 +975,7 @@ fn live_status_counts_a_launch_before_opencode_exposes_its_session() {
             pid: 1,
             pane_id: Some("42".into()),
             session_id: None,
+            session_title: None,
             session_activity: None,
             session_waiting: Default::default(),
             session_error: None,
@@ -852,7 +1004,7 @@ fn shared_server_watcher_reports_relevant_sse_events() {
     let registry = TempDir::new().unwrap();
     let client = OpenCodeClient::with_registry_dir(config(&server), registry.path().to_path_buf());
 
-    let watcher = client.watch_shared();
+    let watcher = client.watch_shared().unwrap();
 
     assert!(watcher.changed_timeout(Duration::from_secs(2)));
     assert!(
@@ -879,7 +1031,7 @@ fn shared_server_error_events_are_reflected_in_the_next_snapshot() {
     let server = FakeServer::new(server_routes);
     let registry = TempDir::new().unwrap();
     let client = OpenCodeClient::with_registry_dir(config(&server), registry.path().to_path_buf());
-    let watcher = client.watch_shared();
+    let watcher = client.watch_shared().unwrap();
     assert!(watcher.changed_timeout(Duration::from_secs(2)));
 
     let snapshot = client.snapshot(Path::new("/repos/wisp")).unwrap();
@@ -911,7 +1063,7 @@ fn a_later_running_event_clears_a_retained_session_error() {
     let server = FakeServer::new(server_routes);
     let registry = TempDir::new().unwrap();
     let client = OpenCodeClient::with_registry_dir(config(&server), registry.path().to_path_buf());
-    let watcher = client.watch_shared();
+    let watcher = client.watch_shared().unwrap();
     assert!(watcher.changed_timeout(Duration::from_secs(2)));
     thread::sleep(Duration::from_millis(50));
 
@@ -960,7 +1112,7 @@ fn shared_server_watcher_keeps_idle_streams_open_until_an_event_arrives() {
         registry.path().to_path_buf(),
     );
 
-    let watcher = client.watch_shared();
+    let watcher = client.watch_shared().unwrap();
 
     assert!(watcher.changed_timeout(Duration::from_secs(4)));
     drop(watcher);

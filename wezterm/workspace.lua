@@ -236,11 +236,14 @@ function Workspace:close_pane(pane_id)
     tostring(pane_id),
   }
   if not success then
+    local message = stderr ~= "" and stderr or stdout
+    if type(message) == "string" and message:match "no such pane (%d+)" == tostring(pane_id) then
+      return true
+    end
     local inspected, pane = pcall(self.wezterm.mux.get_pane, pane_id)
     if inspected and not pane then
       return true
     end
-    local message = stderr ~= "" and stderr or stdout
     return nil, "wisp could not close pane " .. tostring(pane_id) .. ": " .. tostring(message)
   end
   return true

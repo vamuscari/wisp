@@ -55,6 +55,23 @@ local function status_hyperlinks(status)
   return values
 end
 
+local function foreground_for_text(status, target, occurrence)
+  local foreground
+  local found = 0
+  for _, item in ipairs(status) do
+    if item == "ResetAttributes" then
+      foreground = nil
+    elseif item.Foreground then
+      foreground = item.Foreground.Color
+    elseif item.Text == target then
+      found = found + 1
+      if found == occurrence then
+        return foreground
+      end
+    end
+  end
+end
+
 helper.test("status bar renders compact OpenCode counts before the project name", function()
   local calls = {}
   local wezterm = helper.fake_wezterm {
@@ -100,6 +117,66 @@ helper.test("status bar renders compact OpenCode counts before the project name"
     "#5E0F04",
     "#333F0A",
   }, "default status colors")
+end)
+
+helper.test("Powerline status wraps clickable groups and leaves the right edge flush", function()
+  local wezterm = helper.fake_wezterm {
+    run_child_process = function()
+      return true, "status", ""
+    end,
+    json_parse = function()
+      return valid_status
+    end,
+  }
+  local wisp = helper.load_wezterm_adapter(wezterm)
+  wisp.apply_to_config({}, {
+    powerline = {
+      status = {
+        shape = { left = "<", right = ">" },
+        gap = 2,
+        padding = 0,
+      },
+    },
+  })
+  local window = helper.fake_window "wisp:group/repo"
+
+  wezterm.events["update-status"](window, helper.fake_pane())
+
+  helper.assert_table_equal(status_text(window.right_status), {
+    "<",
+    "OC",
+    "4",
+    "2",
+    "1",
+    "8",
+    ">",
+    "  ",
+    "<",
+    "repo",
+  }, "Powerline status text")
+  helper.assert_equal(foreground_for_text(window.right_status, "<", 1), "#2A5173", "OpenCode left cap")
+  helper.assert_equal(foreground_for_text(window.right_status, ">", 1), "#5E0F04", "OpenCode right cap")
+  helper.assert_equal(foreground_for_text(window.right_status, "  ", 1), nil, "provider gap reset")
+  helper.assert_equal(foreground_for_text(window.right_status, "<", 2), "#333F0A", "directory left cap")
+  helper.assert_table_equal(status_hyperlinks(window.right_status), {
+    "wisp://status/opencode",
+    "EndHyperlink",
+    "wisp://status/directory",
+    "EndHyperlink",
+  }, "Powerline click regions")
+  local first_end
+  local gap
+  local directory_link
+  for index, item in ipairs(window.right_status) do
+    if item == "EndHyperlink" and not first_end then
+      first_end = index
+    elseif type(item) == "table" and item.Text == "  " then
+      gap = index
+    elseif type(item) == "table" and item.Hyperlink == "wisp://status/directory" then
+      directory_link = index
+    end
+  end
+  assert(first_end < gap and gap < directory_link, "provider gap should be outside both click regions")
 end)
 
 helper.test("status bar omits zero waiting and failure counts", function()

@@ -431,7 +431,7 @@ function Picker:poll_result(window, original_pane, owner, result_path, host_cont
   self.wezterm.time.call_after(values.poll_interval_seconds, poll)
 end
 
-function Picker:launch(window, pane, initial_view, surface)
+function Picker:launch(window, pane, initial_view, surface, open_projects_only, session_scope)
   local projects, project_error = self.client:query_projects()
   if not projects then
     self.report_error(window, project_error)
@@ -458,6 +458,14 @@ function Picker:launch(window, pane, initial_view, surface)
     "--initial-view",
     initial_view
   )
+  if open_projects_only then
+    table.insert(picker_args, "--open-projects-only")
+  end
+  if session_scope == "all" then
+    table.insert(picker_args, "--all-sessions")
+  elseif session_scope == "current" then
+    table.insert(picker_args, "--current-project-only")
+  end
   table.insert(picker_args, "--single-pane-behavior")
   table.insert(picker_args, values.single_pane_behavior)
   table.insert(picker_args, "--file-open-target")
@@ -520,11 +528,11 @@ function Picker:launch(window, pane, initial_view, surface)
   self:poll_result(window, pane, owner, result_path, host_context_path)
 end
 
-function Picker:launch_popup(window, pane, initial_view)
+function Picker:launch_popup(window, pane, initial_view, open_projects_only, session_scope)
   if initial_view ~= "projects" and initial_view ~= "windows" and initial_view ~= "sessions" then
     error("wisp has no popup action " .. tostring(initial_view))
   end
-  self:launch(window, pane, initial_view, "popup")
+  self:launch(window, pane, initial_view, "popup", open_projects_only, session_scope)
 end
 
 return Picker

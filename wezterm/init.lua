@@ -22,6 +22,7 @@ local Client = load_module "client"
 local Workspace = load_module "workspace"
 local Popup = load_module "popup"
 local Picker = load_module "picker"
+local Powerline = load_module "powerline"
 local Status = load_module "status"
 local StatusItems = load_module "status_items"
 
@@ -39,13 +40,14 @@ local function safely(callback)
   end
 end
 
-local options = Options.new(deployed_wisp_path)
+local options = Options.new(deployed_wisp_path, wezterm.column_width)
+local powerline = Powerline.new(wezterm)
 local client = Client.new(wezterm, options, WISP_VERSION)
 local workspace = Workspace.new(wezterm, options, client, report_error)
 local popup = Popup.new(wezterm, options, workspace)
 local picker = Picker.new(wezterm, options, client, workspace, popup, report_error)
-local status = Status.new(wezterm, options, client, StatusItems.new(), function(window, pane, action)
-  picker:launch_popup(window, pane, action)
+local status = Status.new(wezterm, options, client, StatusItems.new(), powerline, function(window, pane, action, scope)
+  picker:launch_popup(window, pane, action, false, scope)
 end)
 local wisp = {}
 
@@ -69,6 +71,71 @@ function wisp.opencode_picker_action()
   return wezterm.action_callback(function(window, pane)
     safely(function()
       picker:launch(window, pane, "sessions")
+    end)
+  end)
+end
+
+function wisp.next_opencode_session_action(configured)
+  configured = configured or {}
+  if type(configured) ~= "table" then
+    error "wisp next OpenCode session options must be a table"
+  end
+  for field in pairs(configured) do
+    if field ~= "scope" and field ~= "status" then
+      error("wisp next OpenCode session has an unknown option " .. tostring(field))
+    end
+  end
+  local scope = configured.scope or "all"
+  local status = configured.status or "any"
+  if scope ~= "all" and scope ~= "current" then
+    error "wisp next OpenCode session scope must be all or current"
+  end
+  if
+    status ~= "any"
+    and status ~= "error"
+    and status ~= "permission"
+    and status ~= "finished"
+    and status ~= "running"
+    and status ~= "priority"
+  then
+    error "wisp next OpenCode session status must be any, error, permission, finished, running, or priority"
+  end
+  return wezterm.action_callback(function(window, pane)
+    safely(function()
+      local project_path
+      if scope == "current" then
+        local projects, project_error = client:query_projects()
+        if not projects then
+          report_error(window, project_error)
+          return
+        end
+        local current_workspace = window:mux_window():get_workspace()
+        for _, project in ipairs(projects) do
+          if workspace:workspace_for(project) == current_workspace then
+            project_path = project.path
+            break
+          end
+        end
+        if not project_path then
+          report_error(window, "Current workspace is not a Wisp project")
+          return
+        end
+      end
+      local result, next_error = client:query_next_opencode_session(status, pane:pane_id(), project_path)
+      if not result then
+        report_error(window, next_error)
+        return
+      end
+      if result.status == "cancelled" then
+        window:toast_notification("Wisp", "No matching live OpenCode sessions", nil, 2500)
+        return
+      end
+      local selection = result.selection
+      local activated, activate_error =
+        workspace:activate_opencode_host_item(window, pane, selection.project, selection.host_item_id)
+      if not activated then
+        report_error(window, activate_error)
+      end
     end)
   end)
 end
@@ -140,13 +207,27 @@ end
 function wisp.apply_to_config(config, configured_options)
   options:configure(configured_options or {})
   local values = options:get()
+  powerline:configure(values.powerline)
+  powerline:apply_tab_config(config)
 
   if values.status_bar then
     status:install(safely)
   end
 
-  if values.opencode_tab_colors then
-    status:install_tab_colors()
+  if values.opencode_tab_colors or powerline:get().tabs then
+    status:install_tab_formatter()
+  end
+
+  if values.tab_button_pickers then
+    config.show_new_tab_button_in_tab_bar = true
+    wezterm.on("new-tab-button-click", function(window, pane, button)
+      if button == "Left" or button == "Right" then
+        safely(function()
+          picker:launch_popup(window, pane, button == "Left" and "projects" or "sessions", button == "Left")
+        end)
+        return false
+      end
+    end)
   end
 
   if values.picker_binding then

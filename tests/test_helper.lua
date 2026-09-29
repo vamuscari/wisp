@@ -22,6 +22,16 @@ function helper.fake_wezterm(overrides)
     home_dir = overrides.home_dir or "/Users/test",
     logs = logs,
     action = {},
+    nerdfonts = {
+      pl_left_hard_divider = "\u{e0b0}",
+      pl_right_hard_divider = "\u{e0b2}",
+      ple_backslash_separator = "\u{e0b9}",
+      ple_forwardslash_separator = "\u{e0bb}",
+      ple_left_half_circle_thick = "\u{e0b6}",
+      ple_lower_right_triangle = "\u{e0ba}",
+      ple_right_half_circle_thick = "\u{e0b4}",
+      ple_upper_left_triangle = "\u{e0bc}",
+    },
     mux = overrides.mux or {
       get_workspace_names = function()
         return {}
@@ -75,6 +85,10 @@ function helper.fake_wezterm(overrides)
 
   wezterm.truncate_right = overrides.truncate_right or function(value, width)
     return value:sub(1, width)
+  end
+
+  wezterm.column_width = overrides.column_width or function(value)
+    return utf8.len(value)
   end
 
   wezterm.run_child_process = overrides.run_child_process
