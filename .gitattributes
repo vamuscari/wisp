@@ -1,0 +1,2 @@
+# Git Bash must receive LF shell fixtures even with Windows autocrlf enabled.
+/tests/fixtures/remote-mux/probe.sh text eol=lf

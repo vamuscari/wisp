@@ -59,6 +59,33 @@ jobs:
       - run: node --check opencode/project-title.js
       - run: node --test tests/opencode_plugin_test.mjs
 
+  remote-mux-fixtures:
+    name: Offline remote mux fixtures (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    env:
+      WISP_TEST_SSH_HOST: ""
+      WISP_TEST_TMPDIR: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Select Windows PowerShell for local lifecycle checks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "WISP_TEST_POWERSHELL=$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: node --check tests/fixtures/remote-mux/ssh-probe.mjs
+      - run: node --test tests/remote_mux_profiles_test.mjs tests/remote_mux_support_test.mjs tests/remote_mux_scenarios_test.mjs tests/remote_mux_lifecycle_test.mjs tests/remote_mux_proxy_test.mjs tests/remote_mux_attachment_test.mjs tests/remote_mux_diagnostics_test.mjs tests/remote_mux_ssh_test.mjs
+
   opencode-plugin-windows:
     name: OpenCode plugin process (Windows)
     runs-on: windows-latest
@@ -90,6 +117,14 @@ jobs:
         with:
           luaVersion: "5.4.8"
       - run: lua tests/run.lua
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Execute remote client and target helper Lua without SSH
+        env:
+          WISP_TEST_LUA: lua
+          WISP_TEST_SSH_HOST: ""
+        run: node --test tests/remote_mux_client_test.mjs tests/remote_mux_server_test.mjs tests/remote_mux_observation_test.mjs
 
   format:
     name: StyLua
@@ -110,6 +145,12 @@ jobs:
       WEZTERM_VERSION: 20240127-113634-bbcac864
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: "5.4.8"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build and deploy Wisp
@@ -133,6 +174,31 @@ jobs:
             WISP_DEPLOY_ROOT="$RUNNER_TEMP/wisp" \
             XDG_CONFIG_HOME="$RUNNER_TEMP/config" \
             "./${WEZTERM_ASSET}" --config-file "$PWD/tests/deployed_wezterm_config.lua" ls-fonts --text test >/dev/null
+      - name: Parse remote feasibility examples
+        run: |
+          for config in examples/remote/wezterm-client.lua examples/remote/wezterm-server.lua; do
+            APPIMAGE_EXTRACT_AND_RUN=1 "./${WEZTERM_ASSET}" --config-file "$PWD/$config" ls-fonts --text test >/dev/null
+          done
+      - name: Parse isolated manual handoff configs without connecting
+        run: |
+          export WISP_MANUAL_VERSION=1
+          export WISP_MANUAL_MARKER=aaaaaaaaaaaaaaaaaaaaaaaa
+          export WISP_MANUAL_ROOT="C:/Temp/w-man-$WISP_MANUAL_MARKER"
+          export WISP_MANUAL_LOCAL_ROOT=/manual-parse
+          export WISP_MANUAL_PROXY='{"probe_version":1,"marker":"aaaaaaaaaaaaaaaaaaaaaaaa","remote_root":"C:/Temp/w-man-aaaaaaaaaaaaaaaaaaaaaaaa","args":["/unlaunched/node","/unlaunched/proxy.mjs","/manual-parse/proxy.json"]}'
+          for config in examples/remote/wezterm-manual-client.lua examples/remote/wezterm-manual-server.lua; do
+            APPIMAGE_EXTRACT_AND_RUN=1 "./${WEZTERM_ASSET}" --config-file "$PWD/$config" ls-fonts --text test >/dev/null
+          done
+      - name: Exercise isolated headless mux shells
+        run: |
+          "./${WEZTERM_ASSET}" --appimage-extract >/dev/null
+          export LD_LIBRARY_PATH="$PWD/squashfs-root/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export WISP_TEST_WEZTERM="$PWD/squashfs-root/usr/bin/wezterm"
+          export WISP_TEST_MUX_SERVER="$PWD/squashfs-root/usr/bin/wezterm-mux-server"
+          export WISP_TEST_WEZTERM_VERSION="$WEZTERM_VERSION"
+          export WISP_TEST_POWERSHELL="$(command -v pwsh)"
+          export WISP_TEST_TMPDIR="$RUNNER_TEMP"
+          node --test tests/remote_mux_profiles_test.mjs tests/remote_mux_support_test.mjs tests/remote_mux_scenarios_test.mjs tests/remote_mux_proxy_test.mjs tests/remote_mux_test.mjs tests/remote_mux_attachment_test.mjs tests/remote_mux_server_test.mjs tests/remote_mux_observation_test.mjs tests/remote_mux_diagnostics_test.mjs
 
   neovim:
     name: Minimum Neovim
@@ -167,6 +233,9 @@ jobs:
       WEZTERM_VERSION: 20240127-113634-bbcac864
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build and deploy Wisp
@@ -202,3 +271,36 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "WezTerm get-text command is unavailable" }
           & $wezterm --config-file "$PWD\tests\deployed_wezterm_config.lua" ls-fonts --text test | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "WezTerm configuration parse failed" }
+      - name: Parse remote feasibility examples
+        shell: pwsh
+        run: |
+          $wezterm = (Get-ChildItem wezterm -Recurse -Filter wezterm.exe | Select-Object -First 1).FullName
+          foreach ($config in @("examples/remote/wezterm-client.lua", "examples/remote/wezterm-server.lua")) {
+            & $wezterm --config-file "$PWD/$config" ls-fonts --text test | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Remote example parse failed: $config" }
+          }
+      - name: Parse isolated manual handoff configs without connecting
+        shell: pwsh
+        run: |
+          $wezterm = (Get-ChildItem wezterm -Recurse -Filter wezterm.exe | Select-Object -First 1).FullName
+          $env:WISP_MANUAL_VERSION = "1"
+          $env:WISP_MANUAL_MARKER = "aaaaaaaaaaaaaaaaaaaaaaaa"
+          $env:WISP_MANUAL_ROOT = "C:/Temp/w-man-$env:WISP_MANUAL_MARKER"
+          $env:WISP_MANUAL_LOCAL_ROOT = "/manual-parse"
+          $env:WISP_MANUAL_PROXY = '{"probe_version":1,"marker":"aaaaaaaaaaaaaaaaaaaaaaaa","remote_root":"C:/Temp/w-man-aaaaaaaaaaaaaaaaaaaaaaaa","args":["/unlaunched/node","/unlaunched/proxy.mjs","/manual-parse/proxy.json"]}'
+          foreach ($config in @("examples/remote/wezterm-manual-client.lua", "examples/remote/wezterm-manual-server.lua")) {
+            & $wezterm --config-file "$PWD/$config" ls-fonts --text test | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Manual example parse failed: $config" }
+          }
+      - name: Exercise isolated headless mux shells
+        shell: pwsh
+        run: |
+          $env:WISP_TEST_WEZTERM = (Get-ChildItem wezterm -Recurse -Filter wezterm.exe | Select-Object -First 1).FullName
+          $env:WISP_TEST_MUX_SERVER = (Get-ChildItem wezterm -Recurse -Filter wezterm-mux-server.exe | Select-Object -First 1).FullName
+          $env:WISP_TEST_WEZTERM_VERSION = $env:WEZTERM_VERSION
+          $env:WISP_TEST_POWERSHELL = (Get-Command pwsh.exe).Source
+          $env:WISP_TEST_WINDOWS_POWERSHELL = "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe"
+          $env:WISP_TEST_GIT_BASH = "$env:ProgramFiles/Git/bin/bash.exe"
+          $env:WISP_TEST_TMPDIR = $env:RUNNER_TEMP
+          node --test tests/remote_mux_profiles_test.mjs tests/remote_mux_support_test.mjs tests/remote_mux_test.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Headless mux shell checks failed" }

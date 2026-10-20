@@ -12,6 +12,7 @@ local tests = {
   "tests/workspace_action_test.lua",
   "tests/tab_split_test.lua",
   "tests/wezterm_example_test.lua",
+  "tests/remote_wezterm_example_test.lua",
   "tests/nvim_adapter_test.lua",
 }
 
