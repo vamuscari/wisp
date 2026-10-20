@@ -71,7 +71,6 @@ jobs:
           - windows-latest
     env:
       WISP_TEST_SSH_HOST: ""
-      WISP_TEST_TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -85,6 +84,8 @@ jobs:
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - run: node --check tests/fixtures/remote-mux/ssh-probe.mjs
       - run: node --test tests/remote_mux_profiles_test.mjs tests/remote_mux_support_test.mjs tests/remote_mux_scenarios_test.mjs tests/remote_mux_lifecycle_test.mjs tests/remote_mux_proxy_test.mjs tests/remote_mux_attachment_test.mjs tests/remote_mux_diagnostics_test.mjs tests/remote_mux_ssh_test.mjs
+        env:
+          WISP_TEST_TMPDIR: ${{ runner.temp }}
 
   opencode-plugin-windows:
     name: OpenCode plugin process (Windows)
